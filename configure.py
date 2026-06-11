@@ -140,7 +140,7 @@ def main() -> None:
     cfg = {}
 
     # ---- 1. Bot Token ----
-    print("【1/7】Telegram Bot Token（找 @BotFather 发 /newbot 获取）")
+    print("【1/8】Telegram Bot Token（找 @BotFather 发 /newbot 获取）")
     while True:
         token = ask("Bot Token", default=old.get("TELEGRAM_BOT_TOKEN", ""), required=True,
                     validate=validate_token, secret=True)
@@ -161,18 +161,18 @@ def main() -> None:
     print()
 
     # ---- 2. 管理员 ----
-    print("【2/7】超级管理员用户 ID（强烈建议填写自己的 ID，可用 @userinfobot 查询）")
+    print("【2/8】超级管理员用户 ID（强烈建议填写自己的 ID，可用 @userinfobot 查询）")
     print("      配置后进入受控模式：仅管理员 + 白名单用户可用，可用 /adduser /deluser 管理")
     cfg["ADMIN_USER_IDS"] = ask("管理员 ID（多个用逗号分隔）", default=old.get("ADMIN_USER_IDS", ""), validate=validate_ids)
     print()
 
     # ---- 3. 白名单初始值 ----
-    print("【3/7】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）")
+    print("【3/8】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）")
     cfg["ALLOWED_USER_IDS"] = ask("白名单 ID（多个用逗号分隔）", default=old.get("ALLOWED_USER_IDS", ""), validate=validate_ids)
     print()
 
     # ---- 4. LLM 接口 ----
-    print("【4/7】本地 LLM 的 OpenAI 兼容接口")
+    print("【4/8】本地 LLM 的 OpenAI 兼容接口")
     print("      LM Studio 默认 http://localhost:1234/v1，vLLM 默认 http://localhost:8000/v1")
     base_url = ask("接口地址", default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
     cfg["LLM_BASE_URL"] = base_url
@@ -180,7 +180,7 @@ def main() -> None:
     print()
 
     # ---- 5. 模型 ----
-    print("【5/7】模型名称")
+    print("【5/8】模型名称")
     model = ""
     if can_check:
         try:
@@ -199,14 +199,21 @@ def main() -> None:
     cfg["LLM_MODEL"] = model
     print()
 
-    # ---- 6. 生成参数 ----
-    print("【6/7】生成参数")
+    # ---- 6. 多模态 ----
+    print("【6/8】图片理解（多模态）")
+    print("      模型支持视觉输入时开启：群友发图或回复图片提问，图片会发给模型一起分析")
+    vision_default = old.get("ENABLE_VISION", "false").lower() == "true"
+    cfg["ENABLE_VISION"] = "true" if confirm("  开启图片理解？", default_yes=vision_default) else "false"
+    print()
+
+    # ---- 7. 生成参数 ----
+    print("【7/8】生成参数")
     cfg["MAX_TOKENS"] = ask("单次回答最大 token 数", default=old.get("MAX_TOKENS", "1024"), validate=validate_int)
     cfg["MAX_HISTORY"] = ask("多轮对话保留消息条数", default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     print()
 
-    # ---- 7. 系统提示词 ----
-    print("【7/7】系统提示词（定义 bot 的角色和语气，跳过则使用内置中文默认值）")
+    # ---- 8. 系统提示词 ----
+    print("【8/8】系统提示词（定义 bot 的角色和语气，跳过则使用内置中文默认值）")
     cfg["SYSTEM_PROMPT"] = ask("系统提示词", default=old.get("SYSTEM_PROMPT", ""))
     print()
 

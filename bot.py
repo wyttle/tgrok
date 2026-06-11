@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from telegram import Message, Update
 from telegram.constants import ChatAction, MessageEntityType, ParseMode
 from telegram.error import BadRequest
@@ -36,6 +37,10 @@ LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
+# 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型
+ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")
+MAX_IMAGES = 4  # 单次请求最多附带的图片数
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 # 逗号分隔的超级管理员用户 ID，可随时用 /adduser /deluser 管理白名单
 ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace("，", ",").split(",") if x.strip()}
 # 逗号分隔的用户 ID 白名单（仅作为首次启动的初始值，之后以 allowed_users.json 为准）
@@ -163,12 +168,58 @@ async def keep_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
             continue
 
 
+async def image_data_urls(bot, *messages: Message | None) -> list[str]:
+    """提取消息中的图片（压缩照片或图片文件），转为 base64 data URL。"""
+    urls = []
+    for m in messages:
+        if m is None:
+            continue
+        file_id, mime = None, "image/jpeg"
+        if m.photo:
+            file_id = m.photo[-1].file_id  # 最大尺寸的一张
+        elif m.document and (m.document.mime_type or "").startswith("image/"):
+            if m.document.file_size and m.document.file_size > MAX_IMAGE_BYTES:
+                continue
+            file_id, mime = m.document.file_id, m.document.mime_type
+        if file_id is None:
+            continue
+        try:
+            file = await bot.get_file(file_id)
+            data = bytes(await file.download_as_bytearray())
+        except Exception:
+            logger.exception("下载图片失败 file_id=%s", file_id)
+            continue
+        urls.append(f"data:{mime};base64," + base64.b64encode(data).decode())
+        if len(urls) >= MAX_IMAGES:
+            break
+    return urls
+
+
+def build_content(text: str, images: list[str]):
+    """无图时为纯文本，有图时为 OpenAI 多模态 content 数组。"""
+    if not images:
+        return text
+    return [{"type": "text", "text": text}] + [
+        {"type": "image_url", "image_url": {"url": u}} for u in images
+    ]
+
+
 async def ask_llm(history: list[dict]) -> str:
-    response = await llm.chat.completions.create(
-        model=LLM_MODEL,
-        messages=history,
-        max_tokens=MAX_TOKENS,
-    )
+    try:
+        response = await llm.chat.completions.create(
+            model=LLM_MODEL,
+            messages=history,
+            max_tokens=MAX_TOKENS,
+        )
+    except BadRequestError as e:
+        # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
+        if "max_completion_tokens" not in str(e):
+            raise
+        response = await llm.chat.completions.create(
+            model=LLM_MODEL,
+            messages=history,
+            max_completion_tokens=MAX_TOKENS,
+        )
     return (response.choices[0].message.content or "").strip()
 
 
@@ -214,13 +265,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "assistant", "content": replied.text or replied.caption or ""},
             ]
-        if not question:
+        images = await image_data_urls(bot, msg) if ENABLE_VISION else []
+        if not question and not images:
             return
-        history = history + [{"role": "user", "content": question}]
+        history = history + [{"role": "user", "content": build_content(question or "请看这张图片。", images)}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
-        context_text = None if is_reply_to_bot else quoted_context(msg)
-        if not question and not context_text:
+        quoted = None if is_reply_to_bot else replied
+        context_text = quoted_context(msg) if quoted else None
+        images = await image_data_urls(bot, msg, quoted) if ENABLE_VISION else []
+        if not question and not context_text and not images:
             await msg.reply_text("请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～")
             return
         user_content = question or "请评论/核实这条消息。"
@@ -228,7 +282,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_content = f"{context_text}\n\n{msg.from_user.full_name} 的提问：{user_content}"
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": build_content(user_content, images)},
         ]
 
     history = trim_history(history)
@@ -340,7 +394,12 @@ def main() -> None:
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("deluser", cmd_deluser))
     app.add_handler(CommandHandler("listusers", cmd_listusers))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND,
+            handle_message,
+        )
+    )
     logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

@@ -62,6 +62,7 @@ python bot.py
 | `SYSTEM_PROMPT` | 系统提示词 | 内置中文默认值 |
 | `MAX_TOKENS` | 单次回答最大 token 数 | `1024` |
 | `MAX_HISTORY` | 多轮对话保留的消息条数 | `20` |
+| `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
 | `ADMIN_USER_IDS` | 超级管理员 ID（逗号分隔），可用命令管理白名单 | （空） |
 | `ALLOWED_USER_IDS` | 白名单初始值，仅首次启动生效 | （空） |
 
@@ -132,6 +133,20 @@ journalctl -u tgbot -f
 ### Windows 本机长期运行
 
 最简单的方式是注册一个计划任务（开机自启 + 失败重启），或直接用 Docker Desktop 跑上面的 compose。
+
+## 接入云端 API / 多模态
+
+`LLM_BASE_URL` 可以指向任何 OpenAI 兼容服务，不限于本地模型。例如接入 OpenAI 官方 API：
+重跑 `python configure.py`，接口地址填 `https://api.openai.com/v1`，API Key 填官方 key，
+模型名填如 `gpt-5.5` 等（bot 已兼容官方新模型的 `max_completion_tokens` 参数要求）。
+
+模型支持视觉输入时，把 `ENABLE_VISION` 设为 `true`（配置向导第 6 步），即可：
+
+- 回复一张图片并 @bot 提问：「这是什么？」「图里说的是真的吗？」
+- 直接发图配文字 @bot
+- 单次最多附带 4 张图，过大的图片文件（>10MB）会被跳过
+
+注意：开启后图片会发送给你配置的 LLM 服务；若用的是云端 API，意味着群内图片会离开你的服务器。
 
 ## 常见问题
 

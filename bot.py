@@ -18,9 +18,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
-from telegram import Message, Update
+from telegram import BotCommand, Message, Update
 from telegram.constants import ChatAction, MessageEntityType, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -132,7 +132,7 @@ def extract_question(msg: Message, bot_username: str) -> str:
 
 def is_mentioned(msg: Message, bot_username: str, bot_id: int) -> bool:
     text = msg.text or msg.caption or ""
-    entities = (msg.entities or []) + (msg.caption_entities or [])
+    entities = list(msg.entities or ()) + list(msg.caption_entities or ())
     for ent in entities:
         if ent.type == MessageEntityType.MENTION:
             mentioned = text[ent.offset : ent.offset + ent.length]
@@ -387,8 +387,27 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("处理更新时发生未捕获异常", exc_info=context.error)
 
 
+async def post_init(app: Application) -> None:
+    """启动时向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊可见管理命令。"""
+    from telegram import BotCommandScopeChat
+
+    base = [BotCommand("help", "使用说明")]
+    admin_cmds = base + [
+        BotCommand("adduser", "添加白名单用户（ID 或回复某人消息）"),
+        BotCommand("deluser", "移除白名单用户"),
+        BotCommand("listusers", "查看白名单"),
+    ]
+    await app.bot.set_my_commands(base)
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await app.bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
+        except TelegramError as e:
+            # 管理员还没和 bot 私聊过时会 chat not found，对方先发个 /start 后重启即可
+            logger.warning("为管理员 %s 注册命令菜单失败：%s", admin_id, e)
+
+
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("adduser", cmd_adduser))

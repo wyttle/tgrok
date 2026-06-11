@@ -6,10 +6,9 @@ services:
     environment:
       # 白名单持久化到挂载的 data 目录，容器重建不丢失
       - WHITELIST_FILE=/data/allowed_users.json
-      # 如果 LLM 服务（LM Studio/vLLM）跑在宿主机上，用 host.docker.internal 访问；
-      # 如果 LLM 在其他机器上，注释掉这行，改在 .env 里配置 LLM_BASE_URL
-      - LLM_BASE_URL=http://host.docker.internal:1234/v1
     extra_hosts:
+      # 容器内访问宿主机服务时，用 http://host.docker.internal:端口
+      # （.env 里 LLM_BASE_URL 写 localhost 在容器内是不通的）
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data

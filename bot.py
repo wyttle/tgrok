@@ -47,12 +47,94 @@ ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace("，",
 ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace("，", ",").split(",") if x.strip()}
 
 WHITELIST_FILE = Path(os.getenv("WHITELIST_FILE", str(Path(__file__).with_name("allowed_users.json"))))
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    "你是一个 Telegram 群聊里的 AI 助手。群友会引用一条消息并向你提问"
-    "（例如「这是真的吗？」），请结合被引用的内容直接、简洁地回答。"
-    "用提问者使用的语言回复。不确定的事情要明确说明，不要编造。",
-)
+BOT_LANG = os.getenv("BOT_LANG", "zh").strip().lower()
+if BOT_LANG not in ("zh", "en"):
+    BOT_LANG = "zh"
+
+STRINGS = {
+    "zh": {
+        "system_prompt": (
+            "你是一个 Telegram 群聊里的 AI 助手。群友会引用一条消息并向你提问"
+            "（例如「这是真的吗？」），请结合被引用的内容直接、简洁地回答。"
+            "用提问者使用的语言回复。不确定的事情要明确说明，不要编造。"
+        ),
+        "someone": "某人",
+        "quoted_msg": "以下是群里 {author} 发的一条消息：\n「{content}」",
+        "question_from": "{name} 的提问：{question}",
+        "comment_default": "请评论/核实这条消息。",
+        "look_image": "请看这张图片。",
+        "empty_reply": "（模型返回了空回复）",
+        "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
+        "llm_failed": "⚠️ 调用模型失败，请检查 {url} 服务是否可用。",
+        "start": (
+            "你好！把我拉进群后这样用：\n"
+            "1️⃣ 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
+            "2️⃣ 直接 @ 我提问任何问题\n"
+            "3️⃣ 回复我的消息可以继续追问\n"
+            "私聊里直接发消息即可。\n\n"
+            "你的用户 ID：{user_id}"
+        ),
+        "admin_usage": "用法：/adduser <用户ID>（可多个，空格分隔），或在群里回复某人的消息后发送该命令",
+        "invalid_id": "「{arg}」不是有效的用户 ID",
+        "added": "✅ 已添加：{ids}\n当前白名单共 {n} 人",
+        "removed": "✅ 已移除：{ids}\n当前白名单共 {n} 人",
+        "no_match": "（无匹配，名单未变化）",
+        "admins": "管理员：{ids}",
+        "not_configured": "（未配置）",
+        "whitelist": "白名单（{n} 人）：\n{ids}",
+        "whitelist_empty_controlled": "白名单为空（受控模式：仅管理员可用）",
+        "whitelist_empty_open": "白名单为空（开放模式：所有人可用）",
+        "cmd_help": "使用说明",
+        "cmd_adduser": "添加白名单用户（ID 或回复某人消息）",
+        "cmd_deluser": "移除白名单用户",
+        "cmd_listusers": "查看白名单",
+    },
+    "en": {
+        "system_prompt": (
+            "You are an AI assistant in a Telegram group chat. Members will quote a message "
+            "and ask you about it (e.g. \"is this true?\"). Answer directly and concisely "
+            "based on the quoted content. Reply in the language the asker uses. "
+            "Be explicit about uncertainty and never make things up."
+        ),
+        "someone": "someone",
+        "quoted_msg": "Here is a message {author} sent in the group:\n\"{content}\"",
+        "question_from": "{name} asks: {question}",
+        "comment_default": "Please comment on / fact-check this message.",
+        "look_image": "Please look at this image.",
+        "empty_reply": "(the model returned an empty response)",
+        "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
+        "llm_failed": "⚠️ Failed to call the model. Please check that {url} is reachable.",
+        "start": (
+            "Hi! Add me to a group and use me like this:\n"
+            "1️⃣ Reply to any message and mention me with a question, e.g. \"@{username} is this true?\"\n"
+            "2️⃣ Mention me directly with any question\n"
+            "3️⃣ Reply to my messages to follow up\n"
+            "In private chat, just send a message.\n\n"
+            "Your user ID: {user_id}"
+        ),
+        "admin_usage": "Usage: /adduser <user ID> (multiple IDs separated by spaces), or reply to someone's message with this command",
+        "invalid_id": "\"{arg}\" is not a valid user ID",
+        "added": "✅ Added: {ids}\nWhitelist now has {n} user(s)",
+        "removed": "✅ Removed: {ids}\nWhitelist now has {n} user(s)",
+        "no_match": "(no match, list unchanged)",
+        "admins": "Admins: {ids}",
+        "not_configured": "(not configured)",
+        "whitelist": "Whitelist ({n} user(s)):\n{ids}",
+        "whitelist_empty_controlled": "Whitelist is empty (controlled mode: admins only)",
+        "whitelist_empty_open": "Whitelist is empty (open mode: everyone can use)",
+        "cmd_help": "How to use",
+        "cmd_adduser": "Add user to whitelist (ID or reply to a message)",
+        "cmd_deluser": "Remove user from whitelist",
+        "cmd_listusers": "Show whitelist",
+    },
+}
+
+
+def t(key: str, **kwargs) -> str:
+    return STRINGS[BOT_LANG][key].format(**kwargs)
+
+
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
 
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
@@ -151,8 +233,8 @@ def quoted_context(msg: Message) -> str | None:
     content = replied.text or replied.caption
     if not content:
         return None
-    author = replied.from_user.full_name if replied.from_user else "某人"
-    return f"以下是群里 {author} 发的一条消息：\n「{content}」"
+    author = replied.from_user.full_name if replied.from_user else t("someone")
+    return t("quoted_msg", author=author, content=content)
 
 
 async def keep_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
@@ -225,7 +307,7 @@ async def ask_llm(history: list[dict]) -> str:
 
 async def send_reply(msg: Message, text: str) -> Message:
     """回复消息，处理超长拆分与 Markdown 解析失败的回退。返回最后一条已发送消息。"""
-    chunks = [text[i : i + TG_MESSAGE_LIMIT] for i in range(0, len(text), TG_MESSAGE_LIMIT)] or ["（模型返回了空回复）"]
+    chunks = [text[i : i + TG_MESSAGE_LIMIT] for i in range(0, len(text), TG_MESSAGE_LIMIT)] or [t("empty_reply")]
     sent = None
     for chunk in chunks:
         try:
@@ -268,18 +350,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         images = await image_data_urls(bot, msg) if ENABLE_VISION else []
         if not question and not images:
             return
-        history = history + [{"role": "user", "content": build_content(question or "请看这张图片。", images)}]
+        history = history + [{"role": "user", "content": build_content(question or t("look_image"), images)}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
         quoted = None if is_reply_to_bot else replied
         context_text = quoted_context(msg) if quoted else None
         images = await image_data_urls(bot, msg, quoted) if ENABLE_VISION else []
         if not question and not context_text and not images:
-            await msg.reply_text("请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～")
+            await msg.reply_text(t("nudge"))
             return
-        user_content = question or "请评论/核实这条消息。"
+        user_content = question or t("comment_default")
         if context_text:
-            user_content = f"{context_text}\n\n{msg.from_user.full_name} 的提问：{user_content}"
+            user_content = context_text + "\n\n" + t("question_from", name=msg.from_user.full_name, question=user_content)
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_content(user_content, images)},
@@ -295,13 +377,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("调用本地 LLM 失败")
         stop.set()
         await typing_task
-        await msg.reply_text(f"⚠️ 调用本地模型失败，请检查 {LLM_BASE_URL} 服务是否在运行。")
+        await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
         return
     finally:
         stop.set()
     await typing_task
 
-    sent = await send_reply(msg, answer or "（模型返回了空回复）")
+    sent = await send_reply(msg, answer or t("empty_reply"))
     if sent:
         remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
 
@@ -311,12 +393,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None or not is_authorized(user.id):
         return
     await update.effective_message.reply_text(
-        "你好！把我拉进群后这样用：\n"
-        "1️⃣ 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
-        "2️⃣ 直接 @ 我提问任何问题\n"
-        "3️⃣ 回复我的消息可以继续追问\n"
-        "私聊里直接发消息即可。\n\n"
-        "你的用户 ID：{user_id}".format(username=context.bot.username, user_id=user.id)
+        t("start", username=context.bot.username, user_id=user.id)
     )
 
 
@@ -327,13 +404,13 @@ def _target_user_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tupl
         try:
             ids.add(int(arg.strip().rstrip(",，")))
         except ValueError:
-            return set(), f"「{arg}」不是有效的用户 ID"
+            return set(), t("invalid_id", arg=arg)
     if not ids:
         replied = update.effective_message.reply_to_message
         if replied and replied.from_user:
             ids.add(replied.from_user.id)
     if not ids:
-        return set(), "用法：/adduser <用户ID>（可多个，空格分隔），或在群里回复某人的消息后发送该命令"
+        return set(), t("admin_usage")
     return ids, None
 
 
@@ -348,7 +425,7 @@ async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     allowed_users.update(ids)
     save_allowed_users()
     await update.effective_message.reply_text(
-        "✅ 已添加：{ids}\n当前白名单共 {n} 人".format(ids=", ".join(map(str, sorted(ids))), n=len(allowed_users))
+        t("added", ids=", ".join(map(str, sorted(ids))), n=len(allowed_users))
     )
 
 
@@ -364,10 +441,9 @@ async def cmd_deluser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     allowed_users.difference_update(ids)
     save_allowed_users()
     await update.effective_message.reply_text(
-        "✅ 已移除：{ids}\n当前白名单共 {n} 人".format(
-            ids=", ".join(map(str, sorted(removed))) if removed else "（无匹配，名单未变化）",
-            n=len(allowed_users),
-        )
+        t("removed",
+          ids=", ".join(map(str, sorted(removed))) if removed else t("no_match"),
+          n=len(allowed_users))
     )
 
 
@@ -375,11 +451,11 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     if user is None or not is_admin(user.id):
         return
-    lines = [f"管理员：{', '.join(map(str, sorted(ADMIN_USER_IDS))) or '（未配置）'}"]
+    lines = [t("admins", ids=", ".join(map(str, sorted(ADMIN_USER_IDS))) or t("not_configured"))]
     if allowed_users:
-        lines.append("白名单（{n} 人）：\n{ids}".format(n=len(allowed_users), ids="\n".join(map(str, sorted(allowed_users)))))
+        lines.append(t("whitelist", n=len(allowed_users), ids="\n".join(map(str, sorted(allowed_users)))))
     else:
-        lines.append("白名单为空" + ("（受控模式：仅管理员可用）" if ADMIN_USER_IDS else "（开放模式：所有人可用）"))
+        lines.append(t("whitelist_empty_controlled") if ADMIN_USER_IDS else t("whitelist_empty_open"))
     await update.effective_message.reply_text("\n".join(lines))
 
 
@@ -391,11 +467,11 @@ async def post_init(app: Application) -> None:
     """启动时向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊可见管理命令。"""
     from telegram import BotCommandScopeChat
 
-    base = [BotCommand("help", "使用说明")]
+    base = [BotCommand("help", t("cmd_help"))]
     admin_cmds = base + [
-        BotCommand("adduser", "添加白名单用户（ID 或回复某人消息）"),
-        BotCommand("deluser", "移除白名单用户"),
-        BotCommand("listusers", "查看白名单"),
+        BotCommand("adduser", t("cmd_adduser")),
+        BotCommand("deluser", t("cmd_deluser")),
+        BotCommand("listusers", t("cmd_listusers")),
     ]
     await app.bot.set_my_commands(base)
     for admin_id in ADMIN_USER_IDS:

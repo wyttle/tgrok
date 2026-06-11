@@ -54,6 +54,7 @@ TEXT = {
         "s4b": "      LM Studio 默认 http://localhost:1234/v1，vLLM 默认 http://localhost:8000/v1，OpenAI 官方 https://api.openai.com/v1",
         "base_url": "接口地址",
         "api_key": "API Key（本地服务一般随便填）",
+        "ua": "自定义 User-Agent（部分云端网关会校验 UA，可选）",
         "s5": "【5/8】模型名称",
         "models_fail": "  ⚠ 无法连接 {url} 获取模型列表（{err}），请手动输入",
         "models_found": "  ✓ 检测到以下可用模型：",
@@ -102,6 +103,7 @@ TEXT = {
         "s4b": "      LM Studio default http://localhost:1234/v1, vLLM http://localhost:8000/v1, official OpenAI https://api.openai.com/v1",
         "base_url": "Endpoint URL",
         "api_key": "API key (anything works for most local servers)",
+        "ua": "Custom User-Agent (some cloud gateways validate it; optional)",
         "s5": "[5/8] Model name",
         "models_fail": "  ⚠ Could not fetch model list from {url} ({err}); please type it manually",
         "models_found": "  ✓ Available models detected:",
@@ -202,10 +204,13 @@ def check_telegram_token(token: str) -> str | None:
     return None
 
 
-def list_models(base_url: str, api_key: str) -> list[str]:
+def list_models(base_url: str, api_key: str, user_agent: str = "") -> list[str]:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if user_agent:
+        headers["User-Agent"] = user_agent
     resp = httpx.get(
         base_url.rstrip("/") + "/models",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=headers,
         timeout=10,
     )
     resp.raise_for_status()
@@ -294,6 +299,7 @@ def main() -> None:
     base_url = ask(T["base_url"], default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
     cfg["LLM_BASE_URL"] = base_url
     cfg["LLM_API_KEY"] = ask(T["api_key"], default=old.get("LLM_API_KEY", "not-needed"))
+    cfg["LLM_USER_AGENT"] = ask(T["ua"], default=old.get("LLM_USER_AGENT", ""))
     print()
 
     # ---- 5. Model ----
@@ -301,7 +307,7 @@ def main() -> None:
     model = ""
     if can_check:
         try:
-            models = list_models(base_url, cfg["LLM_API_KEY"])
+            models = list_models(base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"])
         except Exception as e:
             models = []
             print(T["models_fail"].format(url=base_url, err=type(e).__name__))

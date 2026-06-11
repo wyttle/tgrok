@@ -35,6 +35,8 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
+# 自定义请求的 User-Agent（部分云端网关会校验 UA），留空使用 SDK 默认值
+LLM_USER_AGENT = os.getenv("LLM_USER_AGENT", "").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 # 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型
@@ -146,7 +148,11 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-llm = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+llm = AsyncOpenAI(
+    base_url=LLM_BASE_URL,
+    api_key=LLM_API_KEY,
+    default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
+)
 
 
 def load_allowed_users() -> set[int]:

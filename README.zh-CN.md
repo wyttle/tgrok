@@ -65,6 +65,7 @@ python bot.py
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `http://localhost:1234/v1` |
 | `LLM_MODEL` | 模型名称 | `local-model` |
 | `LLM_API_KEY` | 本地服务一般随便填 | `not-needed` |
+| `LLM_USER_AGENT` | 自定义请求 UA（部分云端网关会校验） | SDK 默认值 |
 | `SYSTEM_PROMPT` | 系统提示词 | 内置默认值 |
 | `MAX_TOKENS` | 单次回答最大 token 数 | `1024` |
 | `MAX_HISTORY` | 多轮对话保留的消息条数 | `20` |

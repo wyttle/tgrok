@@ -67,6 +67,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_BASE_URL` | OpenAI-compatible endpoint | `http://localhost:1234/v1` |
 | `LLM_MODEL` | model name | `local-model` |
 | `LLM_API_KEY` | anything works for most local servers | `not-needed` |
+| `LLM_USER_AGENT` | custom User-Agent (some cloud gateways validate it) | SDK default |
 | `SYSTEM_PROMPT` | system prompt | built-in default |
 | `MAX_TOKENS` | max tokens per reply | `1024` |
 | `MAX_HISTORY` | messages kept per conversation | `20` |

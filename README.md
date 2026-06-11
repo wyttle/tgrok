@@ -39,9 +39,11 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 
-# 配置
-copy .env.example .env        # Windows（Linux/macOS 用 cp）
-# 编辑 .env，填入 TELEGRAM_BOT_TOKEN、LLM_BASE_URL、LLM_MODEL
+# 交互式配置向导：逐项询问并生成 .env
+# 会在线验证 Token 有效性、自动列出本地 LLM 的可用模型供选择
+python configure.py
+
+# （也可以手动配置：复制 .env.example 为 .env 后编辑）
 
 # 运行
 python bot.py

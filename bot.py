@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import os
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
 from telegram import BotCommand, Message, Update
 from telegram.constants import ChatAction, MessageEntityType, ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -140,6 +141,9 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
 
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
+STREAM_EDIT_INTERVAL = 1.5  # 流式输出时编辑消息的最小间隔（秒），避免触发 Telegram 限流
+STREAM_SEGMENT_LIMIT = 3800  # 单条消息承载的流式文本上限，超过则另起一条（留出余量）
+STREAM_CURSOR = " ▌"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -292,35 +296,83 @@ def build_content(text: str, images: list[str]):
     ]
 
 
-async def ask_llm(history: list[dict]) -> str:
+async def create_stream(history: list[dict]):
     try:
-        response = await llm.chat.completions.create(
+        return await llm.chat.completions.create(
             model=LLM_MODEL,
             messages=history,
             max_tokens=MAX_TOKENS,
+            stream=True,
         )
     except BadRequestError as e:
         # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
         if "max_completion_tokens" not in str(e):
             raise
-        response = await llm.chat.completions.create(
+        return await llm.chat.completions.create(
             model=LLM_MODEL,
             messages=history,
             max_completion_tokens=MAX_TOKENS,
+            stream=True,
         )
-    return (response.choices[0].message.content or "").strip()
 
 
-async def send_reply(msg: Message, text: str) -> Message:
-    """回复消息，处理超长拆分与 Markdown 解析失败的回退。返回最后一条已发送消息。"""
-    chunks = [text[i : i + TG_MESSAGE_LIMIT] for i in range(0, len(text), TG_MESSAGE_LIMIT)] or [t("empty_reply")]
-    sent = None
-    for chunk in chunks:
+async def stream_reply(msg: Message, history: list[dict], first_sent: asyncio.Event) -> tuple[Message | None, str]:
+    """流式生成并逐步编辑 Telegram 消息。
+
+    单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
+    返回（最后一条已发送消息或 None, 完整回复文本）。
+    """
+    stream = await create_stream(history)
+    finalized = ""  # 已定稿消息承载的文本
+    segment = ""  # 当前消息正在累积的文本
+    sent: Message | None = None
+    last_edit = 0.0
+
+    async def push(text: str, final: bool) -> None:
+        nonlocal sent
+        body = text if final else text + STREAM_CURSOR
         try:
-            sent = await msg.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+            if sent is None:
+                sent = await msg.reply_text(body)
+                first_sent.set()
+            elif final:
+                try:
+                    await sent.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+                except BadRequest:
+                    await sent.edit_text(text)
+            else:
+                await sent.edit_text(body)
+        except RetryAfter as e:
+            # Telegram 限流：等待后跳过本次中间编辑；定稿编辑重试一次
+            await asyncio.sleep(float(e.retry_after) + 0.5)
+            if final and sent is not None:
+                try:
+                    await sent.edit_text(text)
+                except TelegramError:
+                    pass
         except BadRequest:
-            sent = await msg.reply_text(chunk)
-    return sent
+            pass  # 例如 message is not modified
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if not delta:
+            continue
+        segment += delta
+        if len(segment) >= STREAM_SEGMENT_LIMIT:
+            # 当前消息已满：定稿并另起一条
+            await push(segment, final=True)
+            finalized += segment
+            segment, sent, last_edit = "", None, 0.0
+            continue
+        now = time.monotonic()
+        if now - last_edit >= STREAM_EDIT_INTERVAL:
+            await push(segment, final=False)
+            last_edit = now
+
+    if segment.strip():
+        await push(segment, final=True)
+        finalized += segment
+    return sent, finalized.strip()
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -378,9 +430,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     stop = asyncio.Event()
     typing_task = asyncio.create_task(keep_typing(bot, msg.chat_id, stop))
     try:
-        answer = await ask_llm(history)
+        # stop 事件兼作"首条消息已发出"信号：流式内容一出现就停掉打字指示
+        sent, answer = await stream_reply(msg, history, stop)
     except Exception:
-        logger.exception("调用本地 LLM 失败")
+        logger.exception("调用 LLM 失败")
         stop.set()
         await typing_task
         await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
@@ -389,9 +442,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         stop.set()
     await typing_task
 
-    sent = await send_reply(msg, answer or t("empty_reply"))
-    if sent:
-        remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
+    if sent is None:
+        await msg.reply_text(t("empty_reply"))
+        return
+    remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -13,6 +13,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Follow-ups**: reply to the bot's answers to continue the conversation with full context
 - **Private chat**: just message the bot directly
 - **Image understanding**: with a vision-capable model, ask about photos sent in the group
+- **Streaming replies**: answers appear progressively (typewriter style); long generations won't be cut off by gateway idle timeouts
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
 - Works with any **OpenAI-compatible endpoint** (LM Studio / vLLM / llama.cpp server / Ollama / official OpenAI API)

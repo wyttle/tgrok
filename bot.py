@@ -20,7 +20,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
 from telegram import BotCommand, Message, Update
-from telegram.constants import ChatAction, MessageEntityType, ParseMode
+from telegram.constants import MessageEntityType, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
@@ -67,6 +67,7 @@ STRINGS = {
         "comment_default": "请评论/核实这条消息。",
         "look_image": "请看这张图片。",
         "empty_reply": "（模型返回了空回复）",
+        "thinking": "🤔 Thinking…",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
         "llm_failed": "⚠️ 调用模型失败，请检查 {url} 服务是否可用。",
         "start": (
@@ -105,6 +106,7 @@ STRINGS = {
         "comment_default": "Please comment on / fact-check this message.",
         "look_image": "Please look at this image.",
         "empty_reply": "(the model returned an empty response)",
+        "thinking": "🤔 Thinking…",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
         "llm_failed": "⚠️ Failed to call the model. Please check that {url} is reachable.",
         "start": (
@@ -247,19 +249,6 @@ def quoted_context(msg: Message) -> str | None:
     return t("quoted_msg", author=author, content=content)
 
 
-async def keep_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
-    """LLM 生成期间持续显示「正在输入…」。"""
-    while not stop.is_set():
-        try:
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=4.5)
-        except asyncio.TimeoutError:
-            continue
-
-
 async def image_data_urls(bot, *messages: Message | None) -> list[str]:
     """提取消息中的图片（压缩照片或图片文件），转为 base64 data URL。"""
     urls = []
@@ -316,16 +305,20 @@ async def create_stream(history: list[dict]):
         )
 
 
-async def stream_reply(msg: Message, history: list[dict], first_sent: asyncio.Event) -> tuple[Message | None, str]:
+async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | None, str]:
     """流式生成并逐步编辑 Telegram 消息。
 
+    先发送思考占位提示（推理模型思考期间无正文输出），首个正文数据块到达后原地替换；
     单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
-    返回（最后一条已发送消息或 None, 完整回复文本）。
+    返回（最后一条已发送消息或 None, 完整回复文本）；失败/空回复时已就地提示，返回 (None, "")。
     """
-    stream = await create_stream(history)
+    try:
+        sent: Message | None = await msg.reply_text(t("thinking"))
+    except TelegramError:
+        logger.exception("发送占位消息失败")
+        return None, ""
     finalized = ""  # 已定稿消息承载的文本
     segment = ""  # 当前消息正在累积的文本
-    sent: Message | None = None
     last_edit = 0.0
 
     async def push(text: str, final: bool) -> None:
@@ -334,7 +327,6 @@ async def stream_reply(msg: Message, history: list[dict], first_sent: asyncio.Ev
         try:
             if sent is None:
                 sent = await msg.reply_text(body)
-                first_sent.set()
             elif final:
                 try:
                     await sent.edit_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -353,25 +345,49 @@ async def stream_reply(msg: Message, history: list[dict], first_sent: asyncio.Ev
         except BadRequest:
             pass  # 例如 message is not modified
 
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content if chunk.choices else None
-        if not delta:
-            continue
-        segment += delta
-        if len(segment) >= STREAM_SEGMENT_LIMIT:
-            # 当前消息已满：定稿并另起一条
-            await push(segment, final=True)
-            finalized += segment
-            segment, sent, last_edit = "", None, 0.0
-            continue
-        now = time.monotonic()
-        if now - last_edit >= STREAM_EDIT_INTERVAL:
-            await push(segment, final=False)
-            last_edit = now
+    try:
+        stream = await create_stream(history)
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if not delta:
+                continue
+            segment += delta
+            if len(segment) >= STREAM_SEGMENT_LIMIT:
+                # 当前消息已满：定稿并另起一条
+                await push(segment, final=True)
+                finalized += segment
+                segment, sent, last_edit = "", None, 0.0
+                continue
+            now = time.monotonic()
+            if now - last_edit >= STREAM_EDIT_INTERVAL:
+                await push(segment, final=False)
+                last_edit = now
+    except Exception:
+        logger.exception("调用 LLM 失败")
+        try:
+            if segment.strip():
+                # 已有部分内容：保留定稿，错误另发一条
+                await push(segment, final=True)
+                await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
+            elif sent is not None and not finalized:
+                await sent.edit_text(t("llm_failed", url=LLM_BASE_URL))
+            else:
+                await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
+        except TelegramError:
+            pass
+        return None, ""
 
     if segment.strip():
         await push(segment, final=True)
         finalized += segment
+    elif not finalized:
+        # 全程没有正文：把占位消息改成空回复提示
+        try:
+            if sent is not None:
+                await sent.edit_text(t("empty_reply"))
+        except TelegramError:
+            pass
+        return None, ""
     return sent, finalized.strip()
 
 
@@ -427,25 +443,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = trim_history(history)
 
-    stop = asyncio.Event()
-    typing_task = asyncio.create_task(keep_typing(bot, msg.chat_id, stop))
-    try:
-        # stop 事件兼作"首条消息已发出"信号：流式内容一出现就停掉打字指示
-        sent, answer = await stream_reply(msg, history, stop)
-    except Exception:
-        logger.exception("调用 LLM 失败")
-        stop.set()
-        await typing_task
-        await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
-        return
-    finally:
-        stop.set()
-    await typing_task
-
-    if sent is None:
-        await msg.reply_text(t("empty_reply"))
-        return
-    remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
+    sent, answer = await stream_reply(msg, history)
+    if sent is not None and answer:
+        remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

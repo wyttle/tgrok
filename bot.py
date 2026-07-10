@@ -13,12 +13,14 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
+import telegramify_markdown
 from telegram import BotCommand, Message, Update
 from telegram.constants import MessageEntityType, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
@@ -146,6 +148,26 @@ CONVERSATION_CACHE_SIZE = 500
 STREAM_EDIT_INTERVAL = 1.5  # 流式输出时编辑消息的最小间隔（秒），避免触发 Telegram 限流
 STREAM_SEGMENT_LIMIT = 3800  # 单条消息承载的流式文本上限，超过则另起一条（留出余量）
 STREAM_CURSOR = " ▌"
+
+# 匹配标题行：行首可选的 emoji/符号前缀 + 1~6 个 #。Grok 常输出「📚 ## 标题」这种
+# 前缀带 emoji 的标题，此时 # 不在行首，telegramify/CommonMark 不认作标题，会把 ## 原样
+# 泄漏成 \#\#。这里把前缀 emoji 去掉、# 归位到行首，让下游正常渲染成加粗。
+_HEADING_RE = re.compile(r"^[ \t]*[^\w#\n]*[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.M)
+
+
+def _normalize_headings(text: str) -> str:
+    def repl(m: re.Match) -> str:
+        return f"{m.group(1)} {m.group(2)}"
+    return _HEADING_RE.sub(repl, text)
+
+
+def to_telegram_markdown(text: str) -> str:
+    """把模型返回的标准 Markdown 转成 Telegram MarkdownV2。
+
+    先归一化标题行（去掉 Grok 爱加的 emoji 前缀，让 # 回到行首），再交给
+    telegramify_markdown 转换。
+    """
+    return telegramify_markdown.markdownify(_normalize_headings(text))
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -323,23 +345,40 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
 
     async def push(text: str, final: bool) -> None:
         nonlocal sent
-        body = text if final else text + STREAM_CURSOR
         try:
             if sent is None:
-                sent = await msg.reply_text(body)
+                # 首次发送：定稿走 MarkdownV2，中间过程用纯文本+光标
+                if final:
+                    try:
+                        sent = await msg.reply_text(
+                            to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
+                        )
+                    except BadRequest:
+                        sent = await msg.reply_text(text)
+                else:
+                    sent = await msg.reply_text(text + STREAM_CURSOR)
             elif final:
                 try:
-                    await sent.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+                    await sent.edit_text(
+                        to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
+                    )
                 except BadRequest:
                     await sent.edit_text(text)
             else:
-                await sent.edit_text(body)
+                await sent.edit_text(text + STREAM_CURSOR)
         except RetryAfter as e:
             # Telegram 限流：等待后跳过本次中间编辑；定稿编辑重试一次
             await asyncio.sleep(float(e.retry_after) + 0.5)
             if final and sent is not None:
                 try:
-                    await sent.edit_text(text)
+                    await sent.edit_text(
+                        to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                except BadRequest:
+                    try:
+                        await sent.edit_text(text)
+                    except TelegramError:
+                        pass
                 except TelegramError:
                     pass
         except BadRequest:

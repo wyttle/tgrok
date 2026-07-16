@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 telegramify-markdown>=0.5.0
 ddgs>=9.0
 tzdata>=2024.1
+trafilatura>=1.12

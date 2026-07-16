@@ -66,6 +66,9 @@ SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "12"))
 SEARCH_RESULT_CHAR_LIMIT = 2400  # 单次回灌给模型的搜索结果文本上限（保护小模型上下文）
 SEARCH_SNIPPET_LIMIT = 400  # 单条结果摘要的长度上限
 FETCH_CHAR_LIMIT = int(os.getenv("FETCH_CHAR_LIMIT", "3500"))  # 单次回灌给模型的网页正文上限
+# open_url 直接抓取失败（反爬 403 / JS 页面 / 正文过少）时，自动改走 Jina Reader 再试
+JINA_FALLBACK = os.getenv("JINA_FALLBACK", "true").strip().lower() in ("1", "true", "yes", "on")
+JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率限制更宽松
 
 
 def _provider_ready(p: str) -> bool:
@@ -570,6 +573,7 @@ async def run_web_search(query: str) -> str:
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _HEAD_RE = re.compile(r"<head\b.*?</head\s*>", re.I | re.S)
+_MAIN_RE = re.compile(r"<(main|article)\b.*?</\1\s*>", re.I | re.S)
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript|svg)\b.*?</\1\s*>", re.I | re.S)
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _BLOCK_TAG_RE = re.compile(r"</?(?:p|div|br|li|ul|ol|tr|table|h[1-6]|section|article|header|footer|blockquote|pre)\b[^>]*>", re.I)
@@ -581,6 +585,10 @@ def _html_to_text(page: str) -> tuple[str, str]:
     m = _TITLE_RE.search(page)
     title = html.unescape(m.group(1)).strip() if m else ""
     page = _HEAD_RE.sub(" ", page)
+    # 页面声明了 main/article 正文区域时只取该区域，省掉导航/页脚等噪音
+    m = _MAIN_RE.search(page)
+    if m and len(m.group(0)) > 1000:
+        page = m.group(0)
     page = _SCRIPT_STYLE_RE.sub(" ", page)
     page = _HTML_COMMENT_RE.sub(" ", page)
     page = _BLOCK_TAG_RE.sub("\n", page)
@@ -607,12 +615,29 @@ def _is_public_http_url(url: str) -> bool:
     return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
 
 
-async def run_fetch_url(url: str) -> str:
-    """抓取网页并提取正文回灌给模型。永不抛异常：失败返回说明文本。"""
-    url = (url or "").strip()
-    if not _is_public_http_url(url):
-        return t("fetch_bad_url")
-    logger.info("读取网页: %s", url)
+def _extract_html_text(page: str) -> tuple[str, str]:
+    """HTML → (标题, 正文)。优先 trafilatura（正文识别质量最好），失败回退内置极简提取。"""
+    m = _TITLE_RE.search(page)
+    title = html.unescape(m.group(1)).strip() if m else ""
+    text = ""
+    try:
+        import trafilatura  # 惰性导入：依赖缺失时仍可用内置提取
+
+        try:
+            text = trafilatura.extract(
+                page, output_format="markdown", include_links=False, include_tables=True
+            ) or ""
+        except (TypeError, ValueError):  # 旧版本不支持 markdown 输出
+            text = trafilatura.extract(page) or ""
+    except ImportError:
+        pass
+    if not text.strip():
+        _, text = _html_to_text(page)
+    return title, text.strip()
+
+
+async def _fetch_local(url: str) -> tuple[str | None, str]:
+    """直接抓取网页。返回 (成功文本, 失败说明)；文本为 None 表示这条路走不通。"""
     try:
         async with httpx.AsyncClient(
             timeout=SEARCH_TIMEOUT,
@@ -622,21 +647,59 @@ async def run_fetch_url(url: str) -> str:
             resp = await client.get(url)
             resp.raise_for_status()
     except Exception as e:
-        logger.warning("读取网页失败 %s: %s", url, type(e).__name__)
-        return t("fetch_error", error=type(e).__name__)
+        logger.warning("直接读取网页失败 %s: %s", url, type(e).__name__)
+        return None, t("fetch_error", error=type(e).__name__)
     ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
     if ctype and not (ctype.startswith("text/") or ctype in ("application/json", "application/xhtml+xml")):
-        return t("fetch_unsupported", ctype=ctype)
-    raw = resp.text[:200_000]  # 粗截超大页面，再做正则提取
-    if "html" in ctype or "<html" in raw[:2000].lower():
-        title, text = _html_to_text(raw)
+        return None, t("fetch_unsupported", ctype=ctype)
+    raw = resp.text[:200_000]  # 粗截超大页面，再做正文提取
+    is_html = "html" in ctype or "<html" in raw[:2000].lower()
+    if is_html:
+        title, text = await asyncio.to_thread(_extract_html_text, raw)
     else:
-        title, text = "", raw
-    text = text.strip()
-    if not text:
-        return t("fetch_empty")
+        title, text = "", raw.strip()
+    if not text or (is_html and len(text) < 200):
+        # 正文过少：多半是 JS 渲染的空壳页，交给 Jina Reader 兜底
+        return None, t("fetch_empty")
     header = f"{title}\n{resp.url}" if title else str(resp.url)
-    return f"{header}\n\n{text}"[:FETCH_CHAR_LIMIT]
+    return f"{header}\n\n{text}"[:FETCH_CHAR_LIMIT], ""
+
+
+_MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+
+
+async def _fetch_jina(url: str) -> str | None:
+    """通过 Jina Reader（r.jina.ai）抓取：其服务端渲染 JS 并输出 LLM 友好的 markdown。"""
+    headers = {"X-Return-Format": "markdown", "X-Retain-Images": "none"}
+    if JINA_API_KEY:
+        headers["Authorization"] = f"Bearer {JINA_API_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT * 2, follow_redirects=True) as client:
+            resp = await client.get(f"https://r.jina.ai/{url}", headers=headers)
+            resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Jina Reader 读取失败 %s: %s", url, type(e).__name__)
+        return None
+    # 内联链接压成纯文字，URL 不占正文字数配额（页面来源 URL 已在开头单独给出）
+    text = _MD_LINK_RE.sub(r"\1", resp.text).strip()
+    return text[:FETCH_CHAR_LIMIT] if text else None
+
+
+async def run_fetch_url(url: str) -> str:
+    """抓取网页正文回灌给模型：本地直取为主，Jina Reader 兜底。永不抛异常。"""
+    url = (url or "").strip()
+    if not _is_public_http_url(url):
+        return t("fetch_bad_url")
+    logger.info("读取网页: %s", url)
+    text, err = await _fetch_local(url)
+    if text is not None:
+        return text
+    if JINA_FALLBACK:
+        logger.info("直取失败，改走 Jina Reader: %s", url)
+        jina_text = await _fetch_jina(url)
+        if jina_text:
+            return jina_text
+    return err
 
 
 async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:

@@ -298,6 +298,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("trafilatura").setLevel(logging.ERROR)  # "discarding data" 等内部告警无诊断价值
 logger = logging.getLogger(__name__)
 
 llm = AsyncOpenAI(
@@ -624,24 +625,64 @@ def _is_public_http_url(url: str) -> bool:
 
 
 def _extract_html_text(page: str) -> tuple[str, str]:
-    """HTML → (标题, 正文)。优先 trafilatura（正文识别质量最好），失败回退内置极简提取。"""
+    """HTML → (标题, 正文)。优先 trafilatura 快速模式，失败回退内置极简提取。
+
+    只用 fast 模式：trafilatura 的完整模式会在困难页面上级联 readability/justext
+    等纯 Python 兜底算法，可能长时间占住 GIL；难提取的页面交给 Jina Reader 兜底。
+    """
     m = _TITLE_RE.search(page)
     title = html.unescape(m.group(1)).strip() if m else ""
     text = ""
     try:
         import trafilatura  # 惰性导入：依赖缺失时仍可用内置提取
 
-        try:
-            text = trafilatura.extract(
-                page, output_format="markdown", include_links=False, include_tables=True
-            ) or ""
-        except (TypeError, ValueError):  # 旧版本不支持 markdown 输出
-            text = trafilatura.extract(page) or ""
+        for kwargs in (
+            {"output_format": "markdown", "include_links": False, "include_tables": True, "fast": True},
+            {"output_format": "markdown", "include_links": False, "include_tables": True, "no_fallback": True},
+            {"no_fallback": True},
+        ):
+            try:
+                text = trafilatura.extract(page, **kwargs) or ""
+                break
+            except (TypeError, ValueError):  # 参数名随版本变化（fast ↔ no_fallback）
+                continue
     except ImportError:
         pass
     if not text.strip():
         _, text = _html_to_text(page)
     return title, text.strip()
+
+
+def _extract_worker(page: str, queue) -> None:
+    try:
+        queue.put(_extract_html_text(page))
+    except Exception:
+        queue.put(("", ""))
+
+
+EXTRACT_TIMEOUT = 10.0  # 正文提取的看门狗秒数，超时强杀提取进程
+
+
+def _extract_in_process(page: str, timeout: float) -> tuple[str, str] | None:
+    """在独立进程里跑正文提取，超时 terminate。
+
+    提取是 CPU 密集的纯 Python/lxml 工作，放线程里会长时间占住 GIL、饿死事件循环
+    （LLM 流没人消费、Telegram 轮询停摆）；独立进程不共享 GIL 且可强杀。
+    本函数本身阻塞（join），调用方需套 asyncio.to_thread——babysit 进程的线程
+    只在 join 上休眠，不占 GIL。
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork" if os.name == "posix" else "spawn")
+    queue = ctx.SimpleQueue()
+    proc = ctx.Process(target=_extract_worker, args=(page, queue), daemon=True)
+    proc.start()
+    proc.join(timeout)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(1)
+        return None
+    return queue.get() if not queue.empty() else None
 
 
 async def _fetch_local(url: str) -> tuple[str | None, str]:
@@ -663,7 +704,13 @@ async def _fetch_local(url: str) -> tuple[str | None, str]:
     raw = resp.text[:200_000]  # 粗截超大页面，再做正文提取
     is_html = "html" in ctype or "<html" in raw[:2000].lower()
     if is_html:
-        title, text = await asyncio.to_thread(_extract_html_text, raw)
+        extracted = await asyncio.to_thread(_extract_in_process, raw, EXTRACT_TIMEOUT)
+        if extracted is None:
+            logger.warning("正文提取超时（%.0fs 强杀），回退简易提取: %s", EXTRACT_TIMEOUT, url)
+            title, text = _html_to_text(raw)
+            text = text.strip()
+        else:
+            title, text = extracted
     else:
         title, text = "", raw.strip()
     if not text or (is_html and len(text) < 200):

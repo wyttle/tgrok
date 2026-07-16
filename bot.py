@@ -14,6 +14,7 @@ import html
 import ipaddress
 import json
 import logging
+import multiprocessing
 import os
 import re
 import time
@@ -300,6 +301,13 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("trafilatura").setLevel(logging.ERROR)  # "discarding data" 等内部告警无诊断价值
 logger = logging.getLogger(__name__)
+
+# 在父进程启动时（单线程阶段）预热导入：fork 出的提取子进程不再走导入机制。
+# 运行期 fork 时若其他线程恰好持有 import 锁，子进程内再 import 会永久死锁。
+try:
+    import trafilatura
+except ImportError:
+    trafilatura = None
 
 llm = AsyncOpenAI(
     base_url=LLM_BASE_URL,
@@ -633,9 +641,7 @@ def _extract_html_text(page: str) -> tuple[str, str]:
     m = _TITLE_RE.search(page)
     title = html.unescape(m.group(1)).strip() if m else ""
     text = ""
-    try:
-        import trafilatura  # 惰性导入：依赖缺失时仍可用内置提取
-
+    if trafilatura is not None:
         for kwargs in (
             {"output_format": "markdown", "include_links": False, "include_tables": True, "fast": True},
             {"output_format": "markdown", "include_links": False, "include_tables": True, "no_fallback": True},
@@ -646,18 +652,26 @@ def _extract_html_text(page: str) -> tuple[str, str]:
                 break
             except (TypeError, ValueError):  # 参数名随版本变化（fast ↔ no_fallback）
                 continue
-    except ImportError:
-        pass
     if not text.strip():
         _, text = _html_to_text(page)
     return title, text.strip()
 
 
-def _extract_worker(page: str, queue) -> None:
+def _extract_worker(page: str, conn) -> None:
+    # fork 复制了父进程的锁状态：立刻禁用 logging，避免在可能已死锁的日志锁上挂起
+    logging.disable(logging.CRITICAL)
     try:
-        queue.put(_extract_html_text(page))
+        title, text = _extract_html_text(page)
+        # 必须在子进程内截断：管道缓冲区只有 64KB，发大文本会写阻塞，
+        # 而父进程在等子进程退出后才读 → 互等死锁（multiprocessing 经典陷阱）
+        conn.send((title[:500], text[: FETCH_CHAR_LIMIT + 200]))
     except Exception:
-        queue.put(("", ""))
+        try:
+            conn.send(("", ""))
+        except Exception:
+            pass
+    finally:
+        conn.close()
 
 
 EXTRACT_TIMEOUT = 10.0  # 正文提取的看门狗秒数，超时强杀提取进程
@@ -668,21 +682,28 @@ def _extract_in_process(page: str, timeout: float) -> tuple[str, str] | None:
 
     提取是 CPU 密集的纯 Python/lxml 工作，放线程里会长时间占住 GIL、饿死事件循环
     （LLM 流没人消费、Telegram 轮询停摆）；独立进程不共享 GIL 且可强杀。
-    本函数本身阻塞（join），调用方需套 asyncio.to_thread——babysit 进程的线程
-    只在 join 上休眠，不占 GIL。
+    先 poll+recv 再收尸，避免「子进程写管道阻塞 vs 父进程 join 等退出」互等。
+    本函数本身阻塞，调用方需套 asyncio.to_thread——babysit 进程的线程只在
+    poll/join 上休眠，不占 GIL。
     """
-    import multiprocessing as mp
-
-    ctx = mp.get_context("fork" if os.name == "posix" else "spawn")
-    queue = ctx.SimpleQueue()
-    proc = ctx.Process(target=_extract_worker, args=(page, queue), daemon=True)
+    ctx = multiprocessing.get_context("fork" if os.name == "posix" else "spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_extract_worker, args=(page, send_conn), daemon=True)
     proc.start()
-    proc.join(timeout)
+    send_conn.close()  # 关闭父进程持有的写端，EOF 语义才正确
+    try:
+        result = recv_conn.recv() if recv_conn.poll(timeout) else None
+    except (EOFError, OSError):
+        result = None
+    finally:
+        recv_conn.close()
     if proc.is_alive():
         proc.terminate()
         proc.join(1)
-        return None
-    return queue.get() if not queue.empty() else None
+        if proc.is_alive():
+            proc.kill()
+    proc.join(1)
+    return result
 
 
 async def _fetch_local(url: str) -> tuple[str | None, str]:
@@ -826,8 +847,9 @@ def _call_status(calls: list[dict]) -> str:
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
-    results = []
-    for call in assistant_msg["tool_calls"]:
+    """并发执行一轮内的所有工具调用（相互独立），按原顺序返回 tool 消息。"""
+
+    async def run_one(call: dict) -> dict:
         name = call["function"]["name"]
         args = _tool_args(call)
         if args is None:
@@ -836,10 +858,9 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
             content = await run_fetch_url(str(args.get("url", "")))
         else:
             content = await run_web_search(str(args.get("query", "")))
-        results.append(
-            {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
-        )
-    return results
+        return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+
+    return list(await asyncio.gather(*(run_one(c) for c in assistant_msg["tool_calls"])))
 
 
 async def create_stream(history: list[dict], use_tools: bool):
@@ -961,8 +982,19 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         for round_idx in range(SEARCH_MAX_ROUNDS + 1):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
             use_tools = SEARCH_ENABLED and round_idx < SEARCH_MAX_ROUNDS
-            stream = await create_stream(working, use_tools=use_tools)
-            calls, content = await _drain_stream(stream, on_text)
+            for attempt in range(2):
+                out_before = (len(finalized), len(segment))
+                try:
+                    stream = await create_stream(working, use_tools=use_tools)
+                    calls, content = await _drain_stream(stream, on_text)
+                    break
+                except Exception:
+                    # 网关偶发掐流：本轮尚未向用户输出任何正文时，原样静默重试一次；
+                    # 已有输出则不能重试（会重复/错乱），按失败处理
+                    if attempt or (len(finalized), len(segment)) != out_before:
+                        raise
+                    logger.warning("LLM 流中断且本轮无输出，重试一次（round=%d）", round_idx)
+                    await asyncio.sleep(1.5)
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)

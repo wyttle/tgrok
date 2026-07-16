@@ -16,7 +16,9 @@ import os
 import re
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -77,6 +79,16 @@ BOT_LANG = os.getenv("BOT_LANG", "zh").strip().lower()
 if BOT_LANG not in ("zh", "en"):
     BOT_LANG = "zh"
 
+# 时区：用于在每次请求时告诉模型"现在的真实时间"，避免它瞎猜日期或谎称已核实
+BOT_TZ_NAME = os.getenv("BOT_TZ", "Asia/Shanghai").strip() or "Asia/Shanghai"
+try:
+    BOT_TZ = ZoneInfo(BOT_TZ_NAME)
+except (ZoneInfoNotFoundError, ValueError):
+    # 回退用标准库的 timezone.utc，它不依赖系统/tzdata，任何环境都可用
+    # （ZoneInfo("UTC") 在缺 tzdata 时同样会抛异常，不能用作兜底）
+    logging.getLogger(__name__).warning("无法识别时区 %s，回退到 UTC", BOT_TZ_NAME)
+    BOT_TZ_NAME, BOT_TZ = "UTC", timezone.utc
+
 STRINGS = {
     "zh": {
         "system_prompt": (
@@ -102,6 +114,11 @@ STRINGS = {
             "你可以调用 web_search 工具联网搜索实时信息。"
             "遇到时事、时效性内容或不确定的事实时，先搜索再回答，并在答案中附上来源链接。"
         ),
+        "current_time": (
+            "当前真实时间是 {time}（{tz}），这是系统提供的准确时间，可直接引用。"
+            "涉及「今天/现在/最近」等时间时以此为准，不要臆测日期，也不要谎称已核实。"
+        ),
+        "weekday": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
         "start": (
             "你好！把我拉进群后这样用：\n"
             "1️⃣ 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
@@ -151,6 +168,12 @@ STRINGS = {
             "For current events, time-sensitive topics, or facts you are unsure about, search first, "
             "then answer and cite source links."
         ),
+        "current_time": (
+            "The current real-world time is {time} ({tz}). This is accurate time provided by the "
+            "system and can be cited directly. Use it for anything involving \"today/now/recently\"; "
+            "do not guess the date or claim you have verified it."
+        ),
+        "weekday": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
         "start": (
             "Hi! Add me to a group and use me like this:\n"
             "1️⃣ Reply to any message and mention me with a question, e.g. \"@{username} is this true?\"\n"
@@ -185,6 +208,31 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
 if SEARCH_ENABLED:
     # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
     SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")
+
+
+def current_time_line() -> str:
+    """返回一句描述当前真实时间的文本，随每次请求实时生成。
+
+    附加到「当前这条用户消息」末尾，而非系统提示：系统提示与历史轮次保持字节
+    不变，才能命中上游的 prompt 缓存；时间只挂在本来就是新内容的最新一轮上。
+    """
+    now = datetime.now(BOT_TZ)
+    weekday = STRINGS[BOT_LANG]["weekday"][now.weekday()]
+    stamp = f"{now:%Y-%m-%d %H:%M} {weekday}"
+    return t("current_time", time=stamp, tz=BOT_TZ_NAME)
+
+
+def with_time(content):
+    """把当前时间行拼到用户消息内容末尾，兼容纯文本与多模态 content 数组。"""
+    line = current_time_line()
+    if isinstance(content, str):
+        return f"{content}\n\n[{line}]"
+    # 多模态：追加到文本块（首个 text 块），没有则插一个
+    for part in content:
+        if part.get("type") == "text":
+            part["text"] = f"{part['text']}\n\n[{line}]"
+            return content
+    return [{"type": "text", "text": f"[{line}]"}] + content
 
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
@@ -440,6 +488,7 @@ async def run_web_search(query: str) -> str:
     query = (query or "").strip()
     if not query:
         return t("search_no_results", query="")
+    logger.info("联网搜索 (%s): %s", SEARCH_PROVIDER, query)
     try:
         if SEARCH_PROVIDER == "tavily":
             rows = await _search_tavily(query)
@@ -709,6 +758,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     question = extract_question(msg, bot.username)
+    logger.info(
+        "收到请求 chat=%s(%s) user=%s(%s) reply_to_bot=%s q=%.80s",
+        msg.chat_id, msg.chat.type, msg.from_user.full_name, msg.from_user.id,
+        is_reply_to_bot, question,
+    )
 
     if is_reply_to_bot and not mentioned:
         # 追问：接上之前的对话历史
@@ -723,7 +777,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         images = await image_data_urls(bot, msg) if ENABLE_VISION else []
         if not question and not images:
             return
-        history = history + [{"role": "user", "content": build_content(question or t("look_image"), images)}]
+        history = history + [{"role": "user", "content": with_time(build_content(question or t("look_image"), images))}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
         quoted = None if is_reply_to_bot else replied
@@ -737,14 +791,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_content = context_text + "\n\n" + t("question_from", name=msg.from_user.full_name, question=user_content)
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_content(user_content, images)},
+            {"role": "user", "content": with_time(build_content(user_content, images))},
         ]
 
     history = trim_history(history)
 
     sent, answer = await stream_reply(msg, history)
     if sent is not None and answer:
+        logger.info("已回复 chat=%s msg_id=%s len=%d", msg.chat_id, sent.message_id, len(answer))
         remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
+    else:
+        logger.warning("未产生回复 chat=%s user=%s", msg.chat_id, msg.from_user.id)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -63,15 +63,18 @@ TEXT = {
         "s6a": "【6/9】图片理解（多模态）",
         "s6b": "      模型支持视觉输入时开启：群友发图或回复图片提问，图片会发给模型一起分析",
         "vision_ask": "  开启图片理解？",
-        "s_search_a": "【7/9】联网搜索（web_search 工具）",
-        "s_search_b": "      模型可自主联网搜索实时信息（需模型支持 function calling）：\n      tavily 需免费 API key（tavily.com），duckduckgo 零配置，searxng 需自建实例",
-        "search_pick": "搜索源：0=关闭  1=tavily  2=duckduckgo  3=searxng",
-        "search_invalid": "请输入 0-3，或直接输入 tavily / duckduckgo / searxng",
+        "s_search_a": "【7/9】联网搜索（web_search + open_url 工具）",
+        "s_search_b": "      模型可自主联网搜索、并打开搜索结果网页读取正文（需模型支持 function calling）：\n      tavily 需免费 API key（tavily.com），duckduckgo 零配置，searxng 需自建实例\n      可同时选多个源（逗号分隔），并发聚合、去重合并搜索结果",
+        "search_pick": "搜索源：0=关闭  1=tavily  2=duckduckgo  3=searxng（可多选，如 1,2）",
+        "search_invalid": "请输入 0-3 或源名称（tavily/duckduckgo/searxng），多个用逗号分隔；0 只能单独使用",
         "tavily_key": "Tavily API Key",
         "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
-        "s7": "【8/9】生成参数",
+        "jina_ask": "  网页直接读取失败（反爬/JS 页面）时走 Jina Reader（r.jina.ai）兜底？",
+        "jina_key": "Jina API Key（可选，提高速率限制，jina.ai 免费申请）",
+        "s7": "【8/9】生成参数与时区",
         "max_tokens": "单次回答最大 token 数",
         "max_history": "多轮对话保留消息条数",
+        "tz": "时区（IANA 名称，用于告知模型当前真实时间；无法识别时 bot 会回退 UTC）",
         "int_invalid": "请输入正整数",
         "s8": "【9/9】系统提示词（定义 bot 的角色和语气，跳过则使用内置默认值）",
         "sys_prompt": "系统提示词",
@@ -118,15 +121,18 @@ TEXT = {
         "s6a": "[6/9] Image understanding (multimodal)",
         "s6b": "      Enable if the model supports vision: images sent or quoted in chat are passed to the model",
         "vision_ask": "  Enable image understanding?",
-        "s_search_a": "[7/9] Web search (web_search tool)",
-        "s_search_b": "      Lets the model search the internet on its own (requires function calling support):\n      tavily needs a free API key (tavily.com), duckduckgo is zero-config, searxng needs a self-hosted instance",
-        "search_pick": "Provider: 0=off  1=tavily  2=duckduckgo  3=searxng",
-        "search_invalid": "Enter 0-3, or type tavily / duckduckgo / searxng",
+        "s_search_a": "[7/9] Web search (web_search + open_url tools)",
+        "s_search_b": "      Lets the model search the internet and open result pages to read their text (requires function calling support):\n      tavily needs a free API key (tavily.com), duckduckgo is zero-config, searxng needs a self-hosted instance\n      Multiple providers can be combined (comma-separated); results are fetched concurrently and merged",
+        "search_pick": "Provider: 0=off  1=tavily  2=duckduckgo  3=searxng (combine with commas, e.g. 1,2)",
+        "search_invalid": "Enter 0-3 or provider names (tavily/duckduckgo/searxng), comma-separated; 0 must be used alone",
         "tavily_key": "Tavily API key",
         "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
-        "s7": "[8/9] Generation parameters",
+        "jina_ask": "  Fall back to Jina Reader (r.jina.ai) when direct page fetch fails (anti-bot/JS pages)?",
+        "jina_key": "Jina API key (optional, higher rate limits, free at jina.ai)",
+        "s7": "[8/9] Generation parameters & timezone",
         "max_tokens": "Max tokens per reply",
         "max_history": "Messages kept per conversation",
+        "tz": "Timezone (IANA name, used to tell the model the current real time; falls back to UTC if unrecognized)",
         "int_invalid": "Please enter a positive integer",
         "s8": "[9/9] System prompt (defines the bot's role and tone; skip for the built-in default)",
         "sys_prompt": "System prompt",
@@ -344,30 +350,54 @@ def main() -> None:
     # ---- 7. Web search ----
     print(T["s_search_a"])
     print(T["s_search_b"])
-    provider_alias = {"0": "", "none": "", "off": "", "1": "tavily", "2": "duckduckgo", "3": "searxng"}
+    provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng"}
+    off_values = ("0", "none", "off")
+    known = ("tavily", "duckduckgo", "searxng")
+
+    def parse_providers(raw: str) -> list[str] | None:
+        """解析多选输入（序号或名称，逗号分隔）。None 表示无法解析。"""
+        parts = [p.strip().lower() for p in raw.replace("，", ",").split(",") if p.strip()]
+        if not parts:
+            return []
+        if any(p in off_values for p in parts):
+            return [] if len(parts) == 1 else None
+        out = []
+        for p in parts:
+            p = provider_alias.get(p, p)
+            if p not in known:
+                return None
+            if p not in out:
+                out.append(p)
+        return out
 
     def validate_provider(raw: str):
-        v = raw.strip().lower()
-        if v in provider_alias or v in ("tavily", "duckduckgo", "searxng"):
-            return True, ""
-        return False, T["search_invalid"]
+        if parse_providers(raw) is None:
+            return False, T["search_invalid"]
+        return True, ""
 
     raw_provider = ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""), validate=validate_provider)
-    v = raw_provider.strip().lower()
-    provider = provider_alias.get(v, v)
-    cfg["SEARCH_PROVIDER"] = provider
-    if provider == "tavily":
+    providers = parse_providers(raw_provider) or []
+    cfg["SEARCH_PROVIDER"] = ",".join(providers)
+    if "tavily" in providers:
         cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
                                     required=True, secret=True)
-    elif provider == "searxng":
+    if "searxng" in providers:
         cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),
                                       required=True)
+    if providers:
+        # open_url 直取失败时的 Jina Reader 兜底（bot 默认开启，仅在用户关闭时写入 false）
+        jina_default = old.get("JINA_FALLBACK", "true").strip().lower() not in ("0", "false", "no", "off")
+        if confirm(T["jina_ask"], default_yes=jina_default):
+            cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
+        else:
+            cfg["JINA_FALLBACK"] = "false"
     print()
 
-    # ---- 8. Generation params ----
+    # ---- 8. Generation params & timezone ----
     print(T["s7"])
     cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old.get("MAX_TOKENS", "1024"), validate=validate_int)
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
+    cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
     print()
 
     # ---- 9. System prompt ----
@@ -381,7 +411,8 @@ def main() -> None:
     for key, val in cfg.items():
         if not val:
             continue
-        shown = (val[:8] + "…" + val[-4:]) if key == "TELEGRAM_BOT_TOKEN" else val
+        is_secret = "TOKEN" in key or key.endswith("_KEY")
+        shown = (val[:8] + "…" + val[-4:]) if is_secret and len(val) > 16 else val
         print(f"  {key} = {shown}")
     print("=" * 52)
     if not confirm(T["write_confirm"].format(path=env_path), default_yes=True):

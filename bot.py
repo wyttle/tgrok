@@ -10,6 +10,8 @@
 
 import asyncio
 import base64
+import html
+import ipaddress
 import json
 import logging
 import os
@@ -18,6 +20,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -49,26 +52,32 @@ MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")
 MAX_IMAGES = 4  # 单次请求最多附带的图片数
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-# 联网搜索源：tavily / duckduckgo / searxng，留空关闭。开启后模型可通过 web_search 工具自主搜索
-SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "").strip().lower()
+# 联网搜索源：tavily / duckduckgo / searxng，留空关闭。可逗号分隔配置多个源，
+# 并发聚合结果（如 SEARCH_PROVIDER=tavily,duckduckgo）。开启后模型可通过
+# web_search 工具自主搜索，并可用 open_url 工具读取网页正文。
+SEARCH_PROVIDERS = [
+    p.strip() for p in os.getenv("SEARCH_PROVIDER", "").replace("，", ",").lower().split(",") if p.strip()
+]
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
 SEARCH_MAX_RESULTS = int(os.getenv("SEARCH_MAX_RESULTS", "5"))
-SEARCH_MAX_ROUNDS = int(os.getenv("SEARCH_MAX_ROUNDS", "3"))  # 单次回答最多执行搜索的轮数
+SEARCH_MAX_ROUNDS = int(os.getenv("SEARCH_MAX_ROUNDS", "3"))  # 单次回答最多执行工具调用的轮数
 SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "12"))
 SEARCH_RESULT_CHAR_LIMIT = 2400  # 单次回灌给模型的搜索结果文本上限（保护小模型上下文）
 SEARCH_SNIPPET_LIMIT = 400  # 单条结果摘要的长度上限
+FETCH_CHAR_LIMIT = int(os.getenv("FETCH_CHAR_LIMIT", "3500"))  # 单次回灌给模型的网页正文上限
 
 
-def _search_enabled() -> bool:
-    if SEARCH_PROVIDER == "tavily":
+def _provider_ready(p: str) -> bool:
+    if p == "tavily":
         return bool(TAVILY_API_KEY)
-    if SEARCH_PROVIDER == "searxng":
+    if p == "searxng":
         return bool(SEARXNG_BASE_URL)
-    return SEARCH_PROVIDER == "duckduckgo"
+    return p == "duckduckgo"
 
 
-SEARCH_ENABLED = _search_enabled()
+ACTIVE_PROVIDERS = [p for p in SEARCH_PROVIDERS if _provider_ready(p)]
+SEARCH_ENABLED = bool(ACTIVE_PROVIDERS)
 # 逗号分隔的超级管理员用户 ID，可随时用 /adduser /deluser 管理白名单
 ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace("，", ",").split(",") if x.strip()}
 # 逗号分隔的用户 ID 白名单（仅作为首次启动的初始值，之后以 allowed_users.json 为准）
@@ -109,10 +118,17 @@ STRINGS = {
         "search_more": "🔍 正在搜索 {n} 项…",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
-        "search_bad_args": '（工具调用参数无法解析。请重新调用 web_search，参数为 JSON：{{"query": "搜索词"}}）',
+        "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
+        "opening": "🌐 正在读取网页：{url}…",
+        "fetch_bad_url": "（无法读取该地址：仅支持公网 http/https 链接）",
+        "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
+        "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
+        "fetch_empty": "（该网页没有可提取的正文）",
         "search_system_prompt": (
-            "你可以调用 web_search 工具联网搜索实时信息。"
-            "遇到时事、时效性内容或不确定的事实时，先搜索再回答，并在答案中附上来源链接。"
+            "你可以调用 web_search 工具联网搜索实时信息，也可以调用 open_url 工具"
+            "读取网页正文（例如搜索结果里的链接）获取细节。"
+            "遇到时事、时效性内容或不确定的事实时，先搜索、必要时打开网页核实再回答，"
+            "并在答案中附上来源链接。"
         ),
         "current_time": (
             "当前真实时间是 {time}（{tz}），这是系统提供的准确时间，可直接引用。"
@@ -162,11 +178,17 @@ STRINGS = {
         "search_more": "🔍 Running {n} searches…",
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
-        "search_bad_args": '(could not parse the tool arguments; call web_search again with JSON arguments: {{"query": "..."}})',
+        "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
+        "opening": "🌐 Reading page: {url}…",
+        "fetch_bad_url": "(cannot fetch this address: only public http/https URLs are supported)",
+        "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",
+        "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
+        "fetch_empty": "(no readable text on that page)",
         "search_system_prompt": (
-            "You can call the web_search tool to look up real-time information on the internet. "
-            "For current events, time-sensitive topics, or facts you are unsure about, search first, "
-            "then answer and cite source links."
+            "You can call the web_search tool to look up real-time information on the internet, "
+            "and the open_url tool to read the text of a web page (e.g. a link from search results) "
+            "for details. For current events, time-sensitive topics, or facts you are unsure about, "
+            "search first, open pages to verify when needed, then answer and cite source links."
         ),
         "current_time": (
             "The current real-world time is {time} ({tz}). This is accurate time provided by the "
@@ -419,6 +441,29 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+FETCH_URL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "open_url",
+        "description": (
+            "Fetch a web page by URL and return its readable text. "
+            "Use it to read the details behind links found via web_search."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The full http(s) URL of the page to read.",
+                }
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+SEARCH_TOOLS = [WEB_SEARCH_TOOL, FETCH_URL_TOOL]
+
 # 后端明确拒绝 tools 参数后置 False，进程内不再携带（bot 退化为普通对话）
 tools_supported = True
 
@@ -483,25 +528,115 @@ def format_search_results(query: str, rows: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+_PROVIDER_SEARCH = {
+    "tavily": _search_tavily,
+    "searxng": _search_searxng,
+    "duckduckgo": _search_duckduckgo,
+}
+
+
 async def run_web_search(query: str) -> str:
-    """执行联网搜索。永不抛异常：任何失败都返回一段让模型能继续作答的说明文本。"""
+    """并发聚合所有已配置的搜索源。永不抛异常：失败返回让模型能继续作答的说明文本。"""
     query = (query or "").strip()
     if not query:
         return t("search_no_results", query="")
-    logger.info("联网搜索 (%s): %s", SEARCH_PROVIDER, query)
-    try:
-        if SEARCH_PROVIDER == "tavily":
-            rows = await _search_tavily(query)
-        elif SEARCH_PROVIDER == "searxng":
-            rows = await _search_searxng(query)
-        elif SEARCH_PROVIDER == "duckduckgo":
-            rows = await _search_duckduckgo(query)
-        else:
-            return t("search_no_results", query=query)
-    except Exception as e:
-        logger.exception("联网搜索失败 (provider=%s)", SEARCH_PROVIDER)
-        return t("search_error", error=type(e).__name__)
+    logger.info("联网搜索 (%s): %s", "+".join(ACTIVE_PROVIDERS), query)
+    outcomes = await asyncio.gather(
+        *(_PROVIDER_SEARCH[p](query) for p in ACTIVE_PROVIDERS), return_exceptions=True
+    )
+    grouped, first_error = [], None
+    for provider, outcome in zip(ACTIVE_PROVIDERS, outcomes):
+        if isinstance(outcome, BaseException):
+            first_error = first_error or outcome
+            logger.warning("搜索源 %s 失败：%s: %s", provider, type(outcome).__name__, outcome)
+        elif outcome:
+            grouped.append(outcome)
+    if not grouped:
+        if first_error is not None:
+            return t("search_error", error=type(first_error).__name__)
+        return t("search_no_results", query=query)
+    # 各源结果交错合并（每源轮流出一条）并按 URL 去重，保证每个源都有机会排前
+    rows, seen = [], set()
+    for tier in range(max(len(g) for g in grouped)):
+        for g in grouped:
+            if tier < len(g):
+                r = g[tier]
+                key = (r.get("url") or "").split("#")[0].rstrip("/") or r.get("title", "")
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(r)
     return format_search_results(query, rows)
+
+
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_HEAD_RE = re.compile(r"<head\b.*?</head\s*>", re.I | re.S)
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript|svg)\b.*?</\1\s*>", re.I | re.S)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+_BLOCK_TAG_RE = re.compile(r"</?(?:p|div|br|li|ul|ol|tr|table|h[1-6]|section|article|header|footer|blockquote|pre)\b[^>]*>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_to_text(page: str) -> tuple[str, str]:
+    """极简 HTML 正文提取：去掉 script/style/标签，块级标签转换行。返回 (标题, 正文)。"""
+    m = _TITLE_RE.search(page)
+    title = html.unescape(m.group(1)).strip() if m else ""
+    page = _HEAD_RE.sub(" ", page)
+    page = _SCRIPT_STYLE_RE.sub(" ", page)
+    page = _HTML_COMMENT_RE.sub(" ", page)
+    page = _BLOCK_TAG_RE.sub("\n", page)
+    page = _TAG_RE.sub(" ", page)
+    page = html.unescape(page)
+    lines = (re.sub(r"[ \t\r\f\v]+", " ", ln).strip() for ln in page.split("\n"))
+    return title, "\n".join(ln for ln in lines if ln)
+
+
+def _is_public_http_url(url: str) -> bool:
+    """只允许公网 http(s) 地址，拒绝内网/回环地址，避免模型探测内网（SSRF）。"""
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    if parts.hostname == "localhost":
+        return False
+    try:
+        ip = ipaddress.ip_address(parts.hostname)
+    except ValueError:
+        return True  # 是域名而非 IP 字面量；DNS 解析级别的校验不在此处做
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
+
+
+async def run_fetch_url(url: str) -> str:
+    """抓取网页并提取正文回灌给模型。永不抛异常：失败返回说明文本。"""
+    url = (url or "").strip()
+    if not _is_public_http_url(url):
+        return t("fetch_bad_url")
+    logger.info("读取网页: %s", url)
+    try:
+        async with httpx.AsyncClient(
+            timeout=SEARCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; tgrok-bot/1.0)"},
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except Exception as e:
+        logger.warning("读取网页失败 %s: %s", url, type(e).__name__)
+        return t("fetch_error", error=type(e).__name__)
+    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype and not (ctype.startswith("text/") or ctype in ("application/json", "application/xhtml+xml")):
+        return t("fetch_unsupported", ctype=ctype)
+    raw = resp.text[:200_000]  # 粗截超大页面，再做正则提取
+    if "html" in ctype or "<html" in raw[:2000].lower():
+        title, text = _html_to_text(raw)
+    else:
+        title, text = "", raw
+    text = text.strip()
+    if not text:
+        return t("fetch_empty")
+    header = f"{title}\n{resp.url}" if title else str(resp.url)
+    return f"{header}\n\n{text}"[:FETCH_CHAR_LIMIT]
 
 
 async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
@@ -552,22 +687,39 @@ def _assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:
     }
 
 
-def _tool_query(call: dict) -> str | None:
-    """解析 tool_call 的 query 参数；arguments 不是合法 JSON 对象时返回 None。"""
+def _tool_args(call: dict) -> dict | None:
+    """解析 tool_call 的参数；arguments 不是合法 JSON 对象时返回 None。"""
     try:
         args = json.loads(call["function"]["arguments"])
     except (json.JSONDecodeError, TypeError):
         return None
-    return str(args.get("query", "")) if isinstance(args, dict) else None
+    return args if isinstance(args, dict) else None
+
+
+def _call_status(calls: list[dict]) -> str:
+    """生成工具调用期间显示给用户的状态文本。"""
+    if len(calls) != 1:
+        return t("search_more", n=len(calls))
+    args = _tool_args(calls[0]) or {}
+    if calls[0]["function"]["name"] == "open_url":
+        url = str(args.get("url", ""))
+        return t("opening", url=url if len(url) <= 80 else url[:77] + "…")
+    return t("searching", query=str(args.get("query", "")))
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
     results = []
     for call in assistant_msg["tool_calls"]:
-        query = _tool_query(call)
-        content = t("search_bad_args") if query is None else await run_web_search(query)
+        name = call["function"]["name"]
+        args = _tool_args(call)
+        if args is None:
+            content = t("search_bad_args")
+        elif name == "open_url":
+            content = await run_fetch_url(str(args.get("url", "")))
+        else:
+            content = await run_web_search(str(args.get("query", "")))
         results.append(
-            {"role": "tool", "tool_call_id": call["id"], "name": "web_search", "content": content}
+            {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
         )
     return results
 
@@ -579,7 +731,7 @@ async def create_stream(history: list[dict], use_tools: bool):
     while True:
         kwargs = {"model": LLM_MODEL, "messages": history, "stream": True, token_param: MAX_TOKENS}
         if include_tools:
-            kwargs["tools"] = [WEB_SEARCH_TOOL]
+            kwargs["tools"] = SEARCH_TOOLS
             kwargs["tool_choice"] = "auto"
         try:
             return await llm.chat.completions.create(**kwargs)
@@ -696,12 +848,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
-            queries = [q for q in (_tool_query(c) for c in assistant_msg["tool_calls"]) if q]
-            status = (
-                t("searching", query=queries[0])
-                if len(queries) == 1
-                else t("search_more", n=len(assistant_msg["tool_calls"]))
-            )
+            status = _call_status(assistant_msg["tool_calls"])
             if segment.strip():
                 # 模型在搜索前已输出部分正文：状态提示追加在正文之后显示
                 segment += "\n\n"
@@ -913,11 +1060,14 @@ def main() -> None:
     )
     logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
     if SEARCH_ENABLED:
-        logger.info("联网搜索已开启：provider=%s", SEARCH_PROVIDER)
-    elif SEARCH_PROVIDER:
+        logger.info(
+            "联网搜索已开启：provider=%s（web_search + open_url）", ",".join(ACTIVE_PROVIDERS)
+        )
+    skipped = [p for p in SEARCH_PROVIDERS if p not in ACTIVE_PROVIDERS]
+    if skipped:
         logger.warning(
-            "SEARCH_PROVIDER=%s 配置不完整（缺 TAVILY_API_KEY 或 SEARXNG_BASE_URL），联网搜索未开启",
-            SEARCH_PROVIDER,
+            "搜索源 %s 配置不完整或名称不识别（tavily 需 TAVILY_API_KEY，searxng 需 SEARXNG_BASE_URL），已跳过",
+            ",".join(skipped),
         )
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

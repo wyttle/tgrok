@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
 import telegramify_markdown
@@ -46,6 +47,26 @@ MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")
 MAX_IMAGES = 4  # 单次请求最多附带的图片数
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# 联网搜索源：tavily / duckduckgo / searxng，留空关闭。开启后模型可通过 web_search 工具自主搜索
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "").strip().lower()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
+SEARCH_MAX_RESULTS = int(os.getenv("SEARCH_MAX_RESULTS", "5"))
+SEARCH_MAX_ROUNDS = int(os.getenv("SEARCH_MAX_ROUNDS", "3"))  # 单次回答最多执行搜索的轮数
+SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "12"))
+SEARCH_RESULT_CHAR_LIMIT = 2400  # 单次回灌给模型的搜索结果文本上限（保护小模型上下文）
+SEARCH_SNIPPET_LIMIT = 400  # 单条结果摘要的长度上限
+
+
+def _search_enabled() -> bool:
+    if SEARCH_PROVIDER == "tavily":
+        return bool(TAVILY_API_KEY)
+    if SEARCH_PROVIDER == "searxng":
+        return bool(SEARXNG_BASE_URL)
+    return SEARCH_PROVIDER == "duckduckgo"
+
+
+SEARCH_ENABLED = _search_enabled()
 # 逗号分隔的超级管理员用户 ID，可随时用 /adduser /deluser 管理白名单
 ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace("，", ",").split(",") if x.strip()}
 # 逗号分隔的用户 ID 白名单（仅作为首次启动的初始值，之后以 allowed_users.json 为准）
@@ -72,6 +93,15 @@ STRINGS = {
         "thinking": "🤔 Thinking…",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
         "llm_failed": "⚠️ 调用模型失败，请检查 {url} 服务是否可用。",
+        "searching": "🔍 正在搜索：{query}…",
+        "search_more": "🔍 正在搜索 {n} 项…",
+        "search_no_results": "（没有找到「{query}」的联网搜索结果）",
+        "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
+        "search_bad_args": '（工具调用参数无法解析。请重新调用 web_search，参数为 JSON：{{"query": "搜索词"}}）',
+        "search_system_prompt": (
+            "你可以调用 web_search 工具联网搜索实时信息。"
+            "遇到时事、时效性内容或不确定的事实时，先搜索再回答，并在答案中附上来源链接。"
+        ),
         "start": (
             "你好！把我拉进群后这样用：\n"
             "1️⃣ 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
@@ -111,6 +141,16 @@ STRINGS = {
         "thinking": "🤔 Thinking…",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
         "llm_failed": "⚠️ Failed to call the model. Please check that {url} is reachable.",
+        "searching": "🔍 Searching: {query}…",
+        "search_more": "🔍 Running {n} searches…",
+        "search_no_results": "(no web search results found for \"{query}\")",
+        "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
+        "search_bad_args": '(could not parse the tool arguments; call web_search again with JSON arguments: {{"query": "..."}})',
+        "search_system_prompt": (
+            "You can call the web_search tool to look up real-time information on the internet. "
+            "For current events, time-sensitive topics, or facts you are unsure about, search first, "
+            "then answer and cite source links."
+        ),
         "start": (
             "Hi! Add me to a group and use me like this:\n"
             "1️⃣ Reply to any message and mention me with a question, e.g. \"@{username} is this true?\"\n"
@@ -142,6 +182,9 @@ def t(key: str, **kwargs) -> str:
 
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
+if SEARCH_ENABLED:
+    # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
+    SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")
 
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
@@ -307,31 +350,213 @@ def build_content(text: str, images: list[str]):
     ]
 
 
-async def create_stream(history: list[dict]):
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Search the web for up-to-date information. Use this for recent events, "
+            "time-sensitive facts, or anything you are unsure about."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query, in the language most likely to find good results.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+# 后端明确拒绝 tools 参数后置 False，进程内不再携带（bot 退化为普通对话）
+tools_supported = True
+
+
+async def _search_tavily(query: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+        resp = await client.post(
+            "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
+            json={"query": query, "max_results": SEARCH_MAX_RESULTS, "search_depth": "basic"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return [
+        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+        for r in data.get("results", [])
+    ]
+
+
+async def _search_searxng(query: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+        resp = await client.get(
+            f"{SEARXNG_BASE_URL}/search", params={"q": query, "format": "json"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return [
+        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+        for r in data.get("results", [])[:SEARCH_MAX_RESULTS]
+    ]
+
+
+async def _search_duckduckgo(query: str) -> list[dict]:
+    from ddgs import DDGS  # 惰性导入：仅 duckduckgo 源需要安装 ddgs
+
+    def _run() -> list[dict]:
+        with DDGS(timeout=SEARCH_TIMEOUT) as ddgs:
+            return list(ddgs.text(query, max_results=SEARCH_MAX_RESULTS))
+
+    rows = await asyncio.to_thread(_run)
+    return [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("href") or r.get("url", ""),
+            "snippet": r.get("body") or r.get("description", ""),
+        }
+        for r in rows
+    ]
+
+
+def format_search_results(query: str, rows: list[dict]) -> str:
+    blocks, total = [], 0
+    for i, r in enumerate(rows, 1):
+        snippet = (r.get("snippet") or "").strip()[:SEARCH_SNIPPET_LIMIT]
+        block = f"[{i}] {r.get('title', '')}\n{r.get('url', '')}\n{snippet}"
+        if total + len(block) > SEARCH_RESULT_CHAR_LIMIT:
+            break
+        blocks.append(block)
+        total += len(block)
+    if not blocks:
+        return t("search_no_results", query=query)
+    return "\n\n".join(blocks)
+
+
+async def run_web_search(query: str) -> str:
+    """执行联网搜索。永不抛异常：任何失败都返回一段让模型能继续作答的说明文本。"""
+    query = (query or "").strip()
+    if not query:
+        return t("search_no_results", query="")
     try:
-        return await llm.chat.completions.create(
-            model=LLM_MODEL,
-            messages=history,
-            max_tokens=MAX_TOKENS,
-            stream=True,
+        if SEARCH_PROVIDER == "tavily":
+            rows = await _search_tavily(query)
+        elif SEARCH_PROVIDER == "searxng":
+            rows = await _search_searxng(query)
+        elif SEARCH_PROVIDER == "duckduckgo":
+            rows = await _search_duckduckgo(query)
+        else:
+            return t("search_no_results", query=query)
+    except Exception as e:
+        logger.exception("联网搜索失败 (provider=%s)", SEARCH_PROVIDER)
+        return t("search_error", error=type(e).__name__)
+    return format_search_results(query, rows)
+
+
+async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
+    """消费流式响应：正文片段逐个交给 on_text，tool_call 片段按 index 聚合。
+
+    返回（聚合后的 tool_calls, 本轮完整正文）。
+    """
+    calls: dict[int, dict] = {}
+    content = ""
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+        if delta.content:
+            content += delta.content
+            await on_text(delta.content)
+        for tc in delta.tool_calls or []:
+            slot = calls.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+            if tc.id:
+                slot["id"] = tc.id
+            if tc.function:
+                if tc.function.name:
+                    slot["name"] = tc.function.name
+                if tc.function.arguments:
+                    slot["arguments"] += tc.function.arguments
+    return calls, content
+
+
+def _assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:
+    """把聚合好的 tool_call 片段组装成请求格式的 assistant 消息。"""
+    return {
+        "role": "assistant",
+        "content": content or "",
+        "tool_calls": [
+            {
+                # 部分本地后端不回 id：合成一个，并在 tool 结果里复用以保持配对
+                "id": slot["id"] or f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": slot["name"] or "web_search",
+                    "arguments": slot["arguments"] or "{}",
+                },
+            }
+            for i, slot in sorted(calls.items())
+        ],
+    }
+
+
+def _tool_query(call: dict) -> str | None:
+    """解析 tool_call 的 query 参数；arguments 不是合法 JSON 对象时返回 None。"""
+    try:
+        args = json.loads(call["function"]["arguments"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return str(args.get("query", "")) if isinstance(args, dict) else None
+
+
+async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
+    results = []
+    for call in assistant_msg["tool_calls"]:
+        query = _tool_query(call)
+        content = t("search_bad_args") if query is None else await run_web_search(query)
+        results.append(
+            {"role": "tool", "tool_call_id": call["id"], "name": "web_search", "content": content}
         )
-    except BadRequestError as e:
-        # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
-        if "max_completion_tokens" not in str(e):
+    return results
+
+
+async def create_stream(history: list[dict], use_tools: bool):
+    global tools_supported
+    token_param = "max_tokens"
+    include_tools = use_tools and tools_supported
+    while True:
+        kwargs = {"model": LLM_MODEL, "messages": history, "stream": True, token_param: MAX_TOKENS}
+        if include_tools:
+            kwargs["tools"] = [WEB_SEARCH_TOOL]
+            kwargs["tool_choice"] = "auto"
+        try:
+            return await llm.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            err = str(e).lower()
+            # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
+            if token_param == "max_tokens" and "max_completion_tokens" in err:
+                token_param = "max_completion_tokens"
+                continue
+            # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用
+            if include_tools and "tool" in err:
+                logger.warning("后端拒绝 tools 参数，联网搜索已禁用（重启进程后会再次尝试）：%s", e)
+                tools_supported = False
+                include_tools = False
+                continue
             raise
-        return await llm.chat.completions.create(
-            model=LLM_MODEL,
-            messages=history,
-            max_completion_tokens=MAX_TOKENS,
-            stream=True,
-        )
 
 
 async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | None, str]:
-    """流式生成并逐步编辑 Telegram 消息。
+    """流式生成并逐步编辑 Telegram 消息，支持模型通过 web_search 工具联网搜索。
 
     先发送思考占位提示（推理模型思考期间无正文输出），首个正文数据块到达后原地替换；
     单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
+    模型请求搜索时在当前消息上显示 🔍 状态，执行后把结果回灌给模型继续生成
+    （最多 SEARCH_MAX_ROUNDS 轮）。传入的 history 不会被修改，中间的 tool
+    消息只存在于本次调用内部，不会进入对话缓存。
     返回（最后一条已发送消息或 None, 完整回复文本）；失败/空回复时已就地提示，返回 (None, "")。
     """
     try:
@@ -384,23 +609,58 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         except BadRequest:
             pass  # 例如 message is not modified
 
+    async def on_text(delta: str) -> None:
+        nonlocal segment, sent, last_edit, finalized
+        segment += delta
+        if len(segment) >= STREAM_SEGMENT_LIMIT:
+            # 当前消息已满：定稿并另起一条
+            await push(segment, final=True)
+            finalized += segment
+            segment, sent, last_edit = "", None, 0.0
+            return
+        now = time.monotonic()
+        if now - last_edit >= STREAM_EDIT_INTERVAL:
+            await push(segment, final=False)
+            last_edit = now
+
+    async def show_status(text: str) -> None:
+        # 搜索状态提示：编辑当前气泡，之后的正文 push 会自然覆盖它
+        nonlocal sent, last_edit
+        try:
+            if sent is None:
+                sent = await msg.reply_text(text)
+            else:
+                await sent.edit_text(text)
+        except RetryAfter as e:
+            await asyncio.sleep(float(e.retry_after) + 0.5)
+        except TelegramError:
+            pass
+        last_edit = 0.0  # 让下一次正文编辑立即生效
+
+    working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
     try:
-        stream = await create_stream(history)
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if not delta:
-                continue
-            segment += delta
-            if len(segment) >= STREAM_SEGMENT_LIMIT:
-                # 当前消息已满：定稿并另起一条
-                await push(segment, final=True)
-                finalized += segment
-                segment, sent, last_edit = "", None, 0.0
-                continue
-            now = time.monotonic()
-            if now - last_edit >= STREAM_EDIT_INTERVAL:
-                await push(segment, final=False)
-                last_edit = now
+        for round_idx in range(SEARCH_MAX_ROUNDS + 1):
+            # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
+            use_tools = SEARCH_ENABLED and round_idx < SEARCH_MAX_ROUNDS
+            stream = await create_stream(working, use_tools=use_tools)
+            calls, content = await _drain_stream(stream, on_text)
+            if not calls or not use_tools:
+                break
+            assistant_msg = _assistant_tool_call_msg(calls, content)
+            queries = [q for q in (_tool_query(c) for c in assistant_msg["tool_calls"]) if q]
+            status = (
+                t("searching", query=queries[0])
+                if len(queries) == 1
+                else t("search_more", n=len(assistant_msg["tool_calls"]))
+            )
+            if segment.strip():
+                # 模型在搜索前已输出部分正文：状态提示追加在正文之后显示
+                segment += "\n\n"
+                await show_status(segment + status)
+            else:
+                await show_status(status)
+            working.append(assistant_msg)
+            working.extend(await _execute_tool_calls(assistant_msg))
     except Exception:
         logger.exception("调用 LLM 失败")
         try:
@@ -595,6 +855,13 @@ def main() -> None:
         )
     )
     logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
+    if SEARCH_ENABLED:
+        logger.info("联网搜索已开启：provider=%s", SEARCH_PROVIDER)
+    elif SEARCH_PROVIDER:
+        logger.warning(
+            "SEARCH_PROVIDER=%s 配置不完整（缺 TAVILY_API_KEY 或 SEARXNG_BASE_URL），联网搜索未开启",
+            SEARCH_PROVIDER,
+        )
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 

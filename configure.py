@@ -37,37 +37,43 @@ TEXT = {
         "optional": "可选，回车跳过",
         "field_required": "  ✗ 该项必填，请输入。\n",
         "yes_values": ("y", "yes", "是"),
-        "s1": "【1/8】Telegram Bot Token（找 @BotFather 发 /newbot 获取）",
+        "s1": "【1/9】Telegram Bot Token（找 @BotFather 发 /newbot 获取）",
         "token": "Bot Token",
         "token_invalid_fmt": "格式不对，Bot Token 形如 123456789:ABCdefGhI...（从 @BotFather 获取）",
         "token_net_fail": "  ⚠ 无法连接 Telegram 验证（{err}），跳过在线验证",
         "token_ok": "  ✓ Token 有效，bot 用户名：@{username}",
         "token_bad": "  ✗ Token 无效（Telegram 返回未授权）",
         "token_use_anyway": "  仍然使用该 Token？",
-        "s2a": "【2/8】超级管理员用户 ID（强烈建议填写自己的 ID，可用 @userinfobot 查询）",
+        "s2a": "【2/9】超级管理员用户 ID（强烈建议填写自己的 ID，可用 @userinfobot 查询）",
         "s2b": "      配置后进入受控模式：仅管理员 + 白名单用户可用，可用 /adduser /deluser 管理",
         "admin_ids": "管理员 ID（多个用逗号分隔）",
         "ids_invalid": "请输入纯数字的用户 ID，多个用逗号分隔，例如：123456789,987654321",
-        "s3": "【3/8】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）",
+        "s3": "【3/9】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）",
         "allowed_ids": "白名单 ID（多个用逗号分隔）",
-        "s4a": "【4/8】LLM 的 OpenAI 兼容接口",
+        "s4a": "【4/9】LLM 的 OpenAI 兼容接口",
         "s4b": "      LM Studio 默认 http://localhost:1234/v1，vLLM 默认 http://localhost:8000/v1，OpenAI 官方 https://api.openai.com/v1",
         "base_url": "接口地址",
         "api_key": "API Key（本地服务一般随便填）",
         "ua": "自定义 User-Agent（部分云端网关会校验 UA，可选）",
-        "s5": "【5/8】模型名称",
+        "s5": "【5/9】模型名称",
         "models_fail": "  ⚠ 无法连接 {url} 获取模型列表（{err}），请手动输入",
         "models_found": "  ✓ 检测到以下可用模型：",
         "model_pick": "输入序号选择，或直接输入模型名",
         "model_name": "模型名称",
-        "s6a": "【6/8】图片理解（多模态）",
+        "s6a": "【6/9】图片理解（多模态）",
         "s6b": "      模型支持视觉输入时开启：群友发图或回复图片提问，图片会发给模型一起分析",
         "vision_ask": "  开启图片理解？",
-        "s7": "【7/8】生成参数",
+        "s_search_a": "【7/9】联网搜索（web_search 工具）",
+        "s_search_b": "      模型可自主联网搜索实时信息（需模型支持 function calling）：\n      tavily 需免费 API key（tavily.com），duckduckgo 零配置，searxng 需自建实例",
+        "search_pick": "搜索源：0=关闭  1=tavily  2=duckduckgo  3=searxng",
+        "search_invalid": "请输入 0-3，或直接输入 tavily / duckduckgo / searxng",
+        "tavily_key": "Tavily API Key",
+        "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
+        "s7": "【8/9】生成参数",
         "max_tokens": "单次回答最大 token 数",
         "max_history": "多轮对话保留消息条数",
         "int_invalid": "请输入正整数",
-        "s8": "【8/8】系统提示词（定义 bot 的角色和语气，跳过则使用内置默认值）",
+        "s8": "【9/9】系统提示词（定义 bot 的角色和语气，跳过则使用内置默认值）",
         "sys_prompt": "系统提示词",
         "summary": "配置汇总：",
         "write_confirm": "确认写入 {path}？",
@@ -86,37 +92,43 @@ TEXT = {
         "optional": "optional, Enter to skip",
         "field_required": "  ✗ This field is required.\n",
         "yes_values": ("y", "yes"),
-        "s1": "[1/8] Telegram Bot Token (get one from @BotFather with /newbot)",
+        "s1": "[1/9] Telegram Bot Token (get one from @BotFather with /newbot)",
         "token": "Bot Token",
         "token_invalid_fmt": "Invalid format. A bot token looks like 123456789:ABCdefGhI... (from @BotFather)",
         "token_net_fail": "  ⚠ Could not reach Telegram to validate ({err}); skipping online check",
         "token_ok": "  ✓ Token is valid, bot username: @{username}",
         "token_bad": "  ✗ Invalid token (Telegram returned unauthorized)",
         "token_use_anyway": "  Use this token anyway?",
-        "s2a": "[2/8] Super admin user IDs (strongly recommended — use @userinfobot to find yours)",
+        "s2a": "[2/9] Super admin user IDs (strongly recommended — use @userinfobot to find yours)",
         "s2b": "      With admins set, the bot is in controlled mode: only admins + whitelisted users; manage with /adduser /deluser",
         "admin_ids": "Admin IDs (comma-separated)",
         "ids_invalid": "Please enter numeric user IDs, comma-separated, e.g. 123456789,987654321",
-        "s3": "[3/8] Initial whitelist user IDs (you can always /adduser later; OK to skip)",
+        "s3": "[3/9] Initial whitelist user IDs (you can always /adduser later; OK to skip)",
         "allowed_ids": "Whitelist IDs (comma-separated)",
-        "s4a": "[4/8] OpenAI-compatible LLM endpoint",
+        "s4a": "[4/9] OpenAI-compatible LLM endpoint",
         "s4b": "      LM Studio default http://localhost:1234/v1, vLLM http://localhost:8000/v1, official OpenAI https://api.openai.com/v1",
         "base_url": "Endpoint URL",
         "api_key": "API key (anything works for most local servers)",
         "ua": "Custom User-Agent (some cloud gateways validate it; optional)",
-        "s5": "[5/8] Model name",
+        "s5": "[5/9] Model name",
         "models_fail": "  ⚠ Could not fetch model list from {url} ({err}); please type it manually",
         "models_found": "  ✓ Available models detected:",
         "model_pick": "Pick a number, or type a model name",
         "model_name": "Model name",
-        "s6a": "[6/8] Image understanding (multimodal)",
+        "s6a": "[6/9] Image understanding (multimodal)",
         "s6b": "      Enable if the model supports vision: images sent or quoted in chat are passed to the model",
         "vision_ask": "  Enable image understanding?",
-        "s7": "[7/8] Generation parameters",
+        "s_search_a": "[7/9] Web search (web_search tool)",
+        "s_search_b": "      Lets the model search the internet on its own (requires function calling support):\n      tavily needs a free API key (tavily.com), duckduckgo is zero-config, searxng needs a self-hosted instance",
+        "search_pick": "Provider: 0=off  1=tavily  2=duckduckgo  3=searxng",
+        "search_invalid": "Enter 0-3, or type tavily / duckduckgo / searxng",
+        "tavily_key": "Tavily API key",
+        "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
+        "s7": "[8/9] Generation parameters",
         "max_tokens": "Max tokens per reply",
         "max_history": "Messages kept per conversation",
         "int_invalid": "Please enter a positive integer",
-        "s8": "[8/8] System prompt (defines the bot's role and tone; skip for the built-in default)",
+        "s8": "[9/9] System prompt (defines the bot's role and tone; skip for the built-in default)",
         "sys_prompt": "System prompt",
         "summary": "Configuration summary:",
         "write_confirm": "Write to {path}?",
@@ -329,13 +341,36 @@ def main() -> None:
     cfg["ENABLE_VISION"] = "true" if confirm(T["vision_ask"], default_yes=vision_default) else "false"
     print()
 
-    # ---- 7. Generation params ----
+    # ---- 7. Web search ----
+    print(T["s_search_a"])
+    print(T["s_search_b"])
+    provider_alias = {"0": "", "none": "", "off": "", "1": "tavily", "2": "duckduckgo", "3": "searxng"}
+
+    def validate_provider(raw: str):
+        v = raw.strip().lower()
+        if v in provider_alias or v in ("tavily", "duckduckgo", "searxng"):
+            return True, ""
+        return False, T["search_invalid"]
+
+    raw_provider = ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""), validate=validate_provider)
+    v = raw_provider.strip().lower()
+    provider = provider_alias.get(v, v)
+    cfg["SEARCH_PROVIDER"] = provider
+    if provider == "tavily":
+        cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
+                                    required=True, secret=True)
+    elif provider == "searxng":
+        cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),
+                                      required=True)
+    print()
+
+    # ---- 8. Generation params ----
     print(T["s7"])
     cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old.get("MAX_TOKENS", "1024"), validate=validate_int)
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     print()
 
-    # ---- 8. System prompt ----
+    # ---- 9. System prompt ----
     print(T["s8"])
     cfg["SYSTEM_PROMPT"] = ask(T["sys_prompt"], default=old.get("SYSTEM_PROMPT", ""))
     print()

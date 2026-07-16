@@ -13,6 +13,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Follow-ups**: reply to the bot's answers to continue the conversation with full context
 - **Private chat**: just message the bot directly
 - **Image understanding**: with a vision-capable model, ask about photos sent in the group
+- **Web search**: the model can search the internet on its own via a `web_search` tool and answer with sources (Tavily / DuckDuckGo / SearXNG)
 - **Streaming replies**: answers appear progressively (typewriter style); long generations won't be cut off by gateway idle timeouts
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
@@ -73,6 +74,10 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `MAX_TOKENS` | max tokens per reply | `1024` |
 | `MAX_HISTORY` | messages kept per conversation | `20` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
+| `SEARCH_PROVIDER` | web search provider: `tavily` / `duckduckgo` / `searxng`, empty = off | (empty) |
+| `TAVILY_API_KEY` | Tavily API key (required with `SEARCH_PROVIDER=tavily`) | (empty) |
+| `SEARXNG_BASE_URL` | SearXNG instance URL (required with `SEARCH_PROVIDER=searxng`) | (empty) |
+| `SEARCH_MAX_RESULTS` | search results fed back to the model per query | `5` |
 | `ADMIN_USER_IDS` | super admin IDs (comma-separated) | (empty) |
 | `ALLOWED_USER_IDS` | initial whitelist, first start only | (empty) |
 
@@ -116,6 +121,29 @@ With a vision-capable model, set `ENABLE_VISION=true` (wizard step 6) to:
 
 Note: with vision enabled, group images are sent to your configured LLM service — if that's
 a cloud API, images leave your server.
+
+## Web search
+
+Language models have no internet access by themselves — asked about current events, they
+either say so or hallucinate. With web search enabled, the bot attaches a `web_search` tool:
+the model decides on its own when to search, the bot performs the search and feeds the results
+back, and the model answers with source links (the message shows a 🔍 status while searching).
+
+Set `SEARCH_PROVIDER` to pick a provider (or re-run `python configure.py`, wizard step 7):
+
+| Provider | Extra config | Notes |
+|---|---|---|
+| `tavily` | `TAVILY_API_KEY` | hosted, LLM-optimized results, best quality; free tier ~1000 searches/mo ([tavily.com](https://tavily.com)) |
+| `duckduckgo` | none | zero-config, no key (uses the `ddgs` package); less reliable, may get rate-limited |
+| `searxng` | `SEARXNG_BASE_URL` | self-hosted metasearch, free and private; the instance must have JSON output enabled |
+
+Notes:
+
+- The model/backend must support **function calling** (tool calling). Mainstream cloud models
+  and recent open models served by LM Studio / vLLM / llama.cpp (with `--jinja`) all do; if the
+  backend rejects tools, the bot automatically falls back to plain chat.
+- An answer uses at most 3 search rounds (`SEARCH_MAX_ROUNDS`), i.e. up to 4 model calls, so
+  search-assisted answers are a bit slower.
 
 ## Deployment (long-running)
 
@@ -163,6 +191,8 @@ journalctl -u tgbot -f
 
 - **No reaction to mentions in groups**: check that privacy mode is disabled (step 4 above)
   and that the bot was re-added to the group afterwards.
+- **The model says it can't access the internet**: by default it really can't. Set
+  `SEARCH_PROVIDER` to enable web search (see "Web search" above).
 - **"Failed to call the model"**: verify the LLM server is running and `LLM_BASE_URL` /
   `LLM_MODEL` match the server.
 - **Conversations forgotten after restart**: history lives in memory and is lost on restart;

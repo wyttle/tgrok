@@ -67,6 +67,9 @@ SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "12"))
 SEARCH_RESULT_CHAR_LIMIT = 2400  # 单次回灌给模型的搜索结果文本上限（保护小模型上下文）
 SEARCH_SNIPPET_LIMIT = 400  # 单条结果摘要的长度上限
 FETCH_CHAR_LIMIT = int(os.getenv("FETCH_CHAR_LIMIT", "3500"))  # 单次回灌给模型的网页正文上限
+# 流式空闲看门狗：已有正文后连续这么多秒没有新数据，视为生成已完成、主动收尾。
+# 部分网关在内容发完后不发结束帧，流会一直空挂到上游超时报错。0 = 关闭
+STREAM_IDLE_TIMEOUT = float(os.getenv("STREAM_IDLE_TIMEOUT", "45"))
 # open_url 直接抓取失败（反爬 403 / JS 页面 / 正文过少）时，自动改走 Jina Reader 再试
 JINA_FALLBACK = os.getenv("JINA_FALLBACK", "true").strip().lower() in ("1", "true", "yes", "on")
 JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率限制更宽松
@@ -121,7 +124,7 @@ STRINGS = {
         "empty_reply": "（模型返回了空回复）",
         "thinking": "🤔 Thinking…",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
-        "llm_failed": "⚠️ 调用模型失败，请检查 {url} 服务是否可用。",
+        "llm_failed": "⚠️ 调用模型失败，请稍后重试；若持续失败请联系管理员。",
         "searching": "🔍 正在搜索：{query}…",
         "search_more": "🔍 正在搜索 {n} 项…",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
@@ -185,7 +188,7 @@ STRINGS = {
         "empty_reply": "(the model returned an empty response)",
         "thinking": "🤔 Thinking…",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
-        "llm_failed": "⚠️ Failed to call the model. Please check that {url} is reachable.",
+        "llm_failed": "⚠️ Failed to call the model. Please try again later; contact the admin if it persists.",
         "searching": "🔍 Searching: {query}…",
         "search_more": "🔍 Running {n} searches…",
         "search_no_results": "(no web search results found for \"{query}\")",
@@ -714,7 +717,9 @@ async def _fetch_local(url: str) -> tuple[str | None, str]:
             follow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0 (compatible; tgrok-bot/1.0)"},
         ) as client:
-            resp = await client.get(url)
+            # wait_for 提供总时长上界：httpx 的 read 超时只管字节间隔，
+            # 滴漏式慢服务器可以把单次抓取拖到分钟级
+            resp = await asyncio.wait_for(client.get(url), SEARCH_TIMEOUT + 3)
             resp.raise_for_status()
     except Exception as e:
         logger.warning("直接读取网页失败 %s: %s", url, type(e).__name__)
@@ -751,7 +756,9 @@ async def _fetch_jina(url: str) -> str | None:
         headers["Authorization"] = f"Bearer {JINA_API_KEY}"
     try:
         async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT * 2, follow_redirects=True) as client:
-            resp = await client.get(f"https://r.jina.ai/{url}", headers=headers)
+            resp = await asyncio.wait_for(
+                client.get(f"https://r.jina.ai/{url}", headers=headers), SEARCH_TIMEOUT * 2 + 6
+            )
             resp.raise_for_status()
     except Exception as e:
         logger.warning("Jina Reader 读取失败 %s: %s", url, type(e).__name__)
@@ -767,13 +774,18 @@ async def run_fetch_url(url: str) -> str:
     if not _is_public_http_url(url):
         return t("fetch_bad_url")
     logger.info("读取网页: %s", url)
+    t0 = time.monotonic()
     text, err = await _fetch_local(url)
     if text is not None:
+        logger.info("读取网页完成（直取 %.1fs，%d 字）: %s", time.monotonic() - t0, len(text), url)
         return text
     if JINA_FALLBACK:
         logger.info("直取失败，改走 Jina Reader: %s", url)
         jina_text = await _fetch_jina(url)
         if jina_text:
+            logger.info(
+                "读取网页完成（Jina 兜底，共 %.1fs，%d 字）: %s", time.monotonic() - t0, len(jina_text), url
+            )
             return jina_text
     return err
 
@@ -781,11 +793,32 @@ async def run_fetch_url(url: str) -> str:
 async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
     """消费流式响应：正文片段逐个交给 on_text，tool_call 片段按 index 聚合。
 
+    空闲看门狗：已有正文、且没有聚合到一半的 tool_call 时，超过
+    STREAM_IDLE_TIMEOUT 秒没有新数据就视为生成完成、主动收尾——部分网关
+    发完内容后不发结束帧，流会空挂到上游超时。
     返回（聚合后的 tool_calls, 本轮完整正文）。
     """
     calls: dict[int, dict] = {}
     content = ""
-    async for chunk in stream:
+    it = stream.__aiter__()
+    while True:
+        try:
+            if content and not calls and STREAM_IDLE_TIMEOUT > 0:
+                chunk = await asyncio.wait_for(anext(it), STREAM_IDLE_TIMEOUT)
+            else:
+                chunk = await anext(it)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            logger.warning(
+                "LLM 流已有正文但 %.0fs 无新数据，视为完成（正文 %d 字）",
+                STREAM_IDLE_TIMEOUT, len(content),
+            )
+            try:
+                await stream.close()
+            except Exception:
+                pass
+            break
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -982,19 +1015,38 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         for round_idx in range(SEARCH_MAX_ROUNDS + 1):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
             use_tools = SEARCH_ENABLED and round_idx < SEARCH_MAX_ROUNDS
+            if round_idx and not segment.strip():
+                # 工具执行完、新一轮生成开始：状态切回思考中，避免旧的搜索状态挂着像卡死
+                await show_status(t("thinking"))
+            t0 = time.monotonic()
             for attempt in range(2):
-                out_before = (len(finalized), len(segment))
+                out_before = len(finalized) + len(segment.strip())
+                t0 = time.monotonic()
                 try:
                     stream = await create_stream(working, use_tools=use_tools)
                     calls, content = await _drain_stream(stream, on_text)
                     break
-                except Exception:
-                    # 网关偶发掐流：本轮尚未向用户输出任何正文时，原样静默重试一次；
-                    # 已有输出则不能重试（会重复/错乱），按失败处理
-                    if attempt or (len(finalized), len(segment)) != out_before:
+                except Exception as e:
+                    elapsed = time.monotonic() - t0
+                    if len(finalized) + len(segment.strip()) != out_before:
+                        # 正文已经到手、流在收尾阶段被上游掐断：按完成处理而非失败
+                        logger.warning(
+                            "LLM 流中断但正文已到手（round=%d, %.1fs, %s），按完成处理",
+                            round_idx, elapsed, type(e).__name__,
+                        )
+                        calls, content = {}, segment
+                        break
+                    if attempt:
                         raise
-                    logger.warning("LLM 流中断且本轮无输出，重试一次（round=%d）", round_idx)
+                    logger.warning(
+                        "LLM 流中断且本轮无输出（round=%d, %.1fs, %s），重试一次",
+                        round_idx, elapsed, type(e).__name__,
+                    )
                     await asyncio.sleep(1.5)
+            logger.info(
+                "LLM round=%d 完成 %.1fs：正文 %d 字，工具请求 %d 项",
+                round_idx, time.monotonic() - t0, len(content), len(calls),
+            )
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
@@ -1013,11 +1065,11 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if segment.strip():
                 # 已有部分内容：保留定稿，错误另发一条
                 await push(segment, final=True)
-                await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
+                await msg.reply_text(t("llm_failed"))
             elif sent is not None and not finalized:
-                await sent.edit_text(t("llm_failed", url=LLM_BASE_URL))
+                await sent.edit_text(t("llm_failed"))
             else:
-                await msg.reply_text(t("llm_failed", url=LLM_BASE_URL))
+                await msg.reply_text(t("llm_failed"))
         except TelegramError:
             pass
         return None, ""

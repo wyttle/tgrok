@@ -20,6 +20,7 @@ import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
+from itertools import count
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -28,11 +29,12 @@ import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, BadRequestError
 import telegramify_markdown
-from telegram import BotCommand, Message, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import MessageEntityType, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -122,15 +124,18 @@ STRINGS = {
         "comment_default": "请评论/核实这条消息。",
         "look_image": "请看这张图片。",
         "empty_reply": "（模型返回了空回复）",
-        "thinking": "🤔 Thinking…",
+        "thinking_stages": ["🤔 思考中", "🧠 深入思考中", "🔎 继续深挖", "✨ 就快好了"],
+        "btn_cancel": "✕ 取消",
+        "cancelled": "❌ 已取消",
+        "cancelled_suffix": "❌（已取消，以上为部分回复）",
+        "cancel_done": "已取消",
+        "cancel_denied": "只有提问者或管理员可以取消",
+        "cancel_gone": "本次回复已结束",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
         "llm_failed": "⚠️ 调用模型失败，请稍后重试；若持续失败请联系管理员。",
-        "searching": "🔍 正在搜索：{query}…",
-        "search_more": "🔍 正在搜索 {n} 项…",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
-        "opening": "🌐 正在读取网页：{url}…",
         "fetch_bad_url": "（无法读取该地址：仅支持公网 http/https 链接）",
         "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
         "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
@@ -186,15 +191,18 @@ STRINGS = {
         "comment_default": "Please comment on / fact-check this message.",
         "look_image": "Please look at this image.",
         "empty_reply": "(the model returned an empty response)",
-        "thinking": "🤔 Thinking…",
+        "thinking_stages": ["🤔 Thinking", "🧠 Thinking hard", "🔎 Digging deeper", "✨ Almost done"],
+        "btn_cancel": "✕ Cancel",
+        "cancelled": "❌ Cancelled",
+        "cancelled_suffix": "❌ (cancelled — partial reply above)",
+        "cancel_done": "Cancelled",
+        "cancel_denied": "Only the asker or an admin can cancel",
+        "cancel_gone": "This reply has already finished",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
         "llm_failed": "⚠️ Failed to call the model. Please try again later; contact the admin if it persists.",
-        "searching": "🔍 Searching: {query}…",
-        "search_more": "🔍 Running {n} searches…",
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
-        "opening": "🌐 Reading page: {url}…",
         "fetch_bad_url": "(cannot fetch this address: only public http/https URLs are supported)",
         "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",
         "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
@@ -868,15 +876,28 @@ def _tool_args(call: dict) -> dict | None:
     return args if isinstance(args, dict) else None
 
 
-def _call_status(calls: list[dict]) -> str:
-    """生成工具调用期间显示给用户的状态文本。"""
-    if len(calls) != 1:
-        return t("search_more", n=len(calls))
-    args = _tool_args(calls[0]) or {}
-    if calls[0]["function"]["name"] == "open_url":
-        url = str(args.get("url", ""))
-        return t("opening", url=url if len(url) <= 80 else url[:77] + "…")
-    return t("searching", query=str(args.get("query", "")))
+def _stage_line(round_idx: int) -> str:
+    """第 N 轮生成对应的阶段文案（思考中 → 深入思考中 → …），超出取最后一档。"""
+    stages = STRINGS[BOT_LANG]["thinking_stages"]
+    return stages[min(round_idx, len(stages) - 1)]
+
+
+def _call_lines(calls_list: list[dict]) -> list[str]:
+    """把一轮工具调用渲染成进度日志行：🔍 搜索词 / 🌐 域名。"""
+    lines = []
+    for call in calls_list:
+        args = _tool_args(call) or {}
+        if call["function"]["name"] == "open_url":
+            url = str(args.get("url", ""))
+            try:
+                host = urlparse(url).hostname or url[:40] or "?"
+            except ValueError:
+                host = url[:40] or "?"
+            lines.append(f"🌐 {host}")
+        else:
+            query = str(args.get("query", "")).strip() or "?"
+            lines.append(f"🔍 {query[:48]}")
+    return lines
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
@@ -922,6 +943,18 @@ async def create_stream(history: list[dict], use_tools: bool):
             raise
 
 
+# 进行中的生成任务：gen_id -> (asyncio.Task, 提问者 user_id)。
+# 取消按钮回调据此找到任务并 cancel；仅提问者本人或管理员可取消
+_gen_count = count(1)
+active_generations: dict[int, tuple[asyncio.Task, int]] = {}
+
+
+def _cancel_markup(gen_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(t("btn_cancel"), callback_data=f"c:{gen_id}")]]
+    )
+
+
 async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | None, str]:
     """流式生成并逐步编辑 Telegram 消息，支持模型通过 web_search 工具联网搜索。
 
@@ -932,10 +965,19 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     消息只存在于本次调用内部，不会进入对话缓存。
     返回（最后一条已发送消息或 None, 完整回复文本）；失败/空回复时已就地提示，返回 (None, "")。
     """
+    gen_id = next(_gen_count)
+    task = asyncio.current_task()
+    requester = msg.from_user.id if msg.from_user else 0
+    if task is not None:
+        active_generations[gen_id] = (task, requester)
+    markup = _cancel_markup(gen_id)
+    progress: list[str] = []  # 已发生的工具行（🔍 搜索词 / 🌐 域名，完成后打 ✓）
+    stage: str | None = _stage_line(0)  # 底部状态行：思考阶段文本，原地替换而非追加
     try:
-        sent: Message | None = await msg.reply_text(t("thinking"))
+        sent: Message | None = await msg.reply_text(stage + "…", reply_markup=markup)
     except TelegramError:
         logger.exception("发送占位消息失败")
+        active_generations.pop(gen_id, None)
         return None, ""
     finalized = ""  # 已定稿消息承载的文本
     segment = ""  # 当前消息正在累积的文本
@@ -945,7 +987,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         nonlocal sent
         try:
             if sent is None:
-                # 首次发送：定稿走 MarkdownV2，中间过程用纯文本+光标
+                # 首次发送：定稿走 MarkdownV2（不带按钮），中间过程用纯文本+光标+取消按钮
                 if final:
                     try:
                         sent = await msg.reply_text(
@@ -954,7 +996,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                     except BadRequest:
                         sent = await msg.reply_text(text)
                 else:
-                    sent = await msg.reply_text(text + STREAM_CURSOR)
+                    sent = await msg.reply_text(text + STREAM_CURSOR, reply_markup=markup)
             elif final:
                 try:
                     await sent.edit_text(
@@ -963,7 +1005,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                 except BadRequest:
                     await sent.edit_text(text)
             else:
-                await sent.edit_text(text + STREAM_CURSOR)
+                await sent.edit_text(text + STREAM_CURSOR, reply_markup=markup)
         except RetryAfter as e:
             # Telegram 限流：等待后跳过本次中间编辑；定稿编辑重试一次
             await asyncio.sleep(float(e.retry_after) + 0.5)
@@ -996,19 +1038,40 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             await push(segment, final=False)
             last_edit = now
 
-    async def show_status(text: str) -> None:
-        # 搜索状态提示：编辑当前气泡，之后的正文 push 会自然覆盖它
+    async def render_progress(suffix: str = "…") -> None:
+        """渲染进度日志：工具行在上（完成打 ✓），底部一行是当前思考阶段（动态省略号）。
+
+        工具执行期间状态行撤下（stage=None），末尾的工具行就是活动行。
+        已有部分正文时正文在上、日志在下。
+        """
         nonlocal sent, last_edit
+        lines = progress[-5:] + ([stage] if stage else [])
+        body = "\n".join(lines[:-1] + [lines[-1] + suffix]) if lines else ""
+        if segment.strip():
+            body = segment.rstrip() + "\n\n" + body
         try:
             if sent is None:
-                sent = await msg.reply_text(text)
+                sent = await msg.reply_text(body, reply_markup=markup)
             else:
-                await sent.edit_text(text)
+                await sent.edit_text(body, reply_markup=markup)
         except RetryAfter as e:
             await asyncio.sleep(float(e.retry_after) + 0.5)
         except TelegramError:
             pass
         last_edit = 0.0  # 让下一次正文编辑立即生效
+
+    async def _ticker() -> None:
+        # 长时间等待时让末行省略号动起来，证明 bot 还活着
+        frames = ["…", "……", "………"]
+        i = 0
+        while True:
+            await asyncio.sleep(5)
+            if segment.strip():
+                continue  # 正文已开始流式输出，气泡由 on_text 接管
+            i += 1
+            await render_progress(frames[i % len(frames)])
+
+    ticker_task = asyncio.create_task(_ticker())
 
     working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
     try:
@@ -1016,8 +1079,9 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
             use_tools = SEARCH_ENABLED and round_idx < SEARCH_MAX_ROUNDS
             if round_idx and not segment.strip():
-                # 工具执行完、新一轮生成开始：状态切回思考中，避免旧的搜索状态挂着像卡死
-                await show_status(t("thinking"))
+                # 工具执行完、新一轮生成开始：底部状态行原地替换为下一档思考阶段
+                stage = _stage_line(round_idx)
+                await render_progress()
             t0 = time.monotonic()
             for attempt in range(2):
                 out_before = len(finalized) + len(segment.strip())
@@ -1050,15 +1114,29 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
-            status = _call_status(assistant_msg["tool_calls"])
-            if segment.strip():
-                # 模型在搜索前已输出部分正文：状态提示追加在正文之后显示
-                segment += "\n\n"
-                await show_status(segment + status)
-            else:
-                await show_status(status)
+            # 追加本轮工具行（🔍 搜索词 / 🌐 域名）；执行期间底部状态行撤下，
+            # 末尾的工具行就是活动行，完成打 ✓ 后下一轮的思考阶段行再顶上
+            stage = None
+            tool_lines = _call_lines(assistant_msg["tool_calls"])
+            progress.extend(tool_lines)
+            await render_progress()
             working.append(assistant_msg)
             working.extend(await _execute_tool_calls(assistant_msg))
+            for i in range(1, len(tool_lines) + 1):
+                progress[-i] += " ✓"
+    except asyncio.CancelledError:
+        # 提问者/管理员点了取消按钮：保留已有正文并标注，未输出则改为已取消
+        if task is not None and hasattr(task, "uncancel"):
+            task.uncancel()
+        logger.info("生成已被用户取消 chat=%s user=%s", msg.chat_id, requester)
+        try:
+            if segment.strip():
+                await push(segment.rstrip() + "\n\n" + t("cancelled_suffix"), final=True)
+            elif sent is not None and not finalized:
+                await sent.edit_text(t("cancelled"))
+        except TelegramError:
+            pass
+        return None, ""
     except Exception:
         logger.exception("调用 LLM 失败")
         try:
@@ -1073,6 +1151,9 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         except TelegramError:
             pass
         return None, ""
+    finally:
+        ticker_task.cancel()
+        active_generations.pop(gen_id, None)
 
     if segment.strip():
         await push(segment, final=True)
@@ -1086,6 +1167,29 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             pass
         return None, ""
     return sent, finalized.strip()
+
+
+async def on_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """取消按钮回调：找到对应生成任务并 cancel。仅提问者本人或管理员可取消。"""
+    q = update.callback_query
+    if q is None or not q.data:
+        return
+    try:
+        gen_id = int(q.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await q.answer()
+        return
+    entry = active_generations.get(gen_id)
+    if entry is None:
+        await q.answer(t("cancel_gone"))
+        return
+    task, owner = entry
+    user = q.from_user
+    if user is None or (user.id != owner and not is_admin(user.id)):
+        await q.answer(t("cancel_denied"))
+        return
+    task.cancel()
+    await q.answer(t("cancel_done"))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1254,6 +1358,7 @@ def main() -> None:
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("deluser", cmd_deluser))
     app.add_handler(CommandHandler("listusers", cmd_listusers))
+    app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^c:\d+$"))
     app.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND,

@@ -124,7 +124,12 @@ STRINGS = {
         "comment_default": "请评论/核实这条消息。",
         "look_image": "请看这张图片。",
         "empty_reply": "（模型返回了空回复）",
-        "thinking_stages": ["🤔 思考中", "🧠 深入思考中", "🔎 继续深挖", "✨ 就快好了"],
+        "thinking_stages": ["思考中", "深入思考中", "继续深挖", "就快好了"],
+        "tool_search": "搜索({q})",
+        "tool_open": "读取({h})",
+        "res_results": "{n} 条结果",
+        "res_chars": "{k} 字",
+        "res_failed": "⚠️ 失败",
         "btn_cancel": "✕ 取消",
         "cancelled": "❌ 已取消",
         "cancelled_suffix": "❌（已取消，以上为部分回复）",
@@ -191,7 +196,12 @@ STRINGS = {
         "comment_default": "Please comment on / fact-check this message.",
         "look_image": "Please look at this image.",
         "empty_reply": "(the model returned an empty response)",
-        "thinking_stages": ["🤔 Thinking", "🧠 Thinking hard", "🔎 Digging deeper", "✨ Almost done"],
+        "thinking_stages": ["Thinking", "Thinking hard", "Digging deeper", "Almost done"],
+        "tool_search": "Search({q})",
+        "tool_open": "Read({h})",
+        "res_results": "{n} results",
+        "res_chars": "{k} chars",
+        "res_failed": "⚠️ failed",
         "btn_cancel": "✕ Cancel",
         "cancelled": "❌ Cancelled",
         "cancelled_suffix": "❌ (cancelled — partial reply above)",
@@ -876,15 +886,19 @@ def _tool_args(call: dict) -> dict | None:
     return args if isinstance(args, dict) else None
 
 
+_SPIN_FRAMES = ["✻", "✽", "✶", "✳"]  # Claude Code 风格的旋转指示符
+_RESULT_ROW_RE = re.compile(r"^\[\d+\]", re.M)
+
+
 def _stage_line(round_idx: int) -> str:
     """第 N 轮生成对应的阶段文案（思考中 → 深入思考中 → …），超出取最后一档。"""
     stages = STRINGS[BOT_LANG]["thinking_stages"]
     return stages[min(round_idx, len(stages) - 1)]
 
 
-def _call_lines(calls_list: list[dict]) -> list[str]:
-    """把一轮工具调用渲染成进度日志行：🔍 搜索词 / 🌐 域名。"""
-    lines = []
+def _call_entries(calls_list: list[dict]) -> list[dict]:
+    """把一轮工具调用变成进度条目：{text, done, result}，渲染成 ⏺ 行 + ⎿ 结果子行。"""
+    entries = []
     for call in calls_list:
         args = _tool_args(call) or {}
         if call["function"]["name"] == "open_url":
@@ -893,11 +907,22 @@ def _call_lines(calls_list: list[dict]) -> list[str]:
                 host = urlparse(url).hostname or url[:40] or "?"
             except ValueError:
                 host = url[:40] or "?"
-            lines.append(f"🌐 {host}")
+            text = t("tool_open", h=host)
         else:
             query = str(args.get("query", "")).strip() or "?"
-            lines.append(f"🔍 {query[:48]}")
-    return lines
+            text = t("tool_search", q=query[:48])
+        entries.append({"text": text, "done": False, "result": None})
+    return entries
+
+
+def _result_summary(tool_name: str, content: str) -> str:
+    """工具结果的一行摘要：搜索 → N 条结果，读网页 → 字数，错误文案 → 失败。"""
+    if content.startswith("（") or content.startswith("("):
+        return t("res_failed")
+    if tool_name == "open_url":
+        n = len(content)
+        return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
+    return t("res_results", n=len(_RESULT_ROW_RE.findall(content)))
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
@@ -971,10 +996,13 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     if task is not None:
         active_generations[gen_id] = (task, requester)
     markup = _cancel_markup(gen_id)
-    progress: list[str] = []  # 已发生的工具行（🔍 搜索词 / 🌐 域名，完成后打 ✓）
+    progress: list[dict] = []  # 工具条目 {text, done, result}：⏺ 行 + ⎿ 结果子行
     stage: str | None = _stage_line(0)  # 底部状态行：思考阶段文本，原地替换而非追加
+    spin = 0  # 旋转指示符帧序号，ticker 推进
     try:
-        sent: Message | None = await msg.reply_text(stage + "…", reply_markup=markup)
+        sent: Message | None = await msg.reply_text(
+            f"{_SPIN_FRAMES[0]} {stage}…", reply_markup=markup
+        )
     except TelegramError:
         logger.exception("发送占位消息失败")
         active_generations.pop(gen_id, None)
@@ -1038,15 +1066,20 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             await push(segment, final=False)
             last_edit = now
 
-    async def render_progress(suffix: str = "…") -> None:
-        """渲染进度日志：工具行在上（完成打 ✓），底部一行是当前思考阶段（动态省略号）。
-
-        工具执行期间状态行撤下（stage=None），末尾的工具行就是活动行。
-        已有部分正文时正文在上、日志在下。
+    async def render_progress() -> None:
+        """渲染 TUI 进度：⏺ 完成工具行 + ⎿ 结果子行，运行中的行用旋转指示符，
+        底部一行是当前思考阶段（原地替换）。已有部分正文时正文在上、日志在下。
         """
         nonlocal sent, last_edit
-        lines = progress[-5:] + ([stage] if stage else [])
-        body = "\n".join(lines[:-1] + [lines[-1] + suffix]) if lines else ""
+        frame = _SPIN_FRAMES[spin % len(_SPIN_FRAMES)]
+        lines = []
+        for e in progress[-5:]:
+            lines.append(f"{'⏺' if e['done'] else frame} {e['text']}")
+            if e["result"]:
+                lines.append(f"  ⎿ {e['result']}")
+        if stage:
+            lines.append(f"{frame} {stage}…")
+        body = "\n".join(lines)
         if segment.strip():
             body = segment.rstrip() + "\n\n" + body
         try:
@@ -1061,15 +1094,14 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         last_edit = 0.0  # 让下一次正文编辑立即生效
 
     async def _ticker() -> None:
-        # 长时间等待时让末行省略号动起来，证明 bot 还活着
-        frames = ["…", "……", "………"]
-        i = 0
+        # 长时间等待时推进旋转指示符，证明 bot 还活着
+        nonlocal spin
         while True:
             await asyncio.sleep(5)
             if segment.strip():
                 continue  # 正文已开始流式输出，气泡由 on_text 接管
-            i += 1
-            await render_progress(frames[i % len(frames)])
+            spin += 1
+            await render_progress()
 
     ticker_task = asyncio.create_task(_ticker())
 
@@ -1114,16 +1146,18 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
-            # 追加本轮工具行（🔍 搜索词 / 🌐 域名）；执行期间底部状态行撤下，
-            # 末尾的工具行就是活动行，完成打 ✓ 后下一轮的思考阶段行再顶上
+            # 追加本轮工具条目；执行期间底部状态行撤下，运行中的工具行带旋转指示符，
+            # 完成后变 ⏺ 并挂上 ⎿ 结果摘要，下一轮的思考阶段行再顶上
             stage = None
-            tool_lines = _call_lines(assistant_msg["tool_calls"])
-            progress.extend(tool_lines)
+            entries = _call_entries(assistant_msg["tool_calls"])
+            progress.extend(entries)
             await render_progress()
             working.append(assistant_msg)
-            working.extend(await _execute_tool_calls(assistant_msg))
-            for i in range(1, len(tool_lines) + 1):
-                progress[-i] += " ✓"
+            tool_results = await _execute_tool_calls(assistant_msg)
+            working.extend(tool_results)
+            for entry, call, result in zip(entries, assistant_msg["tool_calls"], tool_results):
+                entry["done"] = True
+                entry["result"] = _result_summary(call["function"]["name"], result["content"])
     except asyncio.CancelledError:
         # 提问者/管理员点了取消按钮：保留已有正文并标注，未输出则改为已取消
         if task is not None and hasattr(task, "uncancel"):

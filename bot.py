@@ -125,11 +125,11 @@ STRINGS = {
         "look_image": "请看这张图片。",
         "empty_reply": "（模型返回了空回复）",
         "thinking_stages": ["思考中", "深入思考中", "继续深挖", "就快好了"],
-        "tool_search": "搜索({q})",
-        "tool_open": "读取({h})",
+        "tool_search": "搜索: {q}",
+        "tool_open": "读取网页",
         "res_results": "{n} 条结果",
         "res_chars": "{k} 字",
-        "res_failed": "⚠️ 失败",
+        "res_failed": "失败",
         "btn_cancel": "✕ 取消",
         "cancelled": "❌ 已取消",
         "cancelled_suffix": "❌（已取消，以上为部分回复）",
@@ -197,11 +197,11 @@ STRINGS = {
         "look_image": "Please look at this image.",
         "empty_reply": "(the model returned an empty response)",
         "thinking_stages": ["Thinking", "Thinking hard", "Digging deeper", "Almost done"],
-        "tool_search": "Search({q})",
-        "tool_open": "Read({h})",
+        "tool_search": "Search: {q}",
+        "tool_open": "Reading page",
         "res_results": "{n} results",
         "res_chars": "{k} chars",
-        "res_failed": "⚠️ failed",
+        "res_failed": "failed",
         "btn_cancel": "✕ Cancel",
         "cancelled": "❌ Cancelled",
         "cancelled_suffix": "❌ (cancelled — partial reply above)",
@@ -886,7 +886,6 @@ def _tool_args(call: dict) -> dict | None:
     return args if isinstance(args, dict) else None
 
 
-_SPIN_FRAMES = ["✻", "✽", "✶", "✳"]  # Claude Code 风格的旋转指示符
 _RESULT_ROW_RE = re.compile(r"^\[\d+\]", re.M)
 
 
@@ -897,17 +896,15 @@ def _stage_line(round_idx: int) -> str:
 
 
 def _call_entries(calls_list: list[dict]) -> list[dict]:
-    """把一轮工具调用变成进度条目：{text, done, result}，渲染成 ⏺ 行 + ⎿ 结果子行。"""
+    """把一轮工具调用变成进度条目 {text, done, result}。
+
+    读网页只显示「读取网页」，不暴露 URL/域名给群成员。
+    """
     entries = []
     for call in calls_list:
         args = _tool_args(call) or {}
         if call["function"]["name"] == "open_url":
-            url = str(args.get("url", ""))
-            try:
-                host = urlparse(url).hostname or url[:40] or "?"
-            except ValueError:
-                host = url[:40] or "?"
-            text = t("tool_open", h=host)
+            text = t("tool_open")
         else:
             query = str(args.get("query", "")).strip() or "?"
             text = t("tool_search", q=query[:48])
@@ -996,13 +993,10 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     if task is not None:
         active_generations[gen_id] = (task, requester)
     markup = _cancel_markup(gen_id)
-    progress: list[dict] = []  # 工具条目 {text, done, result}：⏺ 行 + ⎿ 结果子行
+    progress: list[dict] = []  # 工具条目 {text, done, result}：工具行 + 两空格缩进的结果行
     stage: str | None = _stage_line(0)  # 底部状态行：思考阶段文本，原地替换而非追加
-    spin = 0  # 旋转指示符帧序号，ticker 推进
     try:
-        sent: Message | None = await msg.reply_text(
-            f"{_SPIN_FRAMES[0]} {stage}…", reply_markup=markup
-        )
+        sent: Message | None = await msg.reply_text(f"{stage}…", reply_markup=markup)
     except TelegramError:
         logger.exception("发送占位消息失败")
         active_generations.pop(gen_id, None)
@@ -1066,19 +1060,19 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             await push(segment, final=False)
             last_edit = now
 
-    async def render_progress() -> None:
-        """渲染 TUI 进度：⏺ 完成工具行 + ⎿ 结果子行，运行中的行用旋转指示符，
-        底部一行是当前思考阶段（原地替换）。已有部分正文时正文在上、日志在下。
+    async def render_progress(suffix: str = "…") -> None:
+        """渲染进度：纯文本无符号，层级只靠缩进——工具行顶格、结果行缩进两格，
+        底部一行是当前思考阶段（原地替换，省略号由 ticker 变化）。
+        已有部分正文时正文在上、日志在下。
         """
         nonlocal sent, last_edit
-        frame = _SPIN_FRAMES[spin % len(_SPIN_FRAMES)]
         lines = []
         for e in progress[-5:]:
-            lines.append(f"{'⏺' if e['done'] else frame} {e['text']}")
+            lines.append(e["text"])
             if e["result"]:
-                lines.append(f"  ⎿ {e['result']}")
+                lines.append(f"  {e['result']}")
         if stage:
-            lines.append(f"{frame} {stage}…")
+            lines.append(stage + suffix)
         body = "\n".join(lines)
         if segment.strip():
             body = segment.rstrip() + "\n\n" + body
@@ -1094,14 +1088,15 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         last_edit = 0.0  # 让下一次正文编辑立即生效
 
     async def _ticker() -> None:
-        # 长时间等待时推进旋转指示符，证明 bot 还活着
-        nonlocal spin
+        # 长时间等待时变化底部省略号，证明 bot 还活着
+        frames = ["…", "……", "………"]
+        i = 0
         while True:
             await asyncio.sleep(5)
             if segment.strip():
                 continue  # 正文已开始流式输出，气泡由 on_text 接管
-            spin += 1
-            await render_progress()
+            i += 1
+            await render_progress(frames[i % len(frames)])
 
     ticker_task = asyncio.create_task(_ticker())
 
@@ -1146,8 +1141,8 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
-            # 追加本轮工具条目；执行期间底部状态行撤下，运行中的工具行带旋转指示符，
-            # 完成后变 ⏺ 并挂上 ⎿ 结果摘要，下一轮的思考阶段行再顶上
+            # 追加本轮工具条目；执行期间底部状态行撤下，完成后挂上缩进的结果行，
+            # 下一轮的思考阶段行再顶上
             stage = None
             entries = _call_entries(assistant_msg["tool_calls"])
             progress.extend(entries)

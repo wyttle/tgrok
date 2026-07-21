@@ -296,7 +296,8 @@ def with_time(content):
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
 STREAM_EDIT_INTERVAL = 1.5  # 流式输出时编辑消息的最小间隔（秒），避免触发 Telegram 限流
-STREAM_SEGMENT_LIMIT = 3800  # 单条消息承载的流式文本上限，超过则另起一条（留出余量）
+STREAM_SEGMENT_LIMIT = 3400  # 单条消息承载的流式文本上限，超过则另起一条。
+# Telegram 上限 4096；MarkdownV2 转义会使文本膨胀 10% 左右，需留足余量
 STREAM_CURSOR = " ▌"
 
 # 匹配标题行：行首可选的 emoji/符号前缀 + 1~6 个 #。Grok 常输出「📚 ## 标题」这种
@@ -1092,14 +1093,21 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     async def on_text(delta: str) -> None:
         nonlocal segment, sent, last_edit, finalized
         segment += delta
-        if len(segment) >= STREAM_SEGMENT_LIMIT:
-            # 当前消息已满：定稿并另起一条
-            await push(segment, final=True)
-            finalized += segment
-            segment, sent, last_edit = "", None, 0.0
-            return
+        # while 而非 if：网关可能把很长的正文压在一个 delta 里发来，
+        # 必须能一次切成多条消息，否则超过 4096 的编辑会被 Telegram 拒绝、尾部丢失
+        while len(segment) >= STREAM_SEGMENT_LIMIT:
+            # 优先在换行处断开，其次空格，实在没有就硬切
+            cut = segment.rfind("\n", STREAM_SEGMENT_LIMIT // 2, STREAM_SEGMENT_LIMIT)
+            if cut == -1:
+                cut = segment.rfind(" ", STREAM_SEGMENT_LIMIT // 2, STREAM_SEGMENT_LIMIT)
+            if cut == -1:
+                cut = STREAM_SEGMENT_LIMIT
+            part, segment = segment[:cut], segment[cut:].lstrip("\n")
+            await push(part, final=True)
+            finalized += part + "\n"
+            sent, last_edit = None, 0.0
         now = time.monotonic()
-        if now - last_edit >= STREAM_EDIT_INTERVAL:
+        if segment.strip() and now - last_edit >= STREAM_EDIT_INTERVAL:
             await push(segment, final=False)
             last_edit = now
 
@@ -1119,6 +1127,8 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         body = "\n".join(lines)
         if segment.strip():
             body = segment.rstrip() + "\n\n" + body
+        if len(body) > 4000:
+            body = body[-4000:]  # Telegram 上限 4096：截头保尾，进度日志在底部必须可见
         try:
             if sent is None:
                 sent = await msg.reply_text(body, reply_markup=markup)

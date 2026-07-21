@@ -127,9 +127,11 @@ STRINGS = {
         "thinking_stages": ["思考中", "深入思考中", "继续深挖", "就快好了"],
         "tool_search": "搜索: {q}",
         "tool_open": "读取网页",
+        "tool_open_n": "读取 {n} 个网页",
         "res_results": "{n} 条结果",
         "res_chars": "{k} 字",
         "res_failed": "失败",
+        "res_fail_suffix": "，{n} 个失败",
         "btn_cancel": "✕ 取消",
         "cancelled": "❌ 已取消",
         "cancelled_suffix": "❌（已取消，以上为部分回复）",
@@ -199,9 +201,11 @@ STRINGS = {
         "thinking_stages": ["Thinking", "Thinking hard", "Digging deeper", "Almost done"],
         "tool_search": "Search: {q}",
         "tool_open": "Reading page",
+        "tool_open_n": "Reading {n} pages",
         "res_results": "{n} results",
         "res_chars": "{k} chars",
         "res_failed": "failed",
+        "res_fail_suffix": ", {n} failed",
         "btn_cancel": "✕ Cancel",
         "cancelled": "❌ Cancelled",
         "cancelled_suffix": "❌ (cancelled — partial reply above)",
@@ -895,21 +899,60 @@ def _stage_line(round_idx: int) -> str:
     return stages[min(round_idx, len(stages) - 1)]
 
 
-def _call_entries(calls_list: list[dict]) -> list[dict]:
-    """把一轮工具调用变成进度条目 {text, done, result}。
+def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
+    """把一轮工具调用变成进度条目。
 
-    读网页只显示「读取网页」，不暴露 URL/域名给群成员。
+    搜索每条一行（显示搜索词）；同一轮的多个网页读取合并为一行
+    （避免重复行刷屏），结果聚合为总字数。不暴露 URL/域名给群成员。
+    返回 (条目列表, 逐调用到条目的映射)。
     """
-    entries = []
+    entries: list[dict] = []
+    mapping: list[dict] = []
+    open_entry: dict | None = None
     for call in calls_list:
         args = _tool_args(call) or {}
         if call["function"]["name"] == "open_url":
-            text = t("tool_open")
+            if open_entry is None:
+                open_entry = {"kind": "open", "count": 0, "contents": [],
+                              "text": "", "done": False, "result": None}
+                entries.append(open_entry)
+            open_entry["count"] += 1
+            mapping.append(open_entry)
         else:
             query = str(args.get("query", "")).strip() or "?"
-            text = t("tool_search", q=query[:48])
-        entries.append({"text": text, "done": False, "result": None})
-    return entries
+            entry = {"kind": "search", "text": t("tool_search", q=query[:48]),
+                     "done": False, "result": None}
+            entries.append(entry)
+            mapping.append(entry)
+    if open_entry is not None:
+        open_entry["text"] = (
+            t("tool_open") if open_entry["count"] == 1 else t("tool_open_n", n=open_entry["count"])
+        )
+    return entries, mapping
+
+
+def _human_chars(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _attach_result(entry: dict, call: dict, content: str) -> None:
+    """把一次工具执行的结果记到对应条目上；合并的读取条目聚合总字数与失败数。"""
+    if entry["kind"] == "open":
+        entry["contents"].append(content)
+        if len(entry["contents"]) < entry["count"]:
+            return
+        ok = [c for c in entry["contents"] if not c.startswith(("（", "("))]
+        fails = entry["count"] - len(ok)
+        if ok:
+            result = t("res_chars", k=_human_chars(sum(len(c) for c in ok)))
+            if fails:
+                result += t("res_fail_suffix", n=fails)
+        else:
+            result = t("res_failed")
+        entry["done"], entry["result"] = True, result
+    else:
+        entry["done"] = True
+        entry["result"] = _result_summary(call["function"]["name"], content)
 
 
 def _result_summary(tool_name: str, content: str) -> str:
@@ -1141,18 +1184,17 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if not calls or not use_tools:
                 break
             assistant_msg = _assistant_tool_call_msg(calls, content)
-            # 追加本轮工具条目；执行期间底部状态行撤下，完成后挂上缩进的结果行，
-            # 下一轮的思考阶段行再顶上
+            # 追加本轮工具条目（同轮多个网页读取合并为一行）；执行期间底部状态行
+            # 撤下，完成后挂上缩进的结果行，下一轮的思考阶段行再顶上
             stage = None
-            entries = _call_entries(assistant_msg["tool_calls"])
+            entries, call_map = _round_entries(assistant_msg["tool_calls"])
             progress.extend(entries)
             await render_progress()
             working.append(assistant_msg)
             tool_results = await _execute_tool_calls(assistant_msg)
             working.extend(tool_results)
-            for entry, call, result in zip(entries, assistant_msg["tool_calls"], tool_results):
-                entry["done"] = True
-                entry["result"] = _result_summary(call["function"]["name"], result["content"])
+            for entry, call, result in zip(call_map, assistant_msg["tool_calls"], tool_results):
+                _attach_result(entry, call, result["content"])
     except asyncio.CancelledError:
         # 提问者/管理员点了取消按钮：保留已有正文并标注，未输出则改为已取消
         if task is not None and hasattr(task, "uncancel"):

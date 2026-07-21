@@ -53,8 +53,9 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 # 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型
 ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")
-MAX_IMAGES = 4  # 单次请求最多附带的图片数
+MAX_IMAGES = int(os.getenv("MAX_IMAGES", "4"))  # 单次请求最多附带的图片数
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+ALBUM_CACHE_SIZE = 300  # 缓存的相册（media group）数量上限
 # 联网搜索源：tavily / duckduckgo / searxng，留空关闭。可逗号分隔配置多个源，
 # 并发聚合结果（如 SEARCH_PROVIDER=tavily,duckduckgo）。开启后模型可通过
 # web_search 工具自主搜索，并可用 open_url 工具读取网页正文。
@@ -430,30 +431,69 @@ def quoted_context(msg: Message) -> str | None:
     return t("quoted_msg", author=author, content=content)
 
 
+# 相册缓存：Telegram 的多图消息（相册）是多条独立消息，仅靠 media_group_id 关联，
+# 回复相册时 reply_to_message 只指向第一条。bot 收到相册成员消息时先记下
+# file_id，之后有人回复相册提问，就能按组取出全部图片。
+# key = (chat_id, media_group_id)，value = [{file_id, mime, message_id}]
+album_cache: "OrderedDict[tuple[int, str], list[dict]]" = OrderedDict()
+
+
+def _msg_image_entry(m: Message) -> dict | None:
+    """从单条消息提取图片引用（压缩照片取最大尺寸；图片文件校验大小）。"""
+    if m.photo:
+        return {"file_id": m.photo[-1].file_id, "mime": "image/jpeg", "message_id": m.message_id}
+    if m.document and (m.document.mime_type or "").startswith("image/"):
+        if m.document.file_size and m.document.file_size > MAX_IMAGE_BYTES:
+            return None
+        return {"file_id": m.document.file_id, "mime": m.document.mime_type, "message_id": m.message_id}
+    return None
+
+
+def remember_album(msg: Message) -> None:
+    """记录相册成员消息的图片引用（被动收集，与是否 @bot 无关）。"""
+    if not msg.media_group_id:
+        return
+    entry = _msg_image_entry(msg)
+    if entry is None:
+        return
+    key = (msg.chat_id, msg.media_group_id)
+    group = album_cache.setdefault(key, [])
+    if all(e["message_id"] != entry["message_id"] for e in group):
+        group.append(entry)
+    album_cache.move_to_end(key)
+    while len(album_cache) > ALBUM_CACHE_SIZE:
+        album_cache.popitem(last=False)
+
+
+def _image_refs(m: Message) -> list[dict]:
+    """取一条消息关联的全部图片引用：相册成员展开为整组，普通消息取自身。"""
+    if m.media_group_id:
+        group = album_cache.get((m.chat_id, m.media_group_id))
+        if group:
+            return sorted(group, key=lambda e: e["message_id"])
+    entry = _msg_image_entry(m)
+    return [entry] if entry else []
+
+
 async def image_data_urls(bot, *messages: Message | None) -> list[str]:
-    """提取消息中的图片（压缩照片或图片文件），转为 base64 data URL。"""
-    urls = []
+    """提取消息中的图片（相册自动展开为整组），转为 base64 data URL。"""
+    refs, seen = [], set()
     for m in messages:
         if m is None:
             continue
-        file_id, mime = None, "image/jpeg"
-        if m.photo:
-            file_id = m.photo[-1].file_id  # 最大尺寸的一张
-        elif m.document and (m.document.mime_type or "").startswith("image/"):
-            if m.document.file_size and m.document.file_size > MAX_IMAGE_BYTES:
-                continue
-            file_id, mime = m.document.file_id, m.document.mime_type
-        if file_id is None:
-            continue
+        for entry in _image_refs(m):
+            if entry["file_id"] not in seen:
+                seen.add(entry["file_id"])
+                refs.append(entry)
+    urls = []
+    for entry in refs[:MAX_IMAGES]:
         try:
-            file = await bot.get_file(file_id)
+            file = await bot.get_file(entry["file_id"])
             data = bytes(await file.download_as_bytearray())
         except Exception:
-            logger.exception("下载图片失败 file_id=%s", file_id)
+            logger.exception("下载图片失败 file_id=%s", entry["file_id"])
             continue
-        urls.append(f"data:{mime};base64," + base64.b64encode(data).decode())
-        if len(urls) >= MAX_IMAGES:
-            break
+        urls.append(f"data:{entry['mime']};base64," + base64.b64encode(data).decode())
     return urls
 
 
@@ -1277,6 +1317,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     msg = update.effective_message
     if msg is None or msg.from_user is None or msg.from_user.is_bot:
         return
+
+    if ENABLE_VISION:
+        # 被动记录相册成员（在任何提前 return 之前），供之后回复相册时取整组图片
+        remember_album(msg)
 
     bot = context.bot
     is_private = msg.chat.type == "private"

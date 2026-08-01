@@ -79,6 +79,8 @@ TEXT = {
         "gmode_pick": "搜索方式：1=原生  2=混合  3=自带搜索源",
         "gmode_invalid": "请输入 1、2 或 3",
         "gsearch_model": "grounding 搜索模型",
+        "s_genhance": "      —— Gemini grounding 增强：web_search 改由 Gemini 模型 + Google 官方搜索执行（需 AI Studio key，\n      免费申请），结果更准；失败时自动回退上面配置的搜索源",
+        "genhance_ask": "  启用 Gemini grounding 增强搜索？",
         "gmode_skip_search": "（搜索由 Gemini 执行，跳过 bot 自带搜索源配置；原有搜索配置保留作为回退）",
         "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
         "jina_ask": "  网页直接读取失败（反爬/JS 页面）时走 Jina Reader（r.jina.ai）兜底？",
@@ -167,6 +169,8 @@ TEXT = {
         "gmode_pick": "Search mode: 1=native  2=hybrid  3=own providers",
         "gmode_invalid": "Enter 1, 2 or 3",
         "gsearch_model": "Grounding search model",
+        "s_genhance": "      -- Gemini grounding boost: web_search runs on a Gemini model + official Google Search (needs a free\n      AI Studio key); more accurate results, automatically falls back to the providers above on failure",
+        "genhance_ask": "  Enable Gemini grounding for search?",
         "gmode_skip_search": "(Searches are handled by Gemini; skipping the bot's own provider setup — existing search settings are kept as fallback)",
         "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
         "jina_ask": "  Fall back to Jina Reader (r.jina.ai) when direct page fetch fails (anti-bot/JS pages)?",
@@ -503,6 +507,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
 
         gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
         cfg["GEMINI_NATIVE_SEARCH"] = "true" if gmode == "1" else "false"
+        cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
         if gmode == "2":
             cfg["GEMINI_SEARCH_MODEL"] = ask(
                 T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
@@ -566,6 +571,20 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
                 cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
             else:
                 cfg["JINA_FALLBACK"] = "false"
+        if backend != "2":
+            # 任意后端都可叠加 Gemini grounding：搜索由 Gemini + Google 官方搜索执行，
+            # 失败自动回退上面配置的搜索源
+            print()
+            print(T["s_genhance"])
+            if confirm(T["genhance_ask"], default_yes=bool(old.get("GEMINI_SEARCH_MODEL", "").strip())):
+                cfg["GEMINI_API_KEY"] = ask(T["gemini_key"], default=old.get("GEMINI_API_KEY", ""),
+                                            required=True, secret=True)
+                cfg["GEMINI_SEARCH_MODEL"] = ask(
+                    T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
+                    required=True)
+            else:
+                cfg["GEMINI_API_KEY"] = ""
+                cfg["GEMINI_SEARCH_MODEL"] = ""
         print()
 
     # ---- 8. Generation params & timezone ----

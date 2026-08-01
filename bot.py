@@ -84,6 +84,9 @@ GEMINI_NATIVE_SEARCH = os.getenv("GEMINI_NATIVE_SEARCH", "false").strip().lower(
 # 混合模式：web_search 工具由该 grounding 模型执行（如 gemini-2.5-flash，免费档可用），
 # 回复仍用 LLM_MODEL。与 GEMINI_NATIVE_SEARCH 互斥，留空关闭
 GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "").strip()
+# grounding 专用 key：与主模型解耦——主模型走中转站/本地时，grounding 仍用 AI Studio key；
+# 留空则复用 LLM_API_KEY（主模型本身就是 Gemini 官方的场景）
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or LLM_API_KEY
 # grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
 GEMINI_SEARCH_COOLDOWN = 600.0
 _gemini_search_blocked_until = [0.0]
@@ -365,7 +368,7 @@ if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL:
     from google import genai as _genai
     from google.genai import types as gtypes
 
-    gemini_client = _genai.Client(api_key=LLM_API_KEY)
+    gemini_client = _genai.Client(api_key=GEMINI_API_KEY)
 
 
 def load_allowed_users() -> set[int]:

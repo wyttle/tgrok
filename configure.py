@@ -71,6 +71,10 @@ TEXT = {
         "search_invalid": "请输入 0-4 或源名称（tavily/duckduckgo/searxng/serper），多个用逗号分隔；0 只能单独使用",
         "tavily_key": "Tavily API Key",
         "serper_key": "Serper API Key（serper.dev）",
+        "s_gnative_a": "【Gemini】原生搜索（google_search + url_context）",
+        "s_gnative_b": "      检测到 Gemini 端点/模型：可由 Google 服务端执行搜索与读取网页，精度更高。\n      开启后 bot 自带的搜索源与 web_search/open_url 工具不再使用",
+        "gnative_ask": "  使用 Gemini 原生搜索？",
+        "gnative_skip_search": "（已启用 Gemini 原生搜索，跳过 bot 自带搜索源配置；原有搜索配置将保留）",
         "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
         "jina_ask": "  网页直接读取失败（反爬/JS 页面）时走 Jina Reader（r.jina.ai）兜底？",
         "jina_key": "Jina API Key（可选，提高速率限制，jina.ai 免费申请）",
@@ -150,6 +154,10 @@ TEXT = {
         "search_invalid": "Enter 0-4 or provider names (tavily/duckduckgo/searxng/serper), comma-separated; 0 must be used alone",
         "tavily_key": "Tavily API key",
         "serper_key": "Serper API key (serper.dev)",
+        "s_gnative_a": "[Gemini] Native search (google_search + url_context)",
+        "s_gnative_b": "      Gemini endpoint/model detected: Google can run search and page reading server-side with higher precision.\n      When enabled, the bot's own search providers and web_search/open_url tools are bypassed",
+        "gnative_ask": "  Use Gemini native search?",
+        "gnative_skip_search": "(Gemini native search enabled; skipping the bot's own search provider setup — existing search settings are kept)",
         "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
         "jina_ask": "  Fall back to Jina Reader (r.jina.ai) when direct page fetch fails (anti-bot/JS pages)?",
         "jina_key": "Jina API key (optional, higher rate limits, free at jina.ai)",
@@ -448,54 +456,75 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     cfg["ENABLE_VISION"] = "true" if confirm(T["vision_ask"], default_yes=vision_default) else "false"
     print()
 
-    # ---- 7. Web search ----
-    print(T["s_search_a"])
-    print(T["s_search_b"])
-    provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng", "4": "serper"}
-    off_values = ("0", "none", "off")
-    known = ("tavily", "duckduckgo", "searxng", "serper")
-
-    def parse_providers(raw: str) -> list[str] | None:
-        """解析多选输入（序号或名称，逗号分隔）。None 表示无法解析。"""
-        parts = [p.strip().lower() for p in raw.replace("，", ",").split(",") if p.strip()]
-        if not parts:
-            return []
-        if any(p in off_values for p in parts):
-            return [] if len(parts) == 1 else None
-        out = []
-        for p in parts:
-            p = provider_alias.get(p, p)
-            if p not in known:
-                return None
-            if p not in out:
-                out.append(p)
-        return out
-
-    def validate_provider(raw: str):
-        if parse_providers(raw) is None:
-            return False, T["search_invalid"]
-        return True, ""
-
-    raw_provider = ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""), validate=validate_provider)
-    providers = parse_providers(raw_provider) or []
-    cfg["SEARCH_PROVIDER"] = ",".join(providers)
-    if "tavily" in providers:
-        cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
-                                    required=True, secret=True)
-    if "serper" in providers:
-        cfg["SERPER_API_KEY"] = ask(T["serper_key"], default=old.get("SERPER_API_KEY", ""),
-                                    required=True, secret=True)
-    if "searxng" in providers:
-        cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),
-                                      required=True)
-    if providers:
-        # open_url 直取失败时的 Jina Reader 兜底（bot 默认开启，仅在用户关闭时写入 false）
-        jina_default = old.get("JINA_FALLBACK", "true").strip().lower() not in ("0", "false", "no", "off")
-        if confirm(T["jina_ask"], default_yes=jina_default):
-            cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
+    # ---- 6.5 Gemini 原生搜索（仅当端点/模型指向 Gemini 时询问）----
+    is_gemini = "generativelanguage.googleapis.com" in base_url or model.lower().startswith("gemini")
+    native = False
+    if is_gemini:
+        print(T["s_gnative_a"])
+        print(T["s_gnative_b"])
+        if "GEMINI_NATIVE_SEARCH" in old:
+            native_default = old["GEMINI_NATIVE_SEARCH"].strip().lower() in ("1", "true", "yes", "on")
         else:
-            cfg["JINA_FALLBACK"] = "false"
-    print()
+            native_default = True  # 连 Gemini 通常就是冲着原生搜索来的
+        native = confirm(T["gnative_ask"], default_yes=native_default)
+        cfg["GEMINI_NATIVE_SEARCH"] = "true" if native else "false"
+        print()
+    else:
+        # 非 Gemini 端点：显式置空，防止切换配置后残留的原生开关引发启动错误
+        cfg["GEMINI_NATIVE_SEARCH"] = ""
+
+    # ---- 7. Web search ----
+    if native:
+        print(T["gnative_skip_search"])
+        print()
+    else:
+        print(T["s_search_a"])
+        print(T["s_search_b"])
+        provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng", "4": "serper"}
+        off_values = ("0", "none", "off")
+        known = ("tavily", "duckduckgo", "searxng", "serper")
+
+        def parse_providers(raw: str) -> list[str] | None:
+            """解析多选输入（序号或名称，逗号分隔）。None 表示无法解析。"""
+            parts = [p.strip().lower() for p in raw.replace("，", ",").split(",") if p.strip()]
+            if not parts:
+                return []
+            if any(p in off_values for p in parts):
+                return [] if len(parts) == 1 else None
+            out = []
+            for p in parts:
+                p = provider_alias.get(p, p)
+                if p not in known:
+                    return None
+                if p not in out:
+                    out.append(p)
+            return out
+
+        def validate_provider(raw: str):
+            if parse_providers(raw) is None:
+                return False, T["search_invalid"]
+            return True, ""
+
+        raw_provider = ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""), validate=validate_provider)
+        providers = parse_providers(raw_provider) or []
+        cfg["SEARCH_PROVIDER"] = ",".join(providers)
+        if "tavily" in providers:
+            cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
+                                        required=True, secret=True)
+        if "serper" in providers:
+            cfg["SERPER_API_KEY"] = ask(T["serper_key"], default=old.get("SERPER_API_KEY", ""),
+                                        required=True, secret=True)
+        if "searxng" in providers:
+            cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),
+                                          required=True)
+        if providers:
+            # open_url 直取失败时的 Jina Reader 兜底（bot 默认开启，仅在用户关闭时写入 false）
+            jina_default = old.get("JINA_FALLBACK", "true").strip().lower() not in ("0", "false", "no", "off")
+            if confirm(T["jina_ask"], default_yes=jina_default):
+                cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
+            else:
+                cfg["JINA_FALLBACK"] = "false"
+        print()
 
     # ---- 8. Generation params & timezone ----
     print(T["s7"])

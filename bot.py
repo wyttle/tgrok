@@ -149,6 +149,7 @@ STRINGS = {
         "cancel_gone": "本次回复已结束",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
         "llm_failed": "⚠️ 调用模型失败，请稍后重试；若持续失败请联系管理员。",
+        "llm_quota": "⚠️ 模型配额超限（429），请稍后再试；若持续出现请联系管理员检查额度/账单。",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
@@ -224,6 +225,7 @@ STRINGS = {
         "cancel_gone": "This reply has already finished",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
         "llm_failed": "⚠️ Failed to call the model. Please try again later; contact the admin if it persists.",
+        "llm_quota": "⚠️ Model quota exceeded (429). Please try again later; contact the admin to check quota/billing if it persists.",
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
@@ -963,6 +965,12 @@ def _assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:
     }
 
 
+def _is_quota_error(e: BaseException) -> bool:
+    """配额/限流类错误（429）：重试大概率无效且浪费配额，需单独处理。"""
+    s = str(e)
+    return "429" in s or "RESOURCE_EXHAUSTED" in s or "rate limit" in s.lower()
+
+
 def _tool_args(call: dict) -> dict | None:
     """解析 tool_call 的参数；arguments 不是合法 JSON 对象时返回 None。"""
     try:
@@ -1341,7 +1349,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                             elapsed, type(e).__name__,
                         )
                         break
-                    if attempt:
+                    if attempt or _is_quota_error(e):
                         raise
                     logger.warning(
                         "Gemini 流中断且无输出（%.1fs, %s），重试一次", elapsed, type(e).__name__
@@ -1380,7 +1388,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                         )
                         calls, content = {}, segment
                         break
-                    if attempt:
+                    if attempt or _is_quota_error(e):
                         raise
                     logger.warning(
                         "LLM 流中断且本轮无输出（round=%d, %.1fs, %s），重试一次",
@@ -1418,17 +1426,18 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         except TelegramError:
             pass
         return None, ""
-    except Exception:
+    except Exception as e:
         logger.exception("调用 LLM 失败")
+        fail_text = t("llm_quota") if _is_quota_error(e) else t("llm_failed")
         try:
             if segment.strip():
                 # 已有部分内容：保留定稿，错误另发一条
                 await push(segment, final=True)
-                await msg.reply_text(t("llm_failed"))
+                await msg.reply_text(fail_text)
             elif sent is not None and not finalized:
-                await sent.edit_text(t("llm_failed"))
+                await sent.edit_text(fail_text)
             else:
-                await msg.reply_text(t("llm_failed"))
+                await msg.reply_text(fail_text)
         except TelegramError:
             pass
         return None, ""

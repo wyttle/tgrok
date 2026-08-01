@@ -1,4 +1,7 @@
 .env
+.env.bak-switch
 .venv/
 __pycache__/
 allowed_users.json
+profiles/
+

@@ -52,8 +52,11 @@ TEXT = {
         "ids_invalid": "请输入纯数字的用户 ID，多个用逗号分隔，例如：123456789,987654321",
         "s3": "【3/9】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）",
         "allowed_ids": "白名单 ID（多个用逗号分隔）",
-        "s4a": "【4/9】LLM 的 OpenAI 兼容接口",
-        "s4b": "      LM Studio 默认 http://localhost:1234/v1，vLLM 默认 http://localhost:8000/v1，OpenAI 官方 https://api.openai.com/v1",
+        "s4a": "【4/9】模型后端",
+        "s4b": "      1 = OpenAI 兼容接口（中转站 / LM Studio / vLLM / OpenAI 官方等，需填接口地址）\n      2 = Gemini 官方（Google AI Studio，key 在 https://aistudio.google.com/apikey 免费申请）",
+        "backend_pick": "后端类型：1=OpenAI 兼容  2=Gemini 官方",
+        "backend_invalid": "请输入 1 或 2",
+        "gemini_key": "Gemini API Key（AI Studio）",
         "base_url": "接口地址",
         "api_key": "API Key（本地服务一般随便填）",
         "ua": "自定义 User-Agent（部分云端网关会校验 UA，可选）",
@@ -135,8 +138,11 @@ TEXT = {
         "ids_invalid": "Please enter numeric user IDs, comma-separated, e.g. 123456789,987654321",
         "s3": "[3/9] Initial whitelist user IDs (you can always /adduser later; OK to skip)",
         "allowed_ids": "Whitelist IDs (comma-separated)",
-        "s4a": "[4/9] OpenAI-compatible LLM endpoint",
-        "s4b": "      LM Studio default http://localhost:1234/v1, vLLM http://localhost:8000/v1, official OpenAI https://api.openai.com/v1",
+        "s4a": "[4/9] Model backend",
+        "s4b": "      1 = OpenAI-compatible endpoint (relay / LM Studio / vLLM / official OpenAI; needs an endpoint URL)\n      2 = Official Gemini (Google AI Studio; get a free key at https://aistudio.google.com/apikey)",
+        "backend_pick": "Backend: 1=OpenAI-compatible  2=Official Gemini",
+        "backend_invalid": "Enter 1 or 2",
+        "gemini_key": "Gemini API key (AI Studio)",
         "base_url": "Endpoint URL",
         "api_key": "API key (anything works for most local servers)",
         "ua": "Custom User-Agent (some cloud gateways validate it; optional)",
@@ -420,17 +426,36 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     cfg["ALLOWED_USER_IDS"] = ask(T["allowed_ids"], default=old.get("ALLOWED_USER_IDS", ""), validate=validate_ids)
     print()
 
-    # ---- 4. LLM endpoint ----
+    # ---- 4. Backend ----
     print(T["s4a"])
     print(T["s4b"])
-    base_url = ask(T["base_url"], default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
-    cfg["LLM_BASE_URL"] = base_url
-    cfg["LLM_API_KEY"] = ask(T["api_key"], default=old.get("LLM_API_KEY", "not-needed"))
-    cfg["LLM_USER_AGENT"] = ask(T["ua"], default=old.get("LLM_USER_AGENT", ""))
+    gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+    def validate_backend(raw: str):
+        return (True, "") if raw.strip() in ("1", "2") else (False, T["backend_invalid"])
+
+    backend_default = "2" if "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", "") else "1"
+    backend = ask(T["backend_pick"], default=backend_default, validate=validate_backend).strip()
+    if backend == "2":
+        # Gemini 官方：地址固定无需询问；UA 无意义，置空
+        base_url = gemini_base
+        cfg["LLM_BASE_URL"] = base_url
+        cfg["LLM_API_KEY"] = ask(T["gemini_key"], default=old.get("LLM_API_KEY", ""),
+                                 required=True, secret=True)
+        cfg["LLM_USER_AGENT"] = ""
+    else:
+        base_url = ask(T["base_url"], default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
+        cfg["LLM_BASE_URL"] = base_url
+        cfg["LLM_API_KEY"] = ask(T["api_key"], default=old.get("LLM_API_KEY", "not-needed"))
+        cfg["LLM_USER_AGENT"] = ask(T["ua"], default=old.get("LLM_USER_AGENT", ""))
     print()
 
     # ---- 5. Model ----
     print(T["s5"])
+    # 换到 Gemini 后端时，旧的非 gemini 模型名不再是合理默认值
+    model_default = old.get("LLM_MODEL", "")
+    if backend == "2" and not model_default.lower().startswith("gemini"):
+        model_default = "gemini-2.5-flash"
     model = ""
     if can_check:
         try:
@@ -442,10 +467,10 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
             print(T["models_found"])
             for i, m in enumerate(models, 1):
                 print(f"    {i}. {m}")
-            raw = ask(T["model_pick"], default=old.get("LLM_MODEL", models[0]), required=True)
+            raw = ask(T["model_pick"], default=model_default or models[0], required=True)
             model = models[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(models) else raw
     if not model:
-        model = ask(T["model_name"], default=old.get("LLM_MODEL", "local-model"), required=True)
+        model = ask(T["model_name"], default=model_default or "local-model", required=True)
     cfg["LLM_MODEL"] = model
     print()
 

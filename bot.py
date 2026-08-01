@@ -1004,7 +1004,10 @@ async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
             content += delta.content
             await on_text(delta.content)
         for tc in delta.tool_calls or []:
-            slot = calls.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+            # Gemini 兼容端点的 tool_call 不带 index（整个调用一个 chunk 发全）：
+            # 每次分配新槽位，避免多个调用挤进同一槽互相覆盖/拼接
+            idx = tc.index if tc.index is not None else 10_000 + len(calls)
+            slot = calls.setdefault(idx, {"id": "", "name": "", "arguments": "", "extra": None})
             if tc.id:
                 slot["id"] = tc.id
             if tc.function:
@@ -1012,27 +1015,32 @@ async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
                     slot["name"] = tc.function.name
                 if tc.function.arguments:
                     slot["arguments"] += tc.function.arguments
+            # Gemini 思考型模型要求回传 thought_signature（在 extra_content 里），
+            # 丢失会导致下一轮请求 400
+            extra = getattr(tc, "model_extra", None) or {}
+            if extra.get("extra_content"):
+                slot["extra"] = extra["extra_content"]
     return calls, content
 
 
 def _assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:
     """把聚合好的 tool_call 片段组装成请求格式的 assistant 消息。"""
-    return {
-        "role": "assistant",
-        "content": content or "",
-        "tool_calls": [
-            {
-                # 部分本地后端不回 id：合成一个，并在 tool 结果里复用以保持配对
-                "id": slot["id"] or f"call_{i}",
-                "type": "function",
-                "function": {
-                    "name": slot["name"] or "web_search",
-                    "arguments": slot["arguments"] or "{}",
-                },
-            }
-            for i, slot in sorted(calls.items())
-        ],
-    }
+    tool_calls = []
+    for i, slot in sorted(calls.items()):
+        call = {
+            # 部分本地后端不回 id：合成一个，并在 tool 结果里复用以保持配对
+            "id": slot["id"] or f"call_{i}",
+            "type": "function",
+            "function": {
+                "name": slot["name"] or "web_search",
+                "arguments": slot["arguments"] or "{}",
+            },
+        }
+        if slot.get("extra"):
+            # 回传 Gemini 思考型模型的 thought_signature 等厂商扩展字段
+            call["extra_content"] = slot["extra"]
+        tool_calls.append(call)
+    return {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
 
 
 def _is_quota_error(e: BaseException) -> bool:
@@ -1164,8 +1172,9 @@ async def create_stream(history: list[dict], use_tools: bool):
             if token_param == "max_tokens" and "max_completion_tokens" in err:
                 token_param = "max_completion_tokens"
                 continue
-            # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用
-            if include_tools and "tool" in err:
+            # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用。
+            # 注意 thought_signature 缺失的 400 报错文案里也含 "tool"，不属于此类
+            if include_tools and "tool" in err and "thought_signature" not in err:
                 logger.warning("后端拒绝 tools 参数，联网搜索已禁用（重启进程后会再次尝试）：%s", e)
                 tools_supported = False
                 include_tools = False

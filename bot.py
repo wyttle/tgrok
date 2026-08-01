@@ -81,6 +81,14 @@ JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率
 # google_search + url_context 内置工具（Google 在服务端完成搜索与读页，精度更高）。
 # 开启后 bot 自带的 web_search/open_url 工具循环不再使用；LLM_API_KEY 填 AI Studio key
 GEMINI_NATIVE_SEARCH = os.getenv("GEMINI_NATIVE_SEARCH", "false").strip().lower() in ("1", "true", "yes", "on")
+# 混合模式：web_search 工具由该 grounding 模型执行（如 gemini-2.5-flash，免费档可用），
+# 回复仍用 LLM_MODEL。与 GEMINI_NATIVE_SEARCH 互斥，留空关闭
+GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "").strip()
+# grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
+GEMINI_SEARCH_COOLDOWN = 600.0
+_gemini_search_blocked_until = [0.0]
+if GEMINI_SEARCH_MODEL:
+    SEARCH_ENABLED = True  # 混合模式下即使没配普通搜索源也要向模型提供 web_search 工具
 
 
 def _provider_ready(p: str) -> bool:
@@ -353,7 +361,7 @@ llm = AsyncOpenAI(
     default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
 )
 
-if GEMINI_NATIVE_SEARCH:
+if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL:
     from google import genai as _genai
     from google.genai import types as gtypes
 
@@ -664,11 +672,73 @@ _PROVIDER_SEARCH = {
 }
 
 
+async def _search_gemini_grounded(query: str) -> str | None:
+    """混合模式：用 GEMINI_SEARCH_MODEL + google_search grounding 执行检索。
+
+    返回带来源链接的事实综述文本；失败返回 None（调用方回退普通搜索源），
+    429 配额超限进入冷却期。
+    """
+    if time.monotonic() < _gemini_search_blocked_until[0]:
+        return None
+    tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
+    try:
+        tools.append(gtypes.Tool(url_context=gtypes.UrlContext()))
+    except AttributeError:
+        pass
+    logger.info("Gemini grounding 检索 (%s): %s", GEMINI_SEARCH_MODEL, query)
+    try:
+        resp = await gemini_client.aio.models.generate_content(
+            model=GEMINI_SEARCH_MODEL,
+            contents=query,
+            config=gtypes.GenerateContentConfig(
+                system_instruction=(
+                    "你是检索助手。用搜索工具核实查询内容，简洁列出相关的最新事实要点，"
+                    "逐条尽量注明日期；只给事实，不要评论。用查询本身的语言回答。"
+                ),
+                max_output_tokens=2048,
+                tools=tools,
+            ),
+        )
+    except Exception as e:
+        if _is_quota_error(e):
+            _gemini_search_blocked_until[0] = time.monotonic() + GEMINI_SEARCH_COOLDOWN
+            logger.warning(
+                "Gemini grounding 配额超限（429），%.0f 分钟内回退自带搜索源",
+                GEMINI_SEARCH_COOLDOWN / 60,
+            )
+        else:
+            logger.warning("Gemini grounding 检索失败：%s", type(e).__name__)
+        return None
+    text = (getattr(resp, "text", None) or "").strip()
+    if not text:
+        return None
+    seen, links = set(), []
+    for cand in getattr(resp, "candidates", None) or []:
+        gm = getattr(cand, "grounding_metadata", None)
+        for gc in getattr(gm, "grounding_chunks", None) or []:
+            web = getattr(gc, "web", None)
+            uri = getattr(web, "uri", None)
+            if uri and uri not in seen:
+                seen.add(uri)
+                links.append(f"[{getattr(web, 'title', '') or uri}]({uri})")
+    if links:
+        text += "\n\n" + t("sources") + "\n" + "\n".join(links[:5])
+    return text[: SEARCH_RESULT_CHAR_LIMIT + 800]
+
+
 async def run_web_search(query: str) -> str:
-    """并发聚合所有已配置的搜索源。永不抛异常：失败返回让模型能继续作答的说明文本。"""
+    """并发聚合所有已配置的搜索源。永不抛异常：失败返回让模型能继续作答的说明文本。
+
+    配置了 GEMINI_SEARCH_MODEL 时优先用 Gemini grounding（Google 服务端检索），
+    失败/冷却期自动回退到普通搜索源。
+    """
     query = (query or "").strip()
     if not query:
         return t("search_no_results", query="")
+    if GEMINI_SEARCH_MODEL:
+        grounded = await _search_gemini_grounded(query)
+        if grounded is not None:
+            return grounded
     logger.info("联网搜索 (%s): %s", "+".join(ACTIVE_PROVIDERS), query)
     outcomes = await asyncio.gather(
         *(_PROVIDER_SEARCH[p](query) for p in ACTIVE_PROVIDERS), return_exceptions=True
@@ -1052,7 +1122,12 @@ def _result_summary(tool_name: str, content: str) -> str:
     if tool_name == "open_url":
         n = len(content)
         return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
-    return t("res_results", n=len(_RESULT_ROW_RE.findall(content)))
+    rows = len(_RESULT_ROW_RE.findall(content))
+    if rows:
+        return t("res_results", n=rows)
+    # grounding 综述没有 [n] 行标记，显示字数
+    n = len(content)
+    return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
@@ -1662,6 +1737,11 @@ def main() -> None:
     logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
     if GEMINI_NATIVE_SEARCH:
         logger.info("Gemini 原生搜索模式：google_search + url_context 由 Google 服务端执行")
+    elif GEMINI_SEARCH_MODEL:
+        logger.info(
+            "混合搜索模式：web_search 由 %s + google_search grounding 执行（失败回退自带搜索源）",
+            GEMINI_SEARCH_MODEL,
+        )
     if SEARCH_ENABLED:
         logger.info(
             "联网搜索已开启：provider=%s（web_search + open_url）", ",".join(ACTIVE_PROVIDERS)

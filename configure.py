@@ -74,10 +74,12 @@ TEXT = {
         "search_invalid": "请输入 0-4 或源名称（tavily/duckduckgo/searxng/serper），多个用逗号分隔；0 只能单独使用",
         "tavily_key": "Tavily API Key",
         "serper_key": "Serper API Key（serper.dev）",
-        "s_gnative_a": "【Gemini】原生搜索（google_search + url_context）",
-        "s_gnative_b": "      检测到 Gemini 端点/模型：可由 Google 服务端执行搜索与读取网页，精度更高。\n      开启后 bot 自带的搜索源与 web_search/open_url 工具不再使用",
-        "gnative_ask": "  使用 Gemini 原生搜索？",
-        "gnative_skip_search": "（已启用 Gemini 原生搜索，跳过 bot 自带搜索源配置；原有搜索配置将保留）",
+        "s_gmode_a": "【Gemini】搜索方式",
+        "s_gmode_b": "      1 = 原生：回复模型自带 google_search（注意：3.5 系列免费档无 grounding 配额）\n      2 = 混合：搜索由指定 grounding 模型执行（如 gemini-2.5-flash，免费档可用），回复用所选模型\n      3 = bot 自带搜索源（tavily / serper / duckduckgo…）",
+        "gmode_pick": "搜索方式：1=原生  2=混合  3=自带搜索源",
+        "gmode_invalid": "请输入 1、2 或 3",
+        "gsearch_model": "grounding 搜索模型",
+        "gmode_skip_search": "（搜索由 Gemini 执行，跳过 bot 自带搜索源配置；原有搜索配置保留作为回退）",
         "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
         "jina_ask": "  网页直接读取失败（反爬/JS 页面）时走 Jina Reader（r.jina.ai）兜底？",
         "jina_key": "Jina API Key（可选，提高速率限制，jina.ai 免费申请）",
@@ -160,10 +162,12 @@ TEXT = {
         "search_invalid": "Enter 0-4 or provider names (tavily/duckduckgo/searxng/serper), comma-separated; 0 must be used alone",
         "tavily_key": "Tavily API key",
         "serper_key": "Serper API key (serper.dev)",
-        "s_gnative_a": "[Gemini] Native search (google_search + url_context)",
-        "s_gnative_b": "      Gemini endpoint/model detected: Google can run search and page reading server-side with higher precision.\n      When enabled, the bot's own search providers and web_search/open_url tools are bypassed",
-        "gnative_ask": "  Use Gemini native search?",
-        "gnative_skip_search": "(Gemini native search enabled; skipping the bot's own search provider setup — existing search settings are kept)",
+        "s_gmode_a": "[Gemini] Search mode",
+        "s_gmode_b": "      1 = Native: the reply model uses built-in google_search (note: no free-tier grounding quota on the 3.5 family)\n      2 = Hybrid: searches run on a dedicated grounding model (e.g. gemini-2.5-flash, free tier OK), replies use your chosen model\n      3 = Bot's own search providers (tavily / serper / duckduckgo…)",
+        "gmode_pick": "Search mode: 1=native  2=hybrid  3=own providers",
+        "gmode_invalid": "Enter 1, 2 or 3",
+        "gsearch_model": "Grounding search model",
+        "gmode_skip_search": "(Searches are handled by Gemini; skipping the bot's own provider setup — existing search settings are kept as fallback)",
         "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
         "jina_ask": "  Fall back to Jina Reader (r.jina.ai) when direct page fetch fails (anti-bot/JS pages)?",
         "jina_key": "Jina API key (optional, higher rate limits, free at jina.ai)",
@@ -481,26 +485,39 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     cfg["ENABLE_VISION"] = "true" if confirm(T["vision_ask"], default_yes=vision_default) else "false"
     print()
 
-    # ---- 6.5 Gemini 原生搜索（仅当端点/模型指向 Gemini 时询问）----
+    # ---- 6.5 Gemini 搜索方式（仅当端点/模型指向 Gemini 时询问）----
     is_gemini = "generativelanguage.googleapis.com" in base_url or model.lower().startswith("gemini")
-    native = False
+    gmode = ""
     if is_gemini:
-        print(T["s_gnative_a"])
-        print(T["s_gnative_b"])
-        if "GEMINI_NATIVE_SEARCH" in old:
-            native_default = old["GEMINI_NATIVE_SEARCH"].strip().lower() in ("1", "true", "yes", "on")
+        print(T["s_gmode_a"])
+        print(T["s_gmode_b"])
+        if old.get("GEMINI_NATIVE_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
+            gmode_default = "1"
+        elif old.get("GEMINI_SEARCH_MODEL", "").strip():
+            gmode_default = "2"
         else:
-            native_default = True  # 连 Gemini 通常就是冲着原生搜索来的
-        native = confirm(T["gnative_ask"], default_yes=native_default)
-        cfg["GEMINI_NATIVE_SEARCH"] = "true" if native else "false"
+            gmode_default = "2"  # 免费档 grounding 通常只在 2.5 系列可用，混合是最稳default
+
+        def validate_gmode(raw: str):
+            return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["gmode_invalid"])
+
+        gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
+        cfg["GEMINI_NATIVE_SEARCH"] = "true" if gmode == "1" else "false"
+        if gmode == "2":
+            cfg["GEMINI_SEARCH_MODEL"] = ask(
+                T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
+                required=True)
+        else:
+            cfg["GEMINI_SEARCH_MODEL"] = ""
         print()
     else:
-        # 非 Gemini 端点：显式置空，防止切换配置后残留的原生开关引发启动错误
+        # 非 Gemini 端点：显式置空，防止切换配置后残留的开关引发启动错误
         cfg["GEMINI_NATIVE_SEARCH"] = ""
+        cfg["GEMINI_SEARCH_MODEL"] = ""
 
     # ---- 7. Web search ----
-    if native:
-        print(T["gnative_skip_search"])
+    if gmode in ("1", "2"):
+        print(T["gmode_skip_search"])
         print()
     else:
         print(T["s_search_a"])

@@ -63,6 +63,7 @@ SEARCH_PROVIDERS = [
     p.strip() for p in os.getenv("SEARCH_PROVIDER", "").replace("，", ",").lower().split(",") if p.strip()
 ]
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
 SEARXNG_BASE_URL = os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
 SEARCH_MAX_RESULTS = int(os.getenv("SEARCH_MAX_RESULTS", "5"))
 SEARCH_MAX_ROUNDS = int(os.getenv("SEARCH_MAX_ROUNDS", "3"))  # 单次回答最多执行工具调用的轮数
@@ -76,11 +77,17 @@ STREAM_IDLE_TIMEOUT = float(os.getenv("STREAM_IDLE_TIMEOUT", "45"))
 # open_url 直接抓取失败（反爬 403 / JS 页面 / 正文过少）时，自动改走 Jina Reader 再试
 JINA_FALLBACK = os.getenv("JINA_FALLBACK", "true").strip().lower() in ("1", "true", "yes", "on")
 JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率限制更宽松
+# Gemini 原生搜索模式：改用 google-genai SDK 直连 Gemini API，启用服务端的
+# google_search + url_context 内置工具（Google 在服务端完成搜索与读页，精度更高）。
+# 开启后 bot 自带的 web_search/open_url 工具循环不再使用；LLM_API_KEY 填 AI Studio key
+GEMINI_NATIVE_SEARCH = os.getenv("GEMINI_NATIVE_SEARCH", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _provider_ready(p: str) -> bool:
     if p == "tavily":
         return bool(TAVILY_API_KEY)
+    if p == "serper":
+        return bool(SERPER_API_KEY)
     if p == "searxng":
         return bool(SEARXNG_BASE_URL)
     return p == "duckduckgo"
@@ -133,6 +140,7 @@ STRINGS = {
         "res_chars": "{k} 字",
         "res_failed": "失败",
         "res_fail_suffix": "，{n} 个失败",
+        "sources": "来源：",
         "btn_cancel": "✕ 取消",
         "cancelled": "❌ 已取消",
         "cancelled_suffix": "❌（已取消，以上为部分回复）",
@@ -207,6 +215,7 @@ STRINGS = {
         "res_chars": "{k} chars",
         "res_failed": "failed",
         "res_fail_suffix": ", {n} failed",
+        "sources": "Sources:",
         "btn_cancel": "✕ Cancel",
         "cancelled": "❌ Cancelled",
         "cancelled_suffix": "❌ (cancelled — partial reply above)",
@@ -341,6 +350,12 @@ llm = AsyncOpenAI(
     api_key=LLM_API_KEY,
     default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
 )
+
+if GEMINI_NATIVE_SEARCH:
+    from google import genai as _genai
+    from google.genai import types as gtypes
+
+    gemini_client = _genai.Client(api_key=LLM_API_KEY)
 
 
 def load_allowed_users() -> set[int]:
@@ -614,8 +629,34 @@ def format_search_results(query: str, rows: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+async def _search_serper(query: str) -> list[dict]:
+    """Serper.dev：真实 Google 搜索结果（含答案框）。"""
+    async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+        resp = await client.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            json={"q": query, "num": SEARCH_MAX_RESULTS},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    rows = []
+    box = data.get("answerBox") or {}
+    if box.get("answer") or box.get("snippet"):
+        rows.append({
+            "title": box.get("title", "Answer"),
+            "url": box.get("link", ""),
+            "snippet": box.get("answer") or box.get("snippet", ""),
+        })
+    rows += [
+        {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
+        for r in (data.get("organic") or [])[:SEARCH_MAX_RESULTS]
+    ]
+    return rows
+
+
 _PROVIDER_SEARCH = {
     "tavily": _search_tavily,
+    "serper": _search_serper,
     "searxng": _search_searxng,
     "duckduckgo": _search_duckduckgo,
 }
@@ -1049,8 +1090,93 @@ async def create_stream(history: list[dict], use_tools: bool):
             raise
 
 
-# 进行中的生成任务：gen_id -> (asyncio.Task, 提问者 user_id)。
-# 取消按钮回调据此找到任务并 cancel；仅提问者本人或管理员可取消
+_DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
+
+
+def _to_gemini_contents(history: list[dict]):
+    """OpenAI 格式的 messages → Gemini 的 (system_instruction, contents)。
+
+    多模态 content 数组里的 base64 data URL 图片转回字节；system 消息单独抽出。
+    """
+    system_text, contents = "", []
+    for m in history:
+        role, content = m["role"], m.get("content", "")
+        if role == "system":
+            if isinstance(content, str):
+                system_text = content
+            continue
+        parts = []
+        if isinstance(content, str):
+            if content:
+                parts.append(gtypes.Part.from_text(text=content))
+        else:
+            for p in content:
+                if p.get("type") == "text":
+                    parts.append(gtypes.Part.from_text(text=p["text"]))
+                elif p.get("type") == "image_url":
+                    mm = _DATA_URL_RE.match(p.get("image_url", {}).get("url", ""))
+                    if mm:
+                        parts.append(gtypes.Part.from_bytes(
+                            data=base64.b64decode(mm.group(2)), mime_type=mm.group(1)))
+        if parts:
+            contents.append(gtypes.Content(role="model" if role == "assistant" else "user", parts=parts))
+    return system_text, contents
+
+
+async def gemini_create_stream(history: list[dict]):
+    system_text, contents = _to_gemini_contents(history)
+    tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
+    try:
+        tools.append(gtypes.Tool(url_context=gtypes.UrlContext()))
+    except AttributeError:  # 旧版 SDK 无 url_context，仅用 google_search
+        pass
+    config = gtypes.GenerateContentConfig(
+        system_instruction=system_text or None,
+        max_output_tokens=MAX_TOKENS,
+        tools=tools,
+    )
+    return await gemini_client.aio.models.generate_content_stream(
+        model=LLM_MODEL, contents=contents, config=config
+    )
+
+
+async def _drain_gemini_stream(stream, on_text) -> tuple[list[dict], str]:
+    """消费 Gemini 原生流：正文交给 on_text，聚合 grounding 引用（去重）。
+
+    与 _drain_stream 相同的空闲看门狗语义。返回（引用列表, 正文）。
+    """
+    content, citations, seen = "", [], set()
+    it = stream.__aiter__()
+    while True:
+        try:
+            if content and STREAM_IDLE_TIMEOUT > 0:
+                chunk = await asyncio.wait_for(anext(it), STREAM_IDLE_TIMEOUT)
+            else:
+                chunk = await anext(it)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gemini 流已有正文但 %.0fs 无新数据，视为完成（正文 %d 字）",
+                STREAM_IDLE_TIMEOUT, len(content),
+            )
+            break
+        text = getattr(chunk, "text", None)
+        if text:
+            content += text
+            await on_text(text)
+        for cand in getattr(chunk, "candidates", None) or []:
+            gm = getattr(cand, "grounding_metadata", None)
+            for gc in getattr(gm, "grounding_chunks", None) or []:
+                web = getattr(gc, "web", None)
+                uri = getattr(web, "uri", None)
+                if uri and uri not in seen:
+                    seen.add(uri)
+                    citations.append({"uri": uri, "title": getattr(web, "title", "") or uri})
+    return citations, content
+
+
+# 进行中的生成任务：gen_id -> (asyncio.Task, 提问者 user_id)。# 取消按钮回调据此找到任务并 cancel；仅提问者本人或管理员可取消
 _gen_count = count(1)
 active_generations: dict[int, tuple[asyncio.Task, int]] = {}
 
@@ -1195,7 +1321,41 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
 
     working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
     try:
-        for round_idx in range(SEARCH_MAX_ROUNDS + 1):
+        if GEMINI_NATIVE_SEARCH:
+            # 原生模式：google_search/url_context 由 Google 服务端执行，单轮生成，
+            # 重试/掐流/空闲语义与 OpenAI 路径一致
+            citations: list[dict] = []
+            t0 = time.monotonic()
+            for attempt in range(2):
+                out_before = len(finalized) + len(segment.strip())
+                t0 = time.monotonic()
+                try:
+                    stream = await gemini_create_stream(working)
+                    citations, _ = await _drain_gemini_stream(stream, on_text)
+                    break
+                except Exception as e:
+                    elapsed = time.monotonic() - t0
+                    if len(finalized) + len(segment.strip()) != out_before:
+                        logger.warning(
+                            "Gemini 流中断但正文已到手（%.1fs, %s），按完成处理",
+                            elapsed, type(e).__name__,
+                        )
+                        break
+                    if attempt:
+                        raise
+                    logger.warning(
+                        "Gemini 流中断且无输出（%.1fs, %s），重试一次", elapsed, type(e).__name__
+                    )
+                    await asyncio.sleep(1.5)
+            logger.info(
+                "Gemini 原生轮完成 %.1fs：正文 %d 字，引用 %d 条",
+                time.monotonic() - t0, len(finalized) + len(segment), len(citations),
+            )
+            if citations and segment.strip():
+                links = "\n".join(f"[{c['title']}]({c['uri']})" for c in citations[:5])
+                segment += "\n\n" + t("sources") + "\n" + links
+        rounds = 0 if GEMINI_NATIVE_SEARCH else SEARCH_MAX_ROUNDS + 1
+        for round_idx in range(rounds):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
             use_tools = SEARCH_ENABLED and round_idx < SEARCH_MAX_ROUNDS
             if round_idx and not segment.strip():
@@ -1491,6 +1651,8 @@ def main() -> None:
         )
     )
     logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
+    if GEMINI_NATIVE_SEARCH:
+        logger.info("Gemini 原生搜索模式：google_search + url_context 由 Google 服务端执行")
     if SEARCH_ENABLED:
         logger.info(
             "联网搜索已开启：provider=%s（web_search + open_url）", ",".join(ACTIVE_PROVIDERS)

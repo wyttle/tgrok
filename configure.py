@@ -66,10 +66,11 @@ TEXT = {
         "s6b": "      模型支持视觉输入时开启：群友发图或回复图片提问，图片会发给模型一起分析",
         "vision_ask": "  开启图片理解？",
         "s_search_a": "【7/9】联网搜索（web_search + open_url 工具）",
-        "s_search_b": "      模型可自主联网搜索、并打开搜索结果网页读取正文（需模型支持 function calling）：\n      tavily 需免费 API key（tavily.com），duckduckgo 零配置，searxng 需自建实例\n      可同时选多个源（逗号分隔），并发聚合、去重合并搜索结果",
-        "search_pick": "搜索源：0=关闭  1=tavily  2=duckduckgo  3=searxng（可多选，如 1,2）",
-        "search_invalid": "请输入 0-3 或源名称（tavily/duckduckgo/searxng），多个用逗号分隔；0 只能单独使用",
+        "s_search_b": "      模型可自主联网搜索、并打开搜索结果网页读取正文（需模型支持 function calling）：\n      tavily 需免费 API key（tavily.com），duckduckgo 零配置，searxng 需自建实例，\n      serper 为真实 Google 结果（serper.dev 免费 2500 次）\n      可同时选多个源（逗号分隔），并发聚合、去重合并搜索结果",
+        "search_pick": "搜索源：0=关闭  1=tavily  2=duckduckgo  3=searxng  4=serper（可多选，如 1,4）",
+        "search_invalid": "请输入 0-4 或源名称（tavily/duckduckgo/searxng/serper），多个用逗号分隔；0 只能单独使用",
         "tavily_key": "Tavily API Key",
+        "serper_key": "Serper API Key（serper.dev）",
         "searxng_url": "SearXNG 实例地址（如 http://localhost:8080）",
         "jina_ask": "  网页直接读取失败（反爬/JS 页面）时走 Jina Reader（r.jina.ai）兜底？",
         "jina_key": "Jina API Key（可选，提高速率限制，jina.ai 免费申请）",
@@ -144,10 +145,11 @@ TEXT = {
         "s6b": "      Enable if the model supports vision: images sent or quoted in chat are passed to the model",
         "vision_ask": "  Enable image understanding?",
         "s_search_a": "[7/9] Web search (web_search + open_url tools)",
-        "s_search_b": "      Lets the model search the internet and open result pages to read their text (requires function calling support):\n      tavily needs a free API key (tavily.com), duckduckgo is zero-config, searxng needs a self-hosted instance\n      Multiple providers can be combined (comma-separated); results are fetched concurrently and merged",
-        "search_pick": "Provider: 0=off  1=tavily  2=duckduckgo  3=searxng (combine with commas, e.g. 1,2)",
-        "search_invalid": "Enter 0-3 or provider names (tavily/duckduckgo/searxng), comma-separated; 0 must be used alone",
+        "s_search_b": "      Lets the model search the internet and open result pages to read their text (requires function calling support):\n      tavily needs a free API key (tavily.com), duckduckgo is zero-config, searxng needs a self-hosted instance,\n      serper returns real Google results (serper.dev, 2500 free queries)\n      Multiple providers can be combined (comma-separated); results are fetched concurrently and merged",
+        "search_pick": "Provider: 0=off  1=tavily  2=duckduckgo  3=searxng  4=serper (combine with commas, e.g. 1,4)",
+        "search_invalid": "Enter 0-4 or provider names (tavily/duckduckgo/searxng/serper), comma-separated; 0 must be used alone",
         "tavily_key": "Tavily API key",
+        "serper_key": "Serper API key (serper.dev)",
         "searxng_url": "SearXNG instance URL (e.g. http://localhost:8080)",
         "jina_ask": "  Fall back to Jina Reader (r.jina.ai) when direct page fetch fails (anti-bot/JS pages)?",
         "jina_key": "Jina API key (optional, higher rate limits, free at jina.ai)",
@@ -449,9 +451,9 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     # ---- 7. Web search ----
     print(T["s_search_a"])
     print(T["s_search_b"])
-    provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng"}
+    provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng", "4": "serper"}
     off_values = ("0", "none", "off")
-    known = ("tavily", "duckduckgo", "searxng")
+    known = ("tavily", "duckduckgo", "searxng", "serper")
 
     def parse_providers(raw: str) -> list[str] | None:
         """解析多选输入（序号或名称，逗号分隔）。None 表示无法解析。"""
@@ -479,6 +481,9 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     cfg["SEARCH_PROVIDER"] = ",".join(providers)
     if "tavily" in providers:
         cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
+                                    required=True, secret=True)
+    if "serper" in providers:
+        cfg["SERPER_API_KEY"] = ask(T["serper_key"], default=old.get("SERPER_API_KEY", ""),
                                     required=True, secret=True)
     if "searxng" in providers:
         cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),

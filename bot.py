@@ -710,7 +710,7 @@ async def _search_gemini_grounded(query: str) -> str | None:
                 GEMINI_SEARCH_COOLDOWN / 60,
             )
         else:
-            logger.warning("Gemini grounding 检索失败：%s", type(e).__name__)
+            logger.warning("Gemini grounding 检索失败：%s: %s", type(e).__name__, str(e)[:200])
         return None
     text = (getattr(resp, "text", None) or "").strip()
     if not text:

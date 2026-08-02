@@ -167,6 +167,11 @@ STRINGS = {
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
+        "search_merged": "（本轮多个 web_search 已合并为一次深度调研执行，结果见第一条 web_search 返回）",
+        "search_agent_note": (
+            "注意：web_search 是深度调研代理，一次调用内部会自动执行多轮 Google 搜索并汇总。"
+            "把一轮要查证的内容合并成一个综合调研任务提交，不要拆成多个小查询。"
+        ),
         "fetch_bad_url": "（无法读取该地址：仅支持公网 http/https 链接）",
         "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
         "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
@@ -243,6 +248,11 @@ STRINGS = {
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
+        "search_merged": "(multiple web_search calls this round were merged into one deep-research run; see the first web_search result)",
+        "search_agent_note": (
+            "Note: web_search is a deep research agent that internally runs multiple Google "
+            "searches per call. Submit ONE combined research task per round instead of many narrow queries."
+        ),
         "fetch_bad_url": "(cannot fetch this address: only public http/https URLs are supported)",
         "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",
         "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
@@ -293,6 +303,8 @@ SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
 if SEARCH_ENABLED:
     # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
     SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")
+    if GEMINI_SEARCH_MODEL:
+        SYSTEM_PROMPT += t("search_agent_note")
 
 
 def current_time_line() -> str:
@@ -545,15 +557,30 @@ WEB_SEARCH_TOOL = {
     "function": {
         "name": "web_search",
         "description": (
-            "Search the web for up-to-date information. Use this for recent events, "
-            "time-sensitive facts, or anything you are unsure about."
+            # grounding 模式下 web_search 是深度调研代理，引导主模型合并任务而非拆散小查询
+            (
+                "Deep research agent backed by Google Search. Give it ONE comprehensive "
+                "research task in natural language — it can cover several aspects at once, "
+                "and the agent will run multiple Google searches internally and return a "
+                "fact summary with sources. Do NOT split one round of research into many "
+                "narrow queries; one well-phrased task per round is enough."
+            )
+            if GEMINI_SEARCH_MODEL
+            else (
+                "Search the web for up-to-date information. Use this for recent events, "
+                "time-sensitive facts, or anything you are unsure about."
+            )
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query, in the language most likely to find good results.",
+                    "description": (
+                        "The research task or question, in the language most likely to find good results."
+                        if GEMINI_SEARCH_MODEL
+                        else "The search query, in the language most likely to find good results."
+                    ),
                 }
             },
             "required": ["query"],
@@ -1079,13 +1106,17 @@ def _stage_line(round_idx: int) -> str:
 def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
     """把一轮工具调用变成进度条目。
 
-    搜索每条一行（显示搜索词）；同一轮的多个网页读取合并为一行
-    （避免重复行刷屏），结果聚合为总字数。不暴露 URL/域名给群成员。
+    搜索每条一行（显示搜索词）；grounding 模式下同轮多个搜索合并为一行
+    （执行时也会合并为一次调研）。同一轮的多个网页读取合并为一行，
+    结果聚合为总字数。不暴露 URL/域名给群成员。
     返回 (条目列表, 逐调用到条目的映射)。
     """
     entries: list[dict] = []
     mapping: list[dict] = []
     open_entry: dict | None = None
+    search_calls = [c for c in calls_list if c["function"]["name"] != "open_url"]
+    merge_search = bool(GEMINI_SEARCH_MODEL) and len(search_calls) > 1
+    merged_search_entry: dict | None = None
     for call in calls_list:
         args = _tool_args(call) or {}
         if call["function"]["name"] == "open_url":
@@ -1095,10 +1126,20 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
                 entries.append(open_entry)
             open_entry["count"] += 1
             mapping.append(open_entry)
+        elif merge_search:
+            if merged_search_entry is None:
+                queries = "；".join(
+                    str((_tool_args(c) or {}).get("query", "")).strip() or "?" for c in search_calls
+                )
+                merged_search_entry = {"kind": "search", "count": len(search_calls), "contents": [],
+                                       "text": t("tool_search", q=queries[:48]),
+                                       "done": False, "result": None}
+                entries.append(merged_search_entry)
+            mapping.append(merged_search_entry)
         else:
             query = str(args.get("query", "")).strip() or "?"
-            entry = {"kind": "search", "text": t("tool_search", q=query[:48]),
-                     "done": False, "result": None}
+            entry = {"kind": "search", "count": 1, "contents": [],
+                     "text": t("tool_search", q=query[:48]), "done": False, "result": None}
             entries.append(entry)
             mapping.append(entry)
     if open_entry is not None:
@@ -1113,7 +1154,7 @@ def _human_chars(n: int) -> str:
 
 
 def _attach_result(entry: dict, call: dict, content: str) -> None:
-    """把一次工具执行的结果记到对应条目上；合并的读取条目聚合总字数与失败数。"""
+    """把一次工具执行的结果记到对应条目上；合并条目聚合后再定稿。"""
     if entry["kind"] == "open":
         entry["contents"].append(content)
         if len(entry["contents"]) < entry["count"]:
@@ -1127,6 +1168,14 @@ def _attach_result(entry: dict, call: dict, content: str) -> None:
         else:
             result = t("res_failed")
         entry["done"], entry["result"] = True, result
+    elif entry.get("count", 1) > 1:
+        # 合并执行的多个搜索：真实结果只在其中一条（其余是"已合并"占位）
+        entry["contents"].append(content)
+        if len(entry["contents"]) < entry["count"]:
+            return
+        real = next((c for c in entry["contents"] if not c.startswith(("（", "("))), "")
+        entry["done"] = True
+        entry["result"] = _result_summary("web_search", real) if real else t("res_failed")
     else:
         entry["done"] = True
         entry["result"] = _result_summary(call["function"]["name"], content)
@@ -1148,20 +1197,41 @@ def _result_summary(tool_name: str, content: str) -> str:
 
 
 async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
-    """并发执行一轮内的所有工具调用（相互独立），按原顺序返回 tool 消息。"""
+    """并发执行一轮内的所有工具调用（相互独立），按原顺序返回 tool 消息。
 
-    async def run_one(call: dict) -> dict:
+    grounding 模式下同一轮的多个 web_search 合并为一次深度调研（每次 grounding
+    内部本就是多跳检索），结果给第一条，其余标注已合并——防止主模型把调研代理
+    当浏览器逐条调度。
+    """
+    calls_list = assistant_msg["tool_calls"]
+    merged_result: str | None = None
+    first_search_i: int | None = None
+    if GEMINI_SEARCH_MODEL:
+        queries = []
+        for i, call in enumerate(calls_list):
+            if call["function"]["name"] != "open_url":
+                query = str((_tool_args(call) or {}).get("query", "")).strip()
+                if query:
+                    if first_search_i is None:
+                        first_search_i = i
+                    queries.append(query)
+        if len(queries) > 1:
+            merged_result = await run_web_search("；".join(dict.fromkeys(queries)))
+
+    async def run_one(i: int, call: dict) -> dict:
         name = call["function"]["name"]
         args = _tool_args(call)
         if args is None:
             content = t("search_bad_args")
         elif name == "open_url":
             content = await run_fetch_url(str(args.get("url", "")))
+        elif merged_result is not None:
+            content = merged_result if i == first_search_i else t("search_merged")
         else:
             content = await run_web_search(str(args.get("query", "")))
         return {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
 
-    return list(await asyncio.gather(*(run_one(c) for c in assistant_msg["tool_calls"])))
+    return list(await asyncio.gather(*(run_one(i, c) for i, c in enumerate(calls_list))))
 
 
 async def create_stream(history: list[dict], use_tools: bool):

@@ -56,8 +56,10 @@ TEXT = {
         "s4b": "      1 = OpenAI 兼容接口（中转站 / LM Studio / vLLM / OpenAI 官方等，需填接口地址）\n      2 = Gemini 官方（Google AI Studio，key 在 https://aistudio.google.com/apikey 免费申请）",
         "backend_pick": "后端类型：1=OpenAI 兼容  2=Gemini 官方",
         "backend_invalid": "请输入 1 或 2",
-        "gemini_key": "Gemini API Key（官方为 AI Studio key；填了中转站地址则为中转站 key）",
-        "gemini_addr": "Gemini 接口地址（官方直连请留空；中转站支持转发 Gemini 原生格式时填其根地址）",
+        "gemini_key": "Gemini API Key（官方为 AI Studio key；走中转站则为中转站 key）",
+        "gemini_route_pick": "Gemini 接入：1=Google 官方直连  2=中转站（转发原生格式）",
+        "gemini_route_invalid": "请输入 1 或 2",
+        "relay_addr": "中转站根地址（如 https://xxx.com）",
         "note_relay_compat": "  → 原生/grounding 走该地址，回复走 {url}（中转站 OpenAI 兼容路径）",
         "base_url": "接口地址",
         "api_key": "API Key（本地服务一般随便填）",
@@ -81,7 +83,6 @@ TEXT = {
         "gmode_pick": "搜索方式：1=原生  2=混合  3=自带搜索源",
         "gmode_invalid": "请输入 1、2 或 3",
         "gsearch_model": "grounding 搜索模型",
-        "gemini_base": "Gemini 原生接口地址（走 Google 官方请留空；中转站支持转发原生格式时填其地址）",
         "s_genhance": "      —— Gemini grounding 增强：web_search 改由 Gemini 模型 + Google 官方搜索执行（需 AI Studio key，\n      免费申请），结果更准；失败时自动回退上面配置的搜索源",
         "genhance_ask": "  启用 Gemini grounding 增强搜索？",
         "gmode_skip_search": "（搜索由 Gemini 执行，跳过 bot 自带搜索源配置；原有搜索配置保留作为回退）",
@@ -149,8 +150,10 @@ TEXT = {
         "s4b": "      1 = OpenAI-compatible endpoint (relay / LM Studio / vLLM / official OpenAI; needs an endpoint URL)\n      2 = Official Gemini (Google AI Studio; get a free key at https://aistudio.google.com/apikey)",
         "backend_pick": "Backend: 1=OpenAI-compatible  2=Official Gemini",
         "backend_invalid": "Enter 1 or 2",
-        "gemini_key": "Gemini API key (AI Studio key for official; relay key if a relay address is set)",
-        "gemini_addr": "Gemini API base URL (leave empty for official Google; set your relay's root URL if it forwards the native format)",
+        "gemini_key": "Gemini API key (AI Studio key for official; relay key when routed through a relay)",
+        "gemini_route_pick": "Gemini routing: 1=official Google  2=relay (forwards native format)",
+        "gemini_route_invalid": "Enter 1 or 2",
+        "relay_addr": "Relay root URL (e.g. https://xxx.com)",
         "note_relay_compat": "  -> native/grounding use that URL; replies go through {url} (relay's OpenAI-compatible path)",
         "base_url": "Endpoint URL",
         "api_key": "API key (anything works for most local servers)",
@@ -174,7 +177,6 @@ TEXT = {
         "gmode_pick": "Search mode: 1=native  2=hybrid  3=own providers",
         "gmode_invalid": "Enter 1, 2 or 3",
         "gsearch_model": "Grounding search model",
-        "gemini_base": "Gemini native API base URL (leave empty for official Google; set if your relay forwards the native format)",
         "s_genhance": "      -- Gemini grounding boost: web_search runs on a Gemini model + official Google Search (needs a free\n      AI Studio key); more accurate results, automatically falls back to the providers above on failure",
         "genhance_ask": "  Enable Gemini grounding for search?",
         "gmode_skip_search": "(Searches are handled by Gemini; skipping the bot's own provider setup — existing search settings are kept as fallback)",
@@ -450,10 +452,17 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
 
     backend_default = "2" if "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", "") else "1"
     backend = ask(T["backend_pick"], default=backend_default, validate=validate_backend).strip()
+
+    def validate_route(raw: str):
+        return (True, "") if raw.strip() in ("1", "2") else (False, T["gemini_route_invalid"])
+
     if backend == "2":
         # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
-        addr = ask(T["gemini_addr"], default=old.get("GEMINI_BASE_URL", "")).strip().rstrip("/")
-        if addr:
+        route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
+        route = ask(T["gemini_route_pick"], default=route_default, validate=validate_route).strip()
+        if route == "2":
+            addr = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
+                       required=True).strip().rstrip("/")
             cfg["GEMINI_BASE_URL"] = addr  # 原生模式与 grounding 走中转站根地址
             base_url = addr + "/v1"  # 回复走中转站的 OpenAI 兼容路径
             print(T["note_relay_compat"].format(url=base_url))
@@ -595,7 +604,13 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
                 cfg["GEMINI_SEARCH_MODEL"] = ask(
                     T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
                     required=True)
-                cfg["GEMINI_BASE_URL"] = ask(T["gemini_base"], default=old.get("GEMINI_BASE_URL", ""))
+                route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
+                route = ask(T["gemini_route_pick"], default=route_default, validate=validate_route).strip()
+                if route == "2":
+                    cfg["GEMINI_BASE_URL"] = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
+                                                 required=True).strip().rstrip("/")
+                else:
+                    cfg["GEMINI_BASE_URL"] = ""
             else:
                 cfg["GEMINI_API_KEY"] = ""
                 cfg["GEMINI_SEARCH_MODEL"] = ""

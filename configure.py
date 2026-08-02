@@ -56,7 +56,9 @@ TEXT = {
         "s4b": "      1 = OpenAI 兼容接口（中转站 / LM Studio / vLLM / OpenAI 官方等，需填接口地址）\n      2 = Gemini 官方（Google AI Studio，key 在 https://aistudio.google.com/apikey 免费申请）",
         "backend_pick": "后端类型：1=OpenAI 兼容  2=Gemini 官方",
         "backend_invalid": "请输入 1 或 2",
-        "gemini_key": "Gemini API Key（AI Studio）",
+        "gemini_key": "Gemini API Key（官方为 AI Studio key；填了中转站地址则为中转站 key）",
+        "gemini_addr": "Gemini 接口地址（官方直连请留空；中转站支持转发 Gemini 原生格式时填其根地址）",
+        "note_relay_compat": "  → 原生/grounding 走该地址，回复走 {url}（中转站 OpenAI 兼容路径）",
         "base_url": "接口地址",
         "api_key": "API Key（本地服务一般随便填）",
         "ua": "自定义 User-Agent（部分云端网关会校验 UA，可选）",
@@ -147,7 +149,9 @@ TEXT = {
         "s4b": "      1 = OpenAI-compatible endpoint (relay / LM Studio / vLLM / official OpenAI; needs an endpoint URL)\n      2 = Official Gemini (Google AI Studio; get a free key at https://aistudio.google.com/apikey)",
         "backend_pick": "Backend: 1=OpenAI-compatible  2=Official Gemini",
         "backend_invalid": "Enter 1 or 2",
-        "gemini_key": "Gemini API key (AI Studio)",
+        "gemini_key": "Gemini API key (AI Studio key for official; relay key if a relay address is set)",
+        "gemini_addr": "Gemini API base URL (leave empty for official Google; set your relay's root URL if it forwards the native format)",
+        "note_relay_compat": "  -> native/grounding use that URL; replies go through {url} (relay's OpenAI-compatible path)",
         "base_url": "Endpoint URL",
         "api_key": "API key (anything works for most local servers)",
         "ua": "Custom User-Agent (some cloud gateways validate it; optional)",
@@ -447,8 +451,15 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     backend_default = "2" if "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", "") else "1"
     backend = ask(T["backend_pick"], default=backend_default, validate=validate_backend).strip()
     if backend == "2":
-        # Gemini 官方：地址固定无需询问；UA 无意义，置空
-        base_url = gemini_base
+        # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
+        addr = ask(T["gemini_addr"], default=old.get("GEMINI_BASE_URL", "")).strip().rstrip("/")
+        if addr:
+            cfg["GEMINI_BASE_URL"] = addr  # 原生模式与 grounding 走中转站根地址
+            base_url = addr + "/v1"  # 回复走中转站的 OpenAI 兼容路径
+            print(T["note_relay_compat"].format(url=base_url))
+        else:
+            cfg["GEMINI_BASE_URL"] = ""
+            base_url = gemini_base
         cfg["LLM_BASE_URL"] = base_url
         cfg["LLM_API_KEY"] = ask(T["gemini_key"], default=old.get("LLM_API_KEY", ""),
                                  required=True, secret=True)
@@ -510,10 +521,6 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
         cfg["GEMINI_NATIVE_SEARCH"] = "true" if gmode == "1" else "false"
         cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
-        if gmode in ("1", "2"):
-            cfg["GEMINI_BASE_URL"] = ask(T["gemini_base"], default=old.get("GEMINI_BASE_URL", ""))
-        else:
-            cfg["GEMINI_BASE_URL"] = ""
         if gmode == "2":
             cfg["GEMINI_SEARCH_MODEL"] = ask(
                 T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),

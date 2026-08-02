@@ -79,6 +79,7 @@ TEXT = {
         "gmode_pick": "搜索方式：1=原生  2=混合  3=自带搜索源",
         "gmode_invalid": "请输入 1、2 或 3",
         "gsearch_model": "grounding 搜索模型",
+        "gemini_base": "Gemini 原生接口地址（走 Google 官方请留空；中转站支持转发原生格式时填其地址）",
         "s_genhance": "      —— Gemini grounding 增强：web_search 改由 Gemini 模型 + Google 官方搜索执行（需 AI Studio key，\n      免费申请），结果更准；失败时自动回退上面配置的搜索源",
         "genhance_ask": "  启用 Gemini grounding 增强搜索？",
         "gmode_skip_search": "（搜索由 Gemini 执行，跳过 bot 自带搜索源配置；原有搜索配置保留作为回退）",
@@ -169,6 +170,7 @@ TEXT = {
         "gmode_pick": "Search mode: 1=native  2=hybrid  3=own providers",
         "gmode_invalid": "Enter 1, 2 or 3",
         "gsearch_model": "Grounding search model",
+        "gemini_base": "Gemini native API base URL (leave empty for official Google; set if your relay forwards the native format)",
         "s_genhance": "      -- Gemini grounding boost: web_search runs on a Gemini model + official Google Search (needs a free\n      AI Studio key); more accurate results, automatically falls back to the providers above on failure",
         "genhance_ask": "  Enable Gemini grounding for search?",
         "gmode_skip_search": "(Searches are handled by Gemini; skipping the bot's own provider setup — existing search settings are kept as fallback)",
@@ -508,6 +510,10 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
         cfg["GEMINI_NATIVE_SEARCH"] = "true" if gmode == "1" else "false"
         cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
+        if gmode in ("1", "2"):
+            cfg["GEMINI_BASE_URL"] = ask(T["gemini_base"], default=old.get("GEMINI_BASE_URL", ""))
+        else:
+            cfg["GEMINI_BASE_URL"] = ""
         if gmode == "2":
             cfg["GEMINI_SEARCH_MODEL"] = ask(
                 T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
@@ -582,9 +588,11 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
                 cfg["GEMINI_SEARCH_MODEL"] = ask(
                     T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
                     required=True)
+                cfg["GEMINI_BASE_URL"] = ask(T["gemini_base"], default=old.get("GEMINI_BASE_URL", ""))
             else:
                 cfg["GEMINI_API_KEY"] = ""
                 cfg["GEMINI_SEARCH_MODEL"] = ""
+                cfg["GEMINI_BASE_URL"] = ""
         print()
 
     # ---- 8. Generation params & timezone ----

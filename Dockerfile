@@ -7,7 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 COPY tgrok/ ./tgrok/
-COPY tgrok/ ./tgrok/
 
 ENV PYTHONUNBUFFERED=1
 

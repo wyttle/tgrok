@@ -325,17 +325,18 @@ async def post_init(app: Application) -> None:
             logger.warning("为管理员 %s 注册命令菜单失败：%s", admin_id, e)
 
 
-def main() -> None:
-    # concurrent_updates：PTB 默认串行处理 update，取消按钮的回调会被堵在
-    # 正在执行的生成任务后面（点了没反应）；并发处理后回调即时生效，
-    # 多个用户同时提问也不再互相排队
-    app = (
+def build_application() -> Application:
+    return (
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(True)
         .post_init(post_init)
         .build()
     )
+
+
+def main() -> None:
+    app = build_application()
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("adduser", cmd_adduser))

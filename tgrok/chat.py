@@ -322,6 +322,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     ticker_task = asyncio.create_task(_ticker())
 
     working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
+    generation_completed = False
     try:
         if config.GEMINI_NATIVE_SEARCH:
             # 原生模式：google_search/url_context 由 Google 服务端执行，单轮生成，
@@ -437,20 +438,33 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         return None, ""
     finally:
         ticker_task.cancel()
+        if not generation_completed:
+            active_generations.pop(gen_id, None)
+
+    try:
+        if segment.strip():
+            await push(segment, final=True)
+            finalized += segment
+        elif not finalized:
+            try:
+                if sent is not None:
+                    await sent.edit_text(t("empty_reply"))
+            except TelegramError:
+                pass
+            return None, ""
+        return sent, finalized.strip()
+    finally:
+        generation_completed = True
         active_generations.pop(gen_id, None)
 
-    if segment.strip():
-        await push(segment, final=True)
-        finalized += segment
-    elif not finalized:
-        # 全程没有正文：把占位消息改成空回复提示
-        try:
-            if sent is not None:
-                await sent.edit_text(t("empty_reply"))
-        except TelegramError:
-            pass
-        return None, ""
-    return sent, finalized.strip()
+
+async def _answer_callback(q, text: str | None = None) -> None:
+    try:
+        await q.answer(text)
+    except BadRequest as e:
+        error = str(e).lower()
+        if "query is too old" not in error and "query id is invalid" not in error:
+            raise
 
 
 async def on_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -461,16 +475,16 @@ async def on_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         gen_id = int(q.data.split(":", 1)[1])
     except (IndexError, ValueError):
-        await q.answer()
+        await _answer_callback(q)
         return
     entry = active_generations.get(gen_id)
     if entry is None:
-        await q.answer(t("cancel_gone"))
+        await _answer_callback(q, t("cancel_gone"))
         return
     task, owner = entry
     user = q.from_user
     if user is None or (user.id != owner and not is_admin(user.id)):
-        await q.answer(t("cancel_denied"))
+        await _answer_callback(q, t("cancel_denied"))
         return
     task.cancel()
-    await q.answer(t("cancel_done"))
+    await _answer_callback(q, t("cancel_done"))

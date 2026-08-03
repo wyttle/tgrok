@@ -383,7 +383,10 @@ def offer_restart() -> None:
     if compose.exists() and shutil.which("docker"):
         if confirm(T["p_restart_ask"], default_yes=True):
             print(T["p_restarting"])
-            r = subprocess.run(["docker", "compose", "up", "-d"], cwd=str(compose.parent))
+            r = subprocess.run(
+                ["docker", "compose", "up", "-d", "--build", "--force-recreate"],
+                cwd=str(compose.parent),
+            )
             print(T["p_restart_done"] if r.returncode == 0 else T["p_restart_fail"])
             return
     print(T["p_restart_hint"])

@@ -199,10 +199,16 @@ ok("URL 安全/HTML 提取")
 assert llm.llm.max_retries == 0
 ok("OpenAI SDK 重试已禁用")
 
-# 14. PTB 必须并发处理 update（否则取消按钮回调被生成任务堵死）
-import inspect
-src = inspect.getsource(tg.main)
-assert "concurrent_updates(True)" in src
+# 14. PTB 必须真实启用并发 update（否则取消按钮回调被生成任务堵死）
+app = tg.build_application()
+assert app.concurrent_updates > 1
 ok("PTB 并发处理已启用")
+
+# 15. Telegram 已过期的回调确认不应冒泡为未捕获异常
+async def stale_answer(text=None):
+    raise chat.BadRequest("Query is too old and response timeout expired or query id is invalid")
+q = types.SimpleNamespace(answer=stale_answer)
+run(chat._answer_callback(q, "x"))
+ok("过期回调安全忽略")
 
 print(f"\nall {PASS} checks passed")

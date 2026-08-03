@@ -195,4 +195,14 @@ title, text = web._html_to_text("<html><head><title>T</title></head><body><main>
 assert title=="T" and "Hi" in text
 ok("URL 安全/HTML 提取")
 
+# 13. SDK 内建重试必须禁用（否则 429 时静默睡 60s+，取消/自有重试全部失效）
+assert llm.llm.max_retries == 0
+ok("OpenAI SDK 重试已禁用")
+
+# 14. PTB 必须并发处理 update（否则取消按钮回调被生成任务堵死）
+import inspect
+src = inspect.getsource(tg.main)
+assert "concurrent_updates(True)" in src
+ok("PTB 并发处理已启用")
+
 print(f"\nall {PASS} checks passed")

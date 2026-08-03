@@ -21,6 +21,9 @@ llm = AsyncOpenAI(
     base_url=LLM_BASE_URL,
     api_key=LLM_API_KEY,
     default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
+    # 禁用 SDK 内建重试：它会按服务端 Retry-After 静默睡 60s+，期间用户只能干等。
+    # 重试语义由 chat.stream_reply 统一控制（零输出重试一次、429 不重试）
+    max_retries=0,
 )
 
 if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL:

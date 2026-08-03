@@ -20,9 +20,9 @@ from .tg_auth import is_admin
 
 logger = logging.getLogger(__name__)
 
-# 匹配标题行：行首可选的 emoji/符号前缀 + 1~6 个 #。Grok 常输出「📚 ## 标题」这种
-# 前缀带 emoji 的标题，此时 # 不在行首，telegramify/CommonMark 不认作标题，会把 ## 原样
-# 泄漏成 \#\#。这里把前缀 emoji 去掉、# 归位到行首，让下游正常渲染成加粗。
+# 匹配标题行：行首可选的符号前缀 + 1~6 个 #。Grok 有时输出带符号前缀的标题，
+# 此时 # 不在行首，telegramify/CommonMark 不认作标题，会把 ## 原样
+# 泄漏成 \#\#。这里去掉前缀符号、让 # 回到行首，使下游正常渲染成加粗。
 _HEADING_RE = re.compile(r"^[ \t]*[^\w#\n]*[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$", re.M)
 
 
@@ -35,7 +35,7 @@ def _normalize_headings(text: str) -> str:
 def to_telegram_markdown(text: str) -> str:
     """把模型返回的标准 Markdown 转成 Telegram MarkdownV2。
 
-    先归一化标题行（去掉 Grok 爱加的 emoji 前缀，让 # 回到行首），再交给
+    先归一化标题行（去掉 Grok 添加的符号前缀，让 # 回到行首），再交给
     telegramify_markdown 转换。
     """
     return telegramify_markdown.markdownify(_normalize_headings(text))
@@ -194,7 +194,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
 
     先发送思考占位提示（推理模型思考期间无正文输出），首个正文数据块到达后原地替换；
     单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
-    模型请求搜索时在当前消息上显示 🔍 状态，执行后把结果回灌给模型继续生成
+    模型请求搜索时在当前消息上显示搜索状态，执行后把结果回灌给模型继续生成
     （最多 config.SEARCH_MAX_ROUNDS 轮）。传入的 history 不会被修改，中间的 tool
     消息只存在于本次调用内部，不会进入对话缓存。
     返回（最后一条已发送消息或 None, 完整回复文本）；失败/空回复时已就地提示，返回 (None, "")。

@@ -36,7 +36,7 @@ Telegram update
   → tg.handle_message：路由（@提及/回复bot/私聊）、鉴权、相册被动收集、
     组装 history（system + 引用上下文 + 图片 + with_time 时间注入）
   → chat.stream_reply：
-      占位气泡（带 ✕ 取消按钮）→ 注册 active_generations
+      占位气泡（带 取消按钮）→ 注册 active_generations
       ┌ 原生模式(GEMINI_NATIVE_SEARCH)：llm.gemini_create_stream 单轮，
       │ grounding 引用附「来源：」链接
       └ 工具循环（≤SEARCH_MAX_ROUNDS 轮，最后一轮强制无工具）：
@@ -68,8 +68,7 @@ Telegram update
 - **grounding 当调研代理而非搜索框**：工具描述引导主模型一轮提交一个综合任务；
   同轮多个 web_search 强制合并为一次 grounding 调研（每次 grounding 内部本就是
   多跳检索）。GEMINI_API_KEY/GEMINI_BASE_URL 与主模型解耦，支持中转站转发原生格式。
-- **进度显示纯文本+缩进**：特殊符号（⏺✻等）在部分 Telegram 客户端渲染成彩色
-  emoji 失控；不向群成员暴露 URL/域名。
+- **进度显示纯文本+缩进**：避免使用可能在部分 Telegram 客户端渲染成彩色图标的特殊符号；不向群成员暴露 URL/域名。
 - **SSRF 防护**：open_url 仅允许公网 http(s)，拒绝内网/回环 IP 字面量。
 
 ## 配置

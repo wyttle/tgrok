@@ -124,7 +124,7 @@ ok("取消·保留部分正文")
 run(cancel_case([], 8, expect_denied=True))
 ok("取消·权限拒绝")
 
-# 6. TUI：思考→搜索→✓→阶段替换→正文（含 grounding 合并显示）
+# 6. TUI：思考->搜索->完成->阶段替换->正文（含 grounding 合并显示）
 config.SEARCH_ENABLED = True
 rounds={"n":0}
 async def cs6(h, use_tools):

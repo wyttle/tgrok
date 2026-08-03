@@ -28,15 +28,15 @@ STRINGS = {
         "res_failed": "失败",
         "res_fail_suffix": "，{n} 个失败",
         "sources": "来源：",
-        "btn_cancel": "✕ 取消",
-        "cancelled": "❌ 已取消",
-        "cancelled_suffix": "❌（已取消，以上为部分回复）",
+        "btn_cancel": "取消",
+        "cancelled": "已取消",
+        "cancelled_suffix": "已取消（以上为部分回复）",
         "cancel_done": "已取消",
         "cancel_denied": "只有提问者或管理员可以取消",
         "cancel_gone": "本次回复已结束",
         "nudge": "请在 @ 我的同时提出问题，或回复某条消息后 @ 我提问～",
-        "llm_failed": "⚠️ 调用模型失败，请稍后重试；若持续失败请联系管理员。",
-        "llm_quota": "⚠️ 模型配额超限（429），请稍后再试；若持续出现请联系管理员检查额度/账单。",
+        "llm_failed": "调用模型失败，请稍后重试；若持续失败请联系管理员。",
+        "llm_quota": "模型配额超限（429），请稍后再试；若持续出现请联系管理员检查额度/账单。",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
@@ -62,16 +62,16 @@ STRINGS = {
         "weekday": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
         "start": (
             "你好！把我拉进群后这样用：\n"
-            "1️⃣ 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
-            "2️⃣ 直接 @ 我提问任何问题\n"
-            "3️⃣ 回复我的消息可以继续追问\n"
+            "1. 回复某条消息并 @ 我提问，例如「@{username} 这是真的吗？」\n"
+            "2. 直接 @ 我提问任何问题\n"
+            "3. 回复我的消息可以继续追问\n"
             "私聊里直接发消息即可。\n\n"
             "你的用户 ID：{user_id}"
         ),
         "admin_usage": "用法：/adduser <用户ID>（可多个，空格分隔），或在群里回复某人的消息后发送该命令",
         "invalid_id": "「{arg}」不是有效的用户 ID",
-        "added": "✅ 已添加：{ids}\n当前白名单共 {n} 人",
-        "removed": "✅ 已移除：{ids}\n当前白名单共 {n} 人",
+        "added": "已添加：{ids}\n当前白名单共 {n} 人",
+        "removed": "已移除：{ids}\n当前白名单共 {n} 人",
         "no_match": "（无匹配，名单未变化）",
         "admins": "管理员：{ids}",
         "not_configured": "（未配置）",
@@ -109,15 +109,15 @@ STRINGS = {
         "res_failed": "failed",
         "res_fail_suffix": ", {n} failed",
         "sources": "Sources:",
-        "btn_cancel": "✕ Cancel",
-        "cancelled": "❌ Cancelled",
-        "cancelled_suffix": "❌ (cancelled — partial reply above)",
+        "btn_cancel": "Cancel",
+        "cancelled": "Cancelled",
+        "cancelled_suffix": "Cancelled (partial reply above)",
         "cancel_done": "Cancelled",
         "cancel_denied": "Only the asker or an admin can cancel",
         "cancel_gone": "This reply has already finished",
         "nudge": "Please include a question when mentioning me, or reply to a message and mention me.",
-        "llm_failed": "⚠️ Failed to call the model. Please try again later; contact the admin if it persists.",
-        "llm_quota": "⚠️ Model quota exceeded (429). Please try again later; contact the admin to check quota/billing if it persists.",
+        "llm_failed": "Failed to call the model. Please try again later; contact the admin if it persists.",
+        "llm_quota": "Model quota exceeded (429). Please try again later; contact the admin to check quota/billing if it persists.",
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
@@ -144,16 +144,16 @@ STRINGS = {
         "weekday": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
         "start": (
             "Hi! Add me to a group and use me like this:\n"
-            "1️⃣ Reply to any message and mention me with a question, e.g. \"@{username} is this true?\"\n"
-            "2️⃣ Mention me directly with any question\n"
-            "3️⃣ Reply to my messages to follow up\n"
+            "1. Reply to any message and mention me with a question, e.g. \"@{username} is this true?\"\n"
+            "2. Mention me directly with any question\n"
+            "3. Reply to my messages to follow up\n"
             "In private chat, just send a message.\n\n"
             "Your user ID: {user_id}"
         ),
         "admin_usage": "Usage: /adduser <user ID> (multiple IDs separated by spaces), or reply to someone's message with this command",
         "invalid_id": "\"{arg}\" is not a valid user ID",
-        "added": "✅ Added: {ids}\nWhitelist now has {n} user(s)",
-        "removed": "✅ Removed: {ids}\nWhitelist now has {n} user(s)",
+        "added": "Added: {ids}\nWhitelist now has {n} user(s)",
+        "removed": "Removed: {ids}\nWhitelist now has {n} user(s)",
         "no_match": "(no match, list unchanged)",
         "admins": "Admins: {ids}",
         "not_configured": "(not configured)",

@@ -26,7 +26,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 3. Save the **bot token** (looks like `123456:ABC-xxxx`)
 4. **Disable privacy mode** (important — otherwise the bot may not see mentions in groups):
    - Send `/setprivacy` to BotFather → select your bot → choose **Disable**
-   - ⚠️ If the bot was already in a group before this change, **remove and re-add it** for the change to take effect
+   - Warning: If the bot was already in a group before this change, **remove and re-add it** for the change to take effect
 
 ## 2. Start your LLM server
 
@@ -127,7 +127,7 @@ a cloud API, images leave your server.
 Language models have no internet access by themselves — asked about current events, they
 either say so or hallucinate. With web search enabled, the bot attaches a `web_search` tool:
 the model decides on its own when to search, the bot performs the search and feeds the results
-back, and the model answers with source links (the message shows a 🔍 status while searching).
+back, and the model answers with source links (the message shows a search status while searching).
 
 Set `SEARCH_PROVIDER` to pick a provider (or re-run `python configure.py`, wizard step 7):
 

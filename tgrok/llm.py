@@ -97,6 +97,19 @@ SEARCH_TOOLS = [WEB_SEARCH_TOOL, FETCH_URL_TOOL]
 # 后端明确拒绝 tools 参数后置 False，进程内不再携带（bot 退化为普通对话）
 tools_supported = True
 
+# 后端明确拒绝采样参数后置 False（推理类模型常只接受默认 temperature/top_p）
+sampling_supported = True
+
+
+def _sampling_kwargs() -> dict:
+    """按配置组装 temperature/top_p；走 config 模块属性读取，便于测试与运行时调整。"""
+    kw = {}
+    if config.LLM_TEMPERATURE is not None:
+        kw["temperature"] = config.LLM_TEMPERATURE
+    if config.LLM_TOP_P is not None:
+        kw["top_p"] = config.LLM_TOP_P
+    return kw
+
 async def _drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
     """消费流式响应：正文片段逐个交给 on_text，tool_call 片段按 index 聚合。
 
@@ -189,11 +202,12 @@ def _tool_args(call: dict) -> dict | None:
     return args if isinstance(args, dict) else None
 
 async def create_stream(history: list[dict], use_tools: bool):
-    global tools_supported
+    global tools_supported, sampling_supported
     token_param = "max_tokens"
     include_tools = use_tools and tools_supported
+    sampling = _sampling_kwargs() if sampling_supported else {}
     while True:
-        kwargs = {"model": LLM_MODEL, "messages": history, "stream": True, token_param: MAX_TOKENS}
+        kwargs = {"model": LLM_MODEL, "messages": history, "stream": True, token_param: MAX_TOKENS, **sampling}
         if include_tools:
             kwargs["tools"] = SEARCH_TOOLS
             kwargs["tool_choice"] = "auto"
@@ -204,6 +218,12 @@ async def create_stream(history: list[dict], use_tools: bool):
             # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
             if token_param == "max_tokens" and "max_completion_tokens" in err:
                 token_param = "max_completion_tokens"
+                continue
+            # 推理类模型常只接受默认采样值：去掉 temperature/top_p 重试并粘性禁用
+            if sampling and ("temperature" in err or "top_p" in err):
+                logger.warning("后端拒绝采样参数，已改用后端默认值（重启进程后会再次尝试）：%s", e)
+                sampling_supported = False
+                sampling = {}
                 continue
             # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用。
             # 注意 thought_signature 缺失的 400 报错文案里也含 "tool"，不属于此类
@@ -257,6 +277,9 @@ async def gemini_create_stream(history: list[dict]):
     gen_config = gtypes.GenerateContentConfig(
         system_instruction=system_text or None,
         max_output_tokens=MAX_TOKENS,
+        # None 即未设置，SDK 序列化时会剔除
+        temperature=config.LLM_TEMPERATURE,
+        top_p=config.LLM_TOP_P,
         tools=tools,
     )
     return await gemini_client.aio.models.generate_content_stream(

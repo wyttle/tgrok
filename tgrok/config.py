@@ -17,6 +17,17 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
 # 自定义请求的 User-Agent（部分云端网关会校验 UA），留空使用 SDK 默认值
 LLM_USER_AGENT = os.getenv("LLM_USER_AGENT", "").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
+
+
+def _opt_float(name: str) -> float | None:
+    raw = os.getenv(name, "").strip()
+    return float(raw) if raw else None
+
+
+# 采样参数：留空跟随后端默认值。推理类模型常只接受默认值，
+# 后端明确拒绝时请求层会去掉参数重试并在进程内粘性禁用（见 llm.create_stream）
+LLM_TEMPERATURE = _opt_float("LLM_TEMPERATURE")
+LLM_TOP_P = _opt_float("LLM_TOP_P")
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 # 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型
 ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")

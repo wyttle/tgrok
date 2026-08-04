@@ -92,6 +92,9 @@ TEXT = {
         "jina_key": "Jina API Key（可选，提高速率限制，jina.ai 免费申请）",
         "s7": "【8/9】生成参数与时区",
         "max_tokens": "单次回答最大 token 数",
+        "temperature": "采样温度 temperature（0~2，越高越活泼；留空=后端默认，输入 - 清除已设值，模型不支持时自动忽略）",
+        "top_p": "核采样 top_p（0~1，留空=后端默认，输入 - 清除已设值）",
+        "float_invalid": "请输入数字（如 0.9），或输入 - 清除",
         "max_history": "多轮对话保留消息条数",
         "tz": "时区（IANA 名称，用于告知模型当前真实时间；无法识别时 bot 会回退 UTC）",
         "int_invalid": "请输入正整数",
@@ -187,6 +190,9 @@ TEXT = {
         "jina_key": "Jina API key (optional, higher rate limits, free at jina.ai)",
         "s7": "[8/9] Generation parameters & timezone",
         "max_tokens": "Max tokens per reply",
+        "temperature": "Sampling temperature (0-2, higher = livelier; empty = backend default, enter - to clear, auto-ignored if unsupported)",
+        "top_p": "Nucleus sampling top_p (0-1, empty = backend default, enter - to clear)",
+        "float_invalid": "Enter a number (e.g. 0.9), or - to clear",
         "max_history": "Messages kept per conversation",
         "tz": "Timezone (IANA name, used to tell the model the current real time; falls back to UTC if unrecognized)",
         "int_invalid": "Please enter a positive integer",
@@ -288,6 +294,17 @@ def validate_int(raw: str):
     if raw.isdigit() and int(raw) > 0:
         return True, ""
     return False, T["int_invalid"]
+
+
+def validate_opt_float(raw: str):
+    # "-" 表示清除已设值（默认值非空时按回车是"保留"，需要显式清除手段）
+    if raw == "-":
+        return True, ""
+    try:
+        float(raw)
+        return True, ""
+    except ValueError:
+        return False, T["float_invalid"]
 
 
 def check_telegram_token(token: str) -> str | None:
@@ -625,6 +642,10 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     # ---- 8. Generation params & timezone ----
     print(T["s7"])
     cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old.get("MAX_TOKENS", "1024"), validate=validate_int)
+    raw_t = ask(T["temperature"], default=old.get("LLM_TEMPERATURE", ""), validate=validate_opt_float)
+    cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
+    raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
+    cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
     print()

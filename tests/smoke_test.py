@@ -59,6 +59,7 @@ def stream_of(parts, tail="stop"):
 HIST=[{"role":"system","content":"s"},{"role":"user","content":"u"}]
 config.STREAM_IDLE_TIMEOUT = 0
 config.GEMINI_NATIVE_SEARCH = False
+orig_create_stream = llm.create_stream  # 后面的用例会整体替换 llm.create_stream
 
 def run(coro):
     return asyncio.run(coro)
@@ -210,5 +211,29 @@ async def stale_answer(text=None):
 q = types.SimpleNamespace(answer=stale_answer)
 run(chat._answer_callback(q, "x"))
 ok("过期回调安全忽略")
+
+# 16. 采样参数透传；后端拒绝时去掉重试并粘性禁用
+import httpx
+from openai import BadRequestError
+config.LLM_TEMPERATURE, config.LLM_TOP_P = 0.9, 0.95
+seen=[]
+class _FC:
+    async def create(s, **kw):
+        seen.append(kw)
+        if len(seen)==1:
+            raise BadRequestError(
+                "Unsupported value: 'temperature' does not support 0.9 with this model.",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                body=None)
+        return "S"
+_orig_llm = llm.llm
+llm.llm = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FC()))
+out = run(orig_create_stream(HIST, use_tools=False))
+assert seen[0]["temperature"]==0.9 and seen[0]["top_p"]==0.95
+assert out=="S" and "temperature" not in seen[1] and "top_p" not in seen[1]
+assert llm.sampling_supported is False
+llm.llm = _orig_llm; llm.sampling_supported = True
+config.LLM_TEMPERATURE = config.LLM_TOP_P = None
+ok("采样参数透传/拒绝降级")
 
 print(f"\nall {PASS} checks passed")

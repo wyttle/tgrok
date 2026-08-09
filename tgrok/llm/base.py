@@ -113,6 +113,92 @@ def assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:
     return {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
 
 
+def error_text(e: BaseException) -> str:
+    """提取结构化错误正文并转为小写；没有结构化 body 时回退异常文本。"""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error")
+        if isinstance(detail, dict):
+            parts = [detail.get("message"), detail.get("param"), detail.get("type"), detail.get("code")]
+        else:
+            parts = [body.get("message"), body.get("param"), body.get("type"), body.get("code")]
+        text = " ".join(str(part) for part in parts if part is not None)
+        if text:
+            return text.lower()
+    return str(e).lower()
+
+
+def error_param(e: BaseException) -> str:
+    """提取 OpenAI 结构化错误中的 param；Anthropic 等无此字段时返回空串。"""
+    body = getattr(e, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    detail = body.get("error")
+    source = detail if isinstance(detail, dict) else body
+    param = source.get("param")
+    return str(param).lower() if param is not None else ""
+
+
+_REJECT_HINTS = (
+    "unsupported", "not supported", "does not support", "unrecognized",
+    "unknown parameter", "no such parameter", "invalid parameter",
+    "not allowed", "not available",
+)
+_TOOL_ERROR_CODES = {"unknown_parameter", "unsupported_parameter"}
+
+
+def _error_code(e: BaseException) -> str:
+    body = getattr(e, "body", None)
+    if not isinstance(body, dict):
+        return ""
+    detail = body.get("error")
+    source = detail if isinstance(detail, dict) else body
+    code = source.get("code")
+    return str(code).lower() if code is not None else ""
+
+
+def _param_matches(param: str, name: str) -> bool:
+    return param == name or param.startswith(name + ".")
+
+
+def rejected_param(e: BaseException, extra_keys=()) -> str | None:
+    """把 400 分类为可安全降级的参数拒绝；普通业务错误返回 None。"""
+    text = error_text(e)
+    if "thought_signature" in text:
+        return None
+    param = error_param(e)
+    rejected = any(hint in text for hint in _REJECT_HINTS)
+
+    if "max_completion_tokens" in text:
+        return "token_param"
+    if any(_param_matches(param, name) for name in ("temperature", "top_p")):
+        return "sampling"
+    if not param and rejected and any(name in text for name in ("temperature", "top_p")):
+        return "sampling"
+
+    keys = tuple(str(key).lower() for key in extra_keys)
+    if any(_param_matches(param, key) for key in keys):
+        return "extra"
+    if not param and rejected and any(key in text for key in keys):
+        return "extra"
+
+    if _param_matches(param, "max_tokens"):
+        return "max_tokens_limit"
+    if not param and "max_tokens" in text:
+        return "max_tokens_limit"
+
+    tool_param = (
+        param == "tools" or param.startswith("tools.") or param.startswith("tools[")
+        or param == "tool_choice" or param.startswith("tool_choice.")
+    )
+    tool_rejected = rejected or _error_code(e) in _TOOL_ERROR_CODES
+    if tool_param and tool_rejected:
+        return "tools"
+    if not param and rejected and ("tool" in text or "function calling" in text):
+        return "tools"
+    return None
+
+
 def is_quota_error(e: BaseException) -> bool:
     """配额/限流类错误（429）：重试大概率无效且浪费配额，需单独处理。"""
     s = str(e)

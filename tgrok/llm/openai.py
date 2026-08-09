@@ -7,7 +7,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
 from ..config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_USER_AGENT, MAX_TOKENS
-from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, sampling_kwargs
+from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -51,27 +51,26 @@ class OpenAIAdapter(BaseAdapter):
             try:
                 return await self.client.chat.completions.create(**kwargs)
             except BadRequestError as e:
-                err = str(e).lower()
+                kind = rejected_param(e, extra_keys=extra_body or ())
                 # OpenAI 官方较新的模型要求用 max_completion_tokens 代替 max_tokens
-                if self.token_param == "max_tokens" and "max_completion_tokens" in err:
+                if kind == "token_param" and self.token_param == "max_tokens":
                     self.token_param = "max_completion_tokens"
                     continue
                 # 推理类模型常只接受默认采样值：去掉 temperature/top_p 重试并粘性禁用
-                if sampling and ("temperature" in err or "top_p" in err):
+                if kind == "sampling" and sampling:
                     logger.warning("后端拒绝采样参数，已改用后端默认值（重启进程后会再次尝试）：%s", e)
                     self.sampling_supported = False
                     sampling = {}
                     continue
                 # 厂商私有参数不被当前后端接受：去掉重试并粘性禁用
-                if extra_body and any(k.lower() in err for k in extra_body):
+                if kind == "extra" and extra_body:
                     logger.warning("后端拒绝额外参数 %s，本进程内不再携带（重启后会再次尝试）：%s",
                                    list(extra_body), e)
                     self.extra_body_supported = False
                     extra_body = None
                     continue
-                # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用。
-                # 注意 thought_signature 缺失的 400 报错文案里也含 "tool"，不属于此类
-                if include_tools and "tool" in err and "thought_signature" not in err:
+                # 后端明确不支持 function calling 时才禁用搜索；schema 与续传错误必须原样抛出
+                if kind == "tools" and include_tools:
                     logger.warning("后端拒绝 tools 参数，联网搜索已禁用（重启进程后会再次尝试）：%s", e)
                     self.tools_supported = False
                     include_tools = False

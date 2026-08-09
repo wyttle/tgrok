@@ -9,7 +9,7 @@ import anthropic
 
 from .. import config
 from ..config import CLAUDE_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_USER_AGENT, MAX_TOKENS
-from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, sampling_kwargs, tool_args
+from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, error_text, rejected_param, sampling_kwargs, tool_args
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
@@ -55,32 +55,32 @@ class ClaudeAdapter(BaseAdapter):
             try:
                 return await self.client.messages.create(**kwargs)
             except anthropic.BadRequestError as e:
-                err = str(e).lower()
+                kind = rejected_param(e, extra_keys=extra_body or ())
                 # Opus 4.7+ 已移除采样参数（400），去掉重试并粘性禁用
-                if sampling and ("temperature" in err or "top_p" in err):
+                if kind == "sampling" and sampling:
                     logger.warning("后端拒绝采样参数，已改用默认值（重启进程后会再次尝试）：%s", e)
                     self.sampling_supported = False
                     sampling = {}
                     continue
                 # thinking 等额外参数被拒（如 4.7+ 已移除 budget_tokens）：去掉重试
-                if extra_body and any(k.lower() in err for k in extra_body):
+                if kind == "extra" and extra_body:
                     logger.warning("后端拒绝额外参数 %s，本进程内不再携带（重启后会再次尝试）：%s",
                                    list(extra_body), e)
                     self.extra_body_supported = False
                     extra_body = None
                     continue
-                # max_tokens 超过模型输出上限：从报错文案里解析上限并粘性记住
-                if "max_tokens" in err:
-                    nums = [int(n) for n in re.findall(r"\d+", err)]
+                # max_tokens 超过模型输出上限：从报错文案里解析更小上限并粘性记住
+                if kind == "max_tokens_limit":
+                    nums = [int(n) for n in re.findall(r"\d+", error_text(e))]
                     smaller = [n for n in nums if 0 < n < max_tokens]
-                    new = max(smaller) if smaller else 8192
-                    if new >= max_tokens:
+                    if not smaller:
                         raise
+                    new = max(smaller)
                     logger.warning("后端拒绝 max_tokens=%d，降为 %d 重试：%s", max_tokens, new, e)
                     self.max_tokens_limit = new
                     max_tokens = new
                     continue
-                if include_tools and "tool" in err:
+                if kind == "tools" and include_tools:
                     logger.warning("后端拒绝 tools 参数，联网搜索已禁用（重启进程后会再次尝试）：%s", e)
                     self.tools_supported = False
                     include_tools = False

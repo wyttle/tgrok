@@ -249,7 +249,34 @@ assert a16.sampling_supported is False
 config.LLM_TEMPERATURE = config.LLM_TOP_P = None
 ok("采样参数透传/拒绝降级")
 
-# 17. LLM_EXTRA_BODY 透传（thinking 等厂商私有参数）；后端拒绝时去掉重试并粘性禁用
+# 17. 结构化 param 优先：message 无拒绝措辞也必须触发采样降级
+config.LLM_TEMPERATURE = 0.7
+seen=[]
+class _StructuredSampling:
+    async def create(s, **kw):
+        seen.append(kw)
+        if len(seen) == 1:
+            raise BadRequestError(
+                "bad request",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                body={"error": {"param": "temperature", "message": "bad request"}})
+        return "S"
+a_structured = OpenAIAdapter(client=types.SimpleNamespace(
+    chat=types.SimpleNamespace(completions=_StructuredSampling())))
+out = run(a_structured._create_stream(HIST, use_tools=False))
+assert out == "S" and seen[0]["temperature"] == 0.7 and "temperature" not in seen[1]
+assert a_structured.sampling_supported is False
+config.LLM_TEMPERATURE = None
+ok("结构化 param 采样降级")
+
+# 18. tool_use/tool_result 配对错误是业务 400，不得分类为 tools 拒绝
+business_400 = BadRequestError(
+    "unexpected `tool_use_id` found in `tool_result` blocks",
+    response=httpx.Response(400, request=httpx.Request("POST", "http://x")), body=None)
+assert llm.base.rejected_param(business_400) is None
+ok("tool_use_id 业务错误不降级")
+
+# 19. LLM_EXTRA_BODY 透传（thinking 等厂商私有参数）；后端拒绝时去掉重试并粘性禁用
 config.LLM_EXTRA_BODY = {"thinking": {"type": "enabled", "budget_tokens": 1000}}
 seen=[]
 class _FC2:

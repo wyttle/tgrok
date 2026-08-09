@@ -88,6 +88,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or LLM_API_KEY
 # Gemini 原生 API 的接口地址：留空连 Google 官方；中转站支持转发 Gemini 原生格式时
 # 填中转站地址（原生模式与 grounding 搜索都会走这里）
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip().rstrip("/")
+# Claude 原生协议模式：改用 anthropic SDK 直连 Anthropic Messages API（/v1/messages），
+# thinking、思考签名、工具调用走原生语义；LLM_MODEL 填 claude-* 模型
+CLAUDE_NATIVE = os.getenv("CLAUDE_NATIVE", "false").strip().lower() in ("1", "true", "yes", "on")
+# Anthropic 原生接口地址：留空连官方 https://api.anthropic.com；中转站支持转发原生格式时填根地址
+CLAUDE_BASE_URL = os.getenv("CLAUDE_BASE_URL", "").strip().rstrip("/")
+if CLAUDE_NATIVE and GEMINI_NATIVE_SEARCH:
+    logging.getLogger(__name__).warning("CLAUDE_NATIVE 与 GEMINI_NATIVE_SEARCH 互斥，已忽略后者")
+    GEMINI_NATIVE_SEARCH = False
 # grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
 GEMINI_SEARCH_COOLDOWN = 600.0
 _gemini_search_blocked_until = [0.0]

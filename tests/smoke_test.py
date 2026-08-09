@@ -257,4 +257,87 @@ llm.llm = _orig_llm; llm.extra_body_supported = True
 config.LLM_EXTRA_BODY = None
 ok("extra_body 透传/拒绝降级")
 
+# 18. Claude 原生：OpenAI 历史 → Anthropic messages（system/图片/思考回传/连续 tool_result 合并）
+hist18 = [
+    {"role": "system", "content": "SYS"},
+    {"role": "user", "content": [
+        {"type": "text", "text": "看图"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]},
+    {"role": "assistant", "content": "ok"},
+    {"role": "user", "content": "再查"},
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "t1", "function": {"name": "web_search", "arguments": '{"query":"a"}'},
+         "extra_content": {"anthropic_thinking": [
+             {"type": "thinking", "thinking": "推理", "signature": "SIG"}]}},
+        {"id": "t2", "function": {"name": "open_url", "arguments": '{"url":"http://x"}'}}]},
+    {"role": "tool", "tool_call_id": "t1", "name": "web_search", "content": "R1"},
+    {"role": "tool", "tool_call_id": "t2", "name": "open_url", "content": "R2"},
+]
+sys_text, msgs = llm._to_anthropic_messages(hist18)
+assert sys_text == "SYS" and len(msgs) == 5
+img = msgs[0]["content"][1]
+assert img["type"] == "image" and img["source"] == {"type": "base64", "media_type": "image/png", "data": "QUJD"}
+am18 = msgs[3]["content"]
+assert am18[0] == {"type": "thinking", "thinking": "推理", "signature": "SIG"}
+assert am18[1]["type"] == "tool_use" and am18[1]["input"] == {"query": "a"} and am18[1]["id"] == "t1"
+assert msgs[4]["role"] == "user" and [b["tool_use_id"] for b in msgs[4]["content"]] == ["t1", "t2"]
+ok("Claude 历史转换")
+
+# 19. Claude 原生流消费：thinking/text/tool_use 事件聚合，思考块挂到首个调用回传
+def ev(**kw): return types.SimpleNamespace(**kw)
+events = [
+    ev(type="message_start"),
+    ev(type="content_block_start", index=0, content_block=ev(type="thinking", thinking="")),
+    ev(type="content_block_delta", index=0, delta=ev(type="thinking_delta", thinking="推理")),
+    ev(type="content_block_delta", index=0, delta=ev(type="signature_delta", signature="SG")),
+    ev(type="content_block_stop", index=0),
+    ev(type="content_block_start", index=1, content_block=ev(type="text", text="")),
+    ev(type="content_block_delta", index=1, delta=ev(type="text_delta", text="正文")),
+    ev(type="content_block_start", index=2, content_block=ev(type="tool_use", id="tu1", name="web_search")),
+    ev(type="content_block_delta", index=2, delta=ev(type="input_json_delta", partial_json='{"query":')),
+    ev(type="content_block_delta", index=2, delta=ev(type="input_json_delta", partial_json='"q"}')),
+    ev(type="message_stop"),
+]
+got = []
+async def sink(d): got.append(d)
+calls, content = run(llm._drain_claude_stream(stream_of(events), sink))
+assert content == "正文" and got == ["正文"]
+am19 = llm._assistant_tool_call_msg(calls, content)
+assert am19["tool_calls"][0]["id"] == "tu1"
+assert json.loads(am19["tool_calls"][0]["function"]["arguments"]) == {"query": "q"}
+assert am19["tool_calls"][0]["extra_content"]["anthropic_thinking"] == [
+    {"type": "thinking", "thinking": "推理", "signature": "SG"}]
+ok("Claude 流消费/思考块回传")
+
+# 20. Claude 降级链：max_tokens 超限解析上限回退 + thinking 被拒粘性禁用
+import anthropic as _an
+config.LLM_EXTRA_BODY = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
+_orig_max = llm.MAX_TOKENS
+llm.MAX_TOKENS = 200000
+seen = []
+class _CC:
+    async def create(s, **kw):
+        seen.append(kw)
+        if len(seen) == 1:
+            raise _an.BadRequestError(
+                "max_tokens: 200000 > 128000, which is the maximum allowed",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")), body=None)
+        if len(seen) == 2:
+            raise _an.BadRequestError(
+                "thinking.budget_tokens: not supported on this model",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")), body=None)
+        return "CS"
+llm.claude_client = types.SimpleNamespace(messages=_CC())
+out = run(llm._claude_create_stream(HIST, use_tools=False))
+assert out == "CS"
+assert seen[0]["system"] == "s" and seen[0]["max_tokens"] == 200000
+assert seen[0]["extra_body"]["thinking"]["budget_tokens"] == 1024
+assert seen[1]["max_tokens"] == 128000
+assert "extra_body" not in seen[2] and seen[2]["max_tokens"] == 128000
+assert llm.claude_max_tokens == 128000 and llm.extra_body_supported is False
+llm.MAX_TOKENS = _orig_max
+llm.claude_max_tokens = None; llm.extra_body_supported = True
+config.LLM_EXTRA_BODY = None
+ok("Claude 降级链")
+
 print(f"\nall {PASS} checks passed")

@@ -55,9 +55,11 @@ TEXT = {
         "s3": "【3/9】白名单初始用户 ID（之后随时可用 /adduser 添加，这里可跳过）",
         "allowed_ids": "白名单 ID（多个用逗号分隔）",
         "s4a": "【4/9】模型后端",
-        "s4b": "      1 = OpenAI 兼容接口（中转站 / LM Studio / vLLM / OpenAI 官方等，需填接口地址）\n      2 = Gemini 官方（Google AI Studio，key 在 https://aistudio.google.com/apikey 免费申请）",
-        "backend_pick": "后端类型：1=OpenAI 兼容  2=Gemini 官方",
-        "backend_invalid": "请输入 1 或 2",
+        "s4b": "      1 = OpenAI 兼容接口（中转站 / LM Studio / vLLM / OpenAI 官方等，需填接口地址）\n      2 = Gemini 官方（Google AI Studio，key 在 https://aistudio.google.com/apikey 免费申请）\n      3 = Claude 原生（Anthropic 协议 /v1/messages，原生 thinking；中转站需支持转发）",
+        "backend_pick": "后端类型：1=OpenAI 兼容  2=Gemini 官方  3=Claude 原生",
+        "backend_invalid": "请输入 1、2 或 3",
+        "claude_key": "Claude API Key（官方为 Anthropic key；走中转站则为中转站 key）",
+        "claude_route_pick": "Claude 接入：1=Anthropic 官方直连  2=中转站（转发原生格式）",
         "gemini_key": "Gemini API Key（官方为 AI Studio key；走中转站则为中转站 key）",
         "gemini_route_pick": "Gemini 接入：1=Google 官方直连  2=中转站（转发原生格式）",
         "gemini_route_invalid": "请输入 1 或 2",
@@ -156,9 +158,11 @@ TEXT = {
         "s3": "[3/9] Initial whitelist user IDs (you can always /adduser later; OK to skip)",
         "allowed_ids": "Whitelist IDs (comma-separated)",
         "s4a": "[4/9] Model backend",
-        "s4b": "      1 = OpenAI-compatible endpoint (relay / LM Studio / vLLM / official OpenAI; needs an endpoint URL)\n      2 = Official Gemini (Google AI Studio; get a free key at https://aistudio.google.com/apikey)",
-        "backend_pick": "Backend: 1=OpenAI-compatible  2=Official Gemini",
-        "backend_invalid": "Enter 1 or 2",
+        "s4b": "      1 = OpenAI-compatible endpoint (relay / LM Studio / vLLM / official OpenAI; needs an endpoint URL)\n      2 = Official Gemini (Google AI Studio; get a free key at https://aistudio.google.com/apikey)\n      3 = Native Claude (Anthropic protocol /v1/messages, real thinking; relay must forward it)",
+        "backend_pick": "Backend: 1=OpenAI-compatible  2=Official Gemini  3=Native Claude",
+        "backend_invalid": "Enter 1, 2 or 3",
+        "claude_key": "Claude API key (Anthropic key for official; relay key when routed through a relay)",
+        "claude_route_pick": "Claude routing: 1=official Anthropic  2=relay (forwards native format)",
         "gemini_key": "Gemini API key (AI Studio key for official; relay key when routed through a relay)",
         "gemini_route_pick": "Gemini routing: 1=official Google  2=relay (forwards native format)",
         "gemini_route_invalid": "Enter 1 or 2",
@@ -501,15 +505,36 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai"
 
     def validate_backend(raw: str):
-        return (True, "") if raw.strip() in ("1", "2") else (False, T["backend_invalid"])
+        return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["backend_invalid"])
 
-    backend_default = "2" if "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", "") else "1"
+    if old.get("CLAUDE_NATIVE", "").strip().lower() in ("1", "true", "yes", "on"):
+        backend_default = "3"
+    elif "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", ""):
+        backend_default = "2"
+    else:
+        backend_default = "1"
     backend = ask(T["backend_pick"], default=backend_default, validate=validate_backend).strip()
 
     def validate_route(raw: str):
         return (True, "") if raw.strip() in ("1", "2") else (False, T["gemini_route_invalid"])
 
-    if backend == "2":
+    # 非 Claude 后端显式置空，防止切换配置后残留的开关让请求走错协议
+    cfg["CLAUDE_NATIVE"] = ""
+    cfg["CLAUDE_BASE_URL"] = ""
+    if backend == "3":
+        # Claude 原生：官方直连或走支持 /v1/messages 转发的中转站；UA 无意义，置空
+        route_default = "2" if old.get("CLAUDE_BASE_URL", "").strip() else "1"
+        route = ask(T["claude_route_pick"], default=route_default, validate=validate_route).strip()
+        if route == "2":
+            cfg["CLAUDE_BASE_URL"] = ask(T["relay_addr"], default=old.get("CLAUDE_BASE_URL", ""),
+                                         required=True).strip().rstrip("/")
+        cfg["CLAUDE_NATIVE"] = "true"
+        cfg["LLM_API_KEY"] = ask(T["claude_key"], default=old.get("LLM_API_KEY", ""),
+                                 required=True, secret=True)
+        cfg["LLM_USER_AGENT"] = ""
+        cfg["LLM_BASE_URL"] = old.get("LLM_BASE_URL", "http://localhost:1234/v1")  # 该模式不使用，仅保留
+        base_url = ""  # 跳过 OpenAI /models 探测（Anthropic 协议不兼容该接口）
+    elif backend == "2":
         # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
         route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
         route = ask(T["gemini_route_pick"], default=route_default, validate=validate_route).strip()
@@ -535,12 +560,14 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
 
     # ---- 5. Model ----
     print(T["s5"])
-    # 换到 Gemini 后端时，旧的非 gemini 模型名不再是合理默认值
+    # 换后端时，旧的异族模型名不再是合理默认值
     model_default = old.get("LLM_MODEL", "")
     if backend == "2" and not model_default.lower().startswith("gemini"):
         model_default = "gemini-2.5-flash"
+    if backend == "3" and not model_default.lower().startswith("claude"):
+        model_default = "claude-opus-4-8"
     model = ""
-    if can_check:
+    if can_check and base_url:
         try:
             models = list_models(base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"])
         except Exception as e:

@@ -148,6 +148,9 @@ except (ZoneInfoNotFoundError, ValueError):
 
 TG_MESSAGE_LIMIT = 4096
 CONVERSATION_CACHE_SIZE = 500
+# 所有缓存历史的 content 近似字符量上限，不是进程内存硬上限；Python 对象和字符编码另有开销。
+# 追问历史会共享消息对象，重复计数会高估实际占用，但会让缓存更早驱逐，方向安全。
+CONVERSATION_CONTENT_BUDGET = 64_000_000
 STREAM_EDIT_INTERVAL = 1.5  # 流式输出时编辑消息的最小间隔（秒），避免触发 Telegram 限流
 STREAM_SEGMENT_LIMIT = 3400  # 单条消息承载的流式文本上限，超过则另起一条。
 # Telegram 上限 4096；MarkdownV2 转义会使文本膨胀 10% 左右，需留足余量

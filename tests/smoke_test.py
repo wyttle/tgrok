@@ -412,6 +412,39 @@ assert citations == [
 ]
 ok("Gemini 流消费/引用去重")
 
+# 27. 对话缓存按近似内容量驱逐，并在覆盖时刷新顺序与会计
+_saved_conversations = tg.conversations.copy()
+_saved_conv_sizes = tg._conv_sizes.copy()
+_saved_conv_total = tg._conv_total
+_saved_conv_budget = tg.CONVERSATION_CONTENT_BUDGET
+try:
+    tg.conversations.clear()
+    tg._conv_sizes.clear()
+    tg._conv_total = 0
+    tg.CONVERSATION_CONTENT_BUDGET = 10
+    tg.remember(1, 1, [{"role": "user", "content": "aaaa"}])
+    tg.remember(1, 2, [{"role": "user", "content": "bbbb"}])
+    tg.remember(1, 1, [{"role": "user", "content": "ccccc"}])
+    assert list(tg.conversations) == [(1, 2), (1, 1)] and tg._conv_total == 9
+    assert tg._conv_sizes[(1, 1)] == 5
+    tg.remember(1, 3, [{"role": "user", "content": "ddd"}])
+    assert list(tg.conversations) == [(1, 1), (1, 3)]
+    assert tg._conv_total == sum(tg._history_chars(h) for h in tg.conversations.values())
+    assert tg._conv_total == sum(tg._conv_sizes.values()) == 8
+    tg.conversations.clear()
+    tg._conv_sizes.clear()
+    tg._conv_total = 0
+    tg.remember(2, 1, [{"role": "user", "content": "x" * 20}])
+    assert list(tg.conversations) == [(2, 1)] and tg._conv_total == 20
+finally:
+    tg.conversations.clear()
+    tg.conversations.update(_saved_conversations)
+    tg._conv_sizes.clear()
+    tg._conv_sizes.update(_saved_conv_sizes)
+    tg._conv_total = _saved_conv_total
+    tg.CONVERSATION_CONTENT_BUDGET = _saved_conv_budget
+ok("对话缓存内容预算/覆盖会计")
+
 llm.adapter = orig_adapter
 
 print(f"\nall {PASS} checks passed")

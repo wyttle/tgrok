@@ -19,7 +19,8 @@ from telegram.ext import (
 from . import config
 from .config import (
     ADMIN_USER_IDS, ALBUM_CACHE_SIZE, BOT_TOKEN, CONVERSATION_CACHE_SIZE,
-    ENABLE_VISION, LLM_BASE_URL, LLM_MODEL, MAX_HISTORY, MAX_IMAGE_BYTES,
+    CONVERSATION_CONTENT_BUDGET, ENABLE_VISION, LLM_BASE_URL, LLM_MODEL,
+    MAX_HISTORY, MAX_IMAGE_BYTES,
 )
 from .chat import on_cancel_button, stream_reply
 from .i18n import t
@@ -31,13 +32,39 @@ logger = logging.getLogger(__name__)
 # 对话历史：key = (chat_id, bot 回复消息的 message_id)，value = OpenAI 格式的 messages 列表。
 # 用户回复 bot 的某条消息时，就能接上那条消息对应的上下文继续聊。
 conversations: "OrderedDict[tuple[int, int], list[dict]]" = OrderedDict()
+_conv_sizes: dict[tuple[int, int], int] = {}
+_conv_total = 0
 
+
+def _history_chars(history: list[dict]) -> int:
+    """近似内容量：文本取字符长度，多模态取各块文本/data URL 长度之和。"""
+    total = 0
+    for message in history:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        else:
+            for part in content:
+                total += len(part.get("text", ""))
+                total += len((part.get("image_url") or {}).get("url", ""))
+    return total
 
 
 def remember(chat_id: int, message_id: int, history: list[dict]) -> None:
-    conversations[(chat_id, message_id)] = history
-    while len(conversations) > CONVERSATION_CACHE_SIZE:
-        conversations.popitem(last=False)
+    global _conv_total
+    key = (chat_id, message_id)
+    _conv_total -= _conv_sizes.get(key, 0)
+    size = _history_chars(history)
+    conversations[key] = history
+    _conv_sizes[key] = size
+    _conv_total += size
+    conversations.move_to_end(key)
+    while len(conversations) > 1 and (
+        len(conversations) > CONVERSATION_CACHE_SIZE
+        or _conv_total > CONVERSATION_CONTENT_BUDGET
+    ):
+        oldest, _ = conversations.popitem(last=False)
+        _conv_total -= _conv_sizes.pop(oldest)
 
 
 def trim_history(history: list[dict]) -> list[dict]:

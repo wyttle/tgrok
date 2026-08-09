@@ -16,6 +16,7 @@ _llm_base_raw = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
 LLM_BASE_URL = _llm_base_raw or "http://localhost:1234/v1"
 LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
+SYSTEM_PROMPT_OVERRIDE = os.getenv("SYSTEM_PROMPT")
 # 自定义请求的 User-Agent（部分云端网关会校验 UA），留空使用 SDK 默认值
 LLM_USER_AGENT = os.getenv("LLM_USER_AGENT", "").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))

@@ -1,13 +1,13 @@
 """系统提示词组装与实时时间注入。"""
 
-import os
 from datetime import datetime
 
 from . import config
 from .config import BOT_TZ, BOT_TZ_NAME, SEARCH_ENABLED, GEMINI_SEARCH_MODEL, BOT_LANG
 from .i18n import STRINGS, t
 
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", t("system_prompt"))
+SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
+                 if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
 if SEARCH_ENABLED:
     # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
     SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")

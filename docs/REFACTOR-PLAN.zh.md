@@ -45,7 +45,8 @@
   的机制原样保留，丢了会 400。
 - **注释风格**：中文、解释「为什么」而不是「做了什么」；不写「本次修改」类的评审注释。
 - **禁止脚本化批量改写代码**：逐文件手改。
-- **每个阶段结束运行 `python tests/smoke_test.py`，22 项全过才能提交。**
+- **每个阶段结束运行 `python tests/smoke_test.py`，通过数达到该阶段验收标准
+  规定的数量（阶段 1 为 24 项，逐阶段递增，见第 4 节）才能提交。**
   测试本身允许按第 6 节的对照表适配，但断言语义不得删弱。
 - 不部署、不改服务器配置；只保证本地测试通过并逐阶段 git commit。
 - `configure.py` 本次不动（除非阶段 4 的 `SYSTEM_PROMPT` 迁移需要，实际不需要——它只写 .env）。
@@ -427,8 +428,9 @@ or _conv_total > CONVERSATION_CONTENT_BUDGET)`，弹出最旧 key 时同步扣 `
 base.py 加 `error_text` / `error_param` / `rejected_param`（3.6），三个适配器的
 降级链改用分类器。新增两个回归用例：
 
-- 正向：构造 `body={"error": {"param": "temperature", "message": "unsupported"}}` 的
-  BadRequestError，断言走 param 路径触发采样降级；
+- 正向：构造 `body={"error": {"param": "temperature", "message": "bad request"}}` 的
+  BadRequestError——message 刻意**不含**任何拒绝措辞关键词，判定成功只可能来自
+  结构化 param 路径，以此证明该路径生效——断言触发采样降级；
 - 反向：构造 message 为 "unexpected `tool_use_id` found in `tool_result` blocks"、
   `body=None` 的 BadRequestError，断言 `rejected_param` 返回 None（业务 400 不得
   触发 tools 粘性禁用）。

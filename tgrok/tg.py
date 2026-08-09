@@ -349,12 +349,15 @@ def main() -> None:
             handle_message,
         )
     )
-    logger.info("Bot 启动中… 模型接口: %s, 模型: %s", LLM_BASE_URL, LLM_MODEL)
     if config.CLAUDE_NATIVE:
-        logger.info(
-            "Claude 原生协议模式：Anthropic Messages API（thinking/工具原生语义），接口: %s",
-            config.CLAUDE_BASE_URL or "https://api.anthropic.com",
-        )
+        api_url = config.CLAUDE_BASE_URL or "https://api.anthropic.com"
+    elif config.GEMINI_NATIVE_SEARCH:
+        api_url = config.GEMINI_BASE_URL or "https://generativelanguage.googleapis.com"
+    else:
+        api_url = LLM_BASE_URL
+    logger.info(
+        "Bot 启动中… 协议: %s, 接口: %s, 模型: %s", config.LLM_PROTOCOL, api_url, LLM_MODEL
+    )
     if config.GEMINI_NATIVE_SEARCH:
         logger.info("Gemini 原生搜索模式：google_search + url_context 由 Google 服务端执行")
     elif config.GEMINI_SEARCH_MODEL:

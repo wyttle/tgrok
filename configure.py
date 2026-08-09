@@ -507,9 +507,19 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     def validate_backend(raw: str):
         return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["backend_invalid"])
 
-    if old.get("CLAUDE_NATIVE", "").strip().lower() in ("1", "true", "yes", "on"):
+    def _truthy(v: str) -> bool:
+        return v.strip().lower() in ("1", "true", "yes", "on")
+
+    # 现有配置的协议（兼容布尔开关时代的旧键）
+    old_protocol = old.get("LLM_PROTOCOL", "").strip().lower()
+    if not old_protocol:
+        if _truthy(old.get("CLAUDE_NATIVE", "")):
+            old_protocol = "claude"
+        elif _truthy(old.get("GEMINI_NATIVE_SEARCH", "")):
+            old_protocol = "gemini"
+    if old_protocol == "claude":
         backend_default = "3"
-    elif "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", ""):
+    elif old_protocol == "gemini" or "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", ""):
         backend_default = "2"
     else:
         backend_default = "1"
@@ -518,21 +528,26 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     def validate_route(raw: str):
         return (True, "") if raw.strip() in ("1", "2") else (False, T["gemini_route_invalid"])
 
-    # 非 Claude 后端显式置空，防止切换配置后残留的开关让请求走错协议
+    # 协议由 LLM_PROTOCOL 单键指定（openai 为默认、不写入）；布尔开关时代的旧键一并清掉
+    cfg["LLM_PROTOCOL"] = ""
     cfg["CLAUDE_NATIVE"] = ""
     cfg["CLAUDE_BASE_URL"] = ""
+    cfg["GEMINI_NATIVE_SEARCH"] = ""
     if backend == "3":
-        # Claude 原生：官方直连或走支持 /v1/messages 转发的中转站；UA 无意义，置空
-        route_default = "2" if old.get("CLAUDE_BASE_URL", "").strip() else "1"
+        # Claude 原生：官方直连或走支持 /v1/messages 转发的中转站；地址统一用
+        # LLM_BASE_URL（留空 = Anthropic 官方）；UA 无意义，置空
+        old_base = old.get("LLM_BASE_URL", "")
+        route_default = "2" if old_protocol == "claude" and old_base else "1"
         route = ask(T["claude_route_pick"], default=route_default, validate=validate_route).strip()
         if route == "2":
-            cfg["CLAUDE_BASE_URL"] = ask(T["relay_addr"], default=old.get("CLAUDE_BASE_URL", ""),
-                                         required=True).strip().rstrip("/")
-        cfg["CLAUDE_NATIVE"] = "true"
+            cfg["LLM_BASE_URL"] = ask(T["relay_addr"], default=old_base,
+                                      required=True).strip().rstrip("/")
+        else:
+            cfg["LLM_BASE_URL"] = ""
+        cfg["LLM_PROTOCOL"] = "claude"
         cfg["LLM_API_KEY"] = ask(T["claude_key"], default=old.get("LLM_API_KEY", ""),
                                  required=True, secret=True)
         cfg["LLM_USER_AGENT"] = ""
-        cfg["LLM_BASE_URL"] = old.get("LLM_BASE_URL", "http://localhost:1234/v1")  # 该模式不使用，仅保留
         base_url = ""  # 跳过 OpenAI /models 探测（Anthropic 协议不兼容该接口）
     elif backend == "2":
         # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
@@ -597,7 +612,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     if is_gemini:
         print(T["s_gmode_a"])
         print(T["s_gmode_b"])
-        if old.get("GEMINI_NATIVE_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
+        if old_protocol == "gemini":
             gmode_default = "1"
         elif old.get("GEMINI_SEARCH_MODEL", "").strip():
             gmode_default = "2"
@@ -608,7 +623,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
             return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["gmode_invalid"])
 
         gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
-        cfg["GEMINI_NATIVE_SEARCH"] = "true" if gmode == "1" else "false"
+        cfg["LLM_PROTOCOL"] = "gemini" if gmode == "1" else ""
         cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
         if gmode == "2":
             cfg["GEMINI_SEARCH_MODEL"] = ask(
@@ -618,8 +633,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
             cfg["GEMINI_SEARCH_MODEL"] = ""
         print()
     else:
-        # 非 Gemini 端点：显式置空，防止切换配置后残留的开关引发启动错误
-        cfg["GEMINI_NATIVE_SEARCH"] = ""
+        # 非 Gemini 端点：显式置空，防止切换配置后残留的搜索模型引发启动错误
         cfg["GEMINI_SEARCH_MODEL"] = ""
 
     # ---- 7. Web search ----

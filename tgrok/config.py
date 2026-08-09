@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1")
+_llm_base_raw = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
+LLM_BASE_URL = _llm_base_raw or "http://localhost:1234/v1"
 LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
 # 自定义请求的 User-Agent（部分云端网关会校验 UA），留空使用 SDK 默认值
@@ -75,10 +76,29 @@ STREAM_IDLE_TIMEOUT = float(os.getenv("STREAM_IDLE_TIMEOUT", "45"))
 # open_url 直接抓取失败（反爬 403 / JS 页面 / 正文过少）时，自动改走 Jina Reader 再试
 JINA_FALLBACK = os.getenv("JINA_FALLBACK", "true").strip().lower() in ("1", "true", "yes", "on")
 JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率限制更宽松
-# Gemini 原生搜索模式：改用 google-genai SDK 直连 Gemini API，启用服务端的
-# google_search + url_context 内置工具（Google 在服务端完成搜索与读页，精度更高）。
-# 开启后 bot 自带的 web_search/open_url 工具循环不再使用；LLM_API_KEY 填 AI Studio key
-GEMINI_NATIVE_SEARCH = os.getenv("GEMINI_NATIVE_SEARCH", "false").strip().lower() in ("1", "true", "yes", "on")
+# 主模型协议（单键指定）：
+#   openai = OpenAI 兼容 /chat/completions（默认，中转站/LM Studio/vLLM/官方 OpenAI）
+#   gemini = Gemini 原生（google-genai SDK，google_search + url_context 由服务端执行，
+#            bot 自带工具循环不再使用；LLM_API_KEY 填 AI Studio key）
+#   claude = Anthropic Messages API 原生（anthropic SDK，原生 thinking 与工具语义，
+#            bot 自带工具循环照常可用）
+# 接口地址统一用 LLM_BASE_URL；留空 = 各协议的官方端点
+LLM_PROTOCOL = os.getenv("LLM_PROTOCOL", "").strip().lower()
+if not LLM_PROTOCOL:
+    # 兼容布尔开关时代的旧键
+    if os.getenv("CLAUDE_NATIVE", "").strip().lower() in ("1", "true", "yes", "on"):
+        LLM_PROTOCOL = "claude"
+    elif os.getenv("GEMINI_NATIVE_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
+        LLM_PROTOCOL = "gemini"
+    else:
+        LLM_PROTOCOL = "openai"
+if LLM_PROTOCOL not in ("openai", "gemini", "claude"):
+    logging.getLogger(__name__).warning("未知 LLM_PROTOCOL=%s，回退 openai", LLM_PROTOCOL)
+    LLM_PROTOCOL = "openai"
+GEMINI_NATIVE_SEARCH = LLM_PROTOCOL == "gemini"
+CLAUDE_NATIVE = LLM_PROTOCOL == "claude"
+# anthropic SDK 需要根地址（自己拼 /v1/messages）：剥掉 OpenAI 习惯的 /v1 尾缀
+CLAUDE_BASE_URL = _llm_base_raw[:-3] if _llm_base_raw.endswith("/v1") else _llm_base_raw
 # 混合模式：web_search 工具由该 grounding 模型执行（如 gemini-2.5-flash，免费档可用），
 # 回复仍用 LLM_MODEL。与 GEMINI_NATIVE_SEARCH 互斥，留空关闭
 GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "").strip()
@@ -88,14 +108,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or LLM_API_KEY
 # Gemini 原生 API 的接口地址：留空连 Google 官方；中转站支持转发 Gemini 原生格式时
 # 填中转站地址（原生模式与 grounding 搜索都会走这里）
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip().rstrip("/")
-# Claude 原生协议模式：改用 anthropic SDK 直连 Anthropic Messages API（/v1/messages），
-# thinking、思考签名、工具调用走原生语义；LLM_MODEL 填 claude-* 模型
-CLAUDE_NATIVE = os.getenv("CLAUDE_NATIVE", "false").strip().lower() in ("1", "true", "yes", "on")
-# Anthropic 原生接口地址：留空连官方 https://api.anthropic.com；中转站支持转发原生格式时填根地址
-CLAUDE_BASE_URL = os.getenv("CLAUDE_BASE_URL", "").strip().rstrip("/")
-if CLAUDE_NATIVE and GEMINI_NATIVE_SEARCH:
-    logging.getLogger(__name__).warning("CLAUDE_NATIVE 与 GEMINI_NATIVE_SEARCH 互斥，已忽略后者")
-    GEMINI_NATIVE_SEARCH = False
 # grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
 GEMINI_SEARCH_COOLDOWN = 600.0
 _gemini_search_blocked_until = [0.0]

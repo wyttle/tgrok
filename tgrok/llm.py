@@ -100,6 +100,9 @@ tools_supported = True
 # 后端明确拒绝采样参数后置 False（推理类模型常只接受默认 temperature/top_p）
 sampling_supported = True
 
+# 后端明确拒绝 LLM_EXTRA_BODY 里的厂商私有参数（thinking/reasoning_effort 等）后置 False
+extra_body_supported = True
+
 
 def _sampling_kwargs() -> dict:
     """按配置组装 temperature/top_p；走 config 模块属性读取，便于测试与运行时调整。"""
@@ -202,12 +205,15 @@ def _tool_args(call: dict) -> dict | None:
     return args if isinstance(args, dict) else None
 
 async def create_stream(history: list[dict], use_tools: bool):
-    global tools_supported, sampling_supported
+    global tools_supported, sampling_supported, extra_body_supported
     token_param = "max_tokens"
     include_tools = use_tools and tools_supported
     sampling = _sampling_kwargs() if sampling_supported else {}
+    extra_body = config.LLM_EXTRA_BODY if extra_body_supported else None
     while True:
         kwargs = {"model": LLM_MODEL, "messages": history, "stream": True, token_param: MAX_TOKENS, **sampling}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if include_tools:
             kwargs["tools"] = SEARCH_TOOLS
             kwargs["tool_choice"] = "auto"
@@ -224,6 +230,13 @@ async def create_stream(history: list[dict], use_tools: bool):
                 logger.warning("后端拒绝采样参数，已改用后端默认值（重启进程后会再次尝试）：%s", e)
                 sampling_supported = False
                 sampling = {}
+                continue
+            # 厂商私有参数不被当前后端接受：去掉重试并粘性禁用
+            if extra_body and any(k.lower() in err for k in extra_body):
+                logger.warning("后端拒绝额外参数 %s，本进程内不再携带（重启后会再次尝试）：%s",
+                               list(extra_body), e)
+                extra_body_supported = False
+                extra_body = None
                 continue
             # 后端不支持 function calling：去掉 tools 重试，并在进程内粘性禁用。
             # 注意 thought_signature 缺失的 400 报错文案里也含 "tool"，不属于此类

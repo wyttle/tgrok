@@ -10,6 +10,7 @@ Asks for every config item and generates/updates the .env file.
 """
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -95,6 +96,8 @@ TEXT = {
         "temperature": "采样温度 temperature（0~2，越高越活泼；留空=后端默认，输入 - 清除已设值，模型不支持时自动忽略）",
         "top_p": "核采样 top_p（0~1，留空=后端默认，输入 - 清除已设值）",
         "float_invalid": "请输入数字（如 0.9），或输入 - 清除",
+        "extra_body": '额外请求体参数 JSON（厂商私有参数原样并入请求，如 {"reasoning_effort":"low"} 或 {"thinking":{"type":"enabled","budget_tokens":1000}}；留空=无，输入 - 清除已设值，后端不认时自动忽略）',
+        "json_invalid": '请输入 JSON 对象（如 {"reasoning_effort":"low"}），或输入 - 清除',
         "max_history": "多轮对话保留消息条数",
         "tz": "时区（IANA 名称，用于告知模型当前真实时间；无法识别时 bot 会回退 UTC）",
         "int_invalid": "请输入正整数",
@@ -193,6 +196,8 @@ TEXT = {
         "temperature": "Sampling temperature (0-2, higher = livelier; empty = backend default, enter - to clear, auto-ignored if unsupported)",
         "top_p": "Nucleus sampling top_p (0-1, empty = backend default, enter - to clear)",
         "float_invalid": "Enter a number (e.g. 0.9), or - to clear",
+        "extra_body": 'Extra request-body JSON (vendor params merged into every request, e.g. {"reasoning_effort":"low"} or {"thinking":{"type":"enabled","budget_tokens":1000}}; empty = none, enter - to clear, auto-ignored if the backend rejects it)',
+        "json_invalid": 'Enter a JSON object (e.g. {"reasoning_effort":"low"}), or - to clear',
         "max_history": "Messages kept per conversation",
         "tz": "Timezone (IANA name, used to tell the model the current real time; falls back to UTC if unrecognized)",
         "int_invalid": "Please enter a positive integer",
@@ -242,6 +247,9 @@ def load_existing(path: Path) -> dict:
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] == '"':
             val = val[1:-1].replace('\\"', '"')
+        elif len(val) >= 2 and val[0] == val[-1] == "'":
+            # dotenv 的单引号值是字面量：只剥外层引号（如手写的 LLM_EXTRA_BODY='{...}'）
+            val = val[1:-1]
         values[key.strip()] = val
     return values
 
@@ -305,6 +313,17 @@ def validate_opt_float(raw: str):
         return True, ""
     except ValueError:
         return False, T["float_invalid"]
+
+
+def validate_opt_json(raw: str):
+    if raw == "-":
+        return True, ""
+    try:
+        if isinstance(json.loads(raw), dict):
+            return True, ""
+    except ValueError:
+        pass
+    return False, T["json_invalid"]
 
 
 def check_telegram_token(token: str) -> str | None:
@@ -646,6 +665,8 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
     raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
     cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
+    raw_x = ask(T["extra_body"], default=old.get("LLM_EXTRA_BODY", ""), validate=validate_opt_json)
+    cfg["LLM_EXTRA_BODY"] = "" if raw_x == "-" else raw_x
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
     print()

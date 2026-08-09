@@ -236,4 +236,25 @@ llm.llm = _orig_llm; llm.sampling_supported = True
 config.LLM_TEMPERATURE = config.LLM_TOP_P = None
 ok("采样参数透传/拒绝降级")
 
+# 17. LLM_EXTRA_BODY 透传（thinking 等厂商私有参数）；后端拒绝时去掉重试并粘性禁用
+config.LLM_EXTRA_BODY = {"thinking": {"type": "enabled", "budget_tokens": 1000}}
+seen=[]
+class _FC2:
+    async def create(s, **kw):
+        seen.append(kw)
+        if len(seen)==1:
+            raise BadRequestError(
+                "Unrecognized request argument supplied: thinking",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                body=None)
+        return "S"
+llm.llm = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FC2()))
+out = run(orig_create_stream(HIST, use_tools=False))
+assert seen[0]["extra_body"]["thinking"]["budget_tokens"] == 1000
+assert out=="S" and "extra_body" not in seen[1]
+assert llm.extra_body_supported is False
+llm.llm = _orig_llm; llm.extra_body_supported = True
+config.LLM_EXTRA_BODY = None
+ok("extra_body 透传/拒绝降级")
+
 print(f"\nall {PASS} checks passed")

@@ -1,5 +1,6 @@
 """配置：环境变量解析、常量、日志与时区初始化。"""
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -28,6 +29,25 @@ def _opt_float(name: str) -> float | None:
 # 后端明确拒绝时请求层会去掉参数重试并在进程内粘性禁用（见 llm.create_stream）
 LLM_TEMPERATURE = _opt_float("LLM_TEMPERATURE")
 LLM_TOP_P = _opt_float("LLM_TOP_P")
+
+
+def _opt_json_obj(name: str) -> dict | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        val = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{name} 不是合法 JSON：{e}")
+    if not isinstance(val, dict):
+        raise SystemExit(f'{name} 必须是 JSON 对象，例如 {{"reasoning_effort": "low"}}')
+    return val
+
+
+# 额外请求体参数（JSON 对象）：原样并入每次 chat/completions 请求，用于
+# thinking、reasoning_effort 等厂商私有参数；仅 OpenAI 兼容路径生效，
+# 后端拒绝时同样去掉重试并粘性禁用
+LLM_EXTRA_BODY = _opt_json_obj("LLM_EXTRA_BODY")
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 # 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型
 ENABLE_VISION = os.getenv("ENABLE_VISION", "false").strip().lower() in ("1", "true", "yes", "on")

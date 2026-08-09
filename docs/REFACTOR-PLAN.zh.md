@@ -179,31 +179,54 @@ class ClaudeAdapter(BaseAdapter):
   `RoundResult(calls={}, content=..., citations=...)`。
 - `to_gemini_contents(history)`（原 `_to_gemini_contents`）留在本模块。
 
-### 3.6 结构化错误解析（base.py）
+### 3.6 结构化错误分类（base.py）
 
-替换所有「对 `str(e).lower()` 做子串匹配」的判定入口：
+替换所有「对 `str(e).lower()` 做子串匹配」的降级判定。核心问题：普通业务 400
+（例如 Anthropic 的 "unexpected `tool_use_id` found in `tool_result` blocks"，多由我们
+自己的消息构造 bug 引起）也可能含 "tool" 字样，绝不能触发粘性禁用搜索。因此判定
+分两层：结构化 param 精确匹配优先；纯文本回退必须同时命中「拒绝措辞」关键词。
 
 ```python
 def error_text(e) -> str:
     """从 BadRequestError 提取判定用文本（小写）。优先结构化 body：
     OpenAI 形如 {"error": {"message":..., "param":..., "type":...}}，
-    Anthropic 形如 {"type":"error","error":{"type":...,"message":...}}；
-    param 字段单独拼在最前面，使参数名判定不受 message 措辞影响。
+    Anthropic 形如 {"type":"error","error":{"type":...,"message":...}}。
     拿不到结构化 body 时回退 str(e)。"""
-    body = getattr(e, "body", None)
-    if isinstance(body, dict):
-        err = body.get("error") if isinstance(body.get("error"), dict) else body
-        parts = [str(err.get(k) or "") for k in ("param", "message", "type")]
-        joined = " ".join(p for p in parts if p).strip()
-        if joined:
-            return joined.lower()
-    return str(e).lower()
+    ...
+
+def error_param(e) -> str:
+    """结构化 body 里的 error.param（OpenAI 有，Anthropic 无），小写；没有返回 ""。"""
+    ...
+
+# 拒绝措辞：后端明确表示「参数不被支持/不认识」时才允许粘性降级。
+# 注意不要加 "unexpected"——Anthropic 的 tool_use/tool_result 配对错误就含它，属业务 400
+_REJECT_HINTS = ("unsupported", "not supported", "does not support", "unrecognized",
+                 "unknown parameter", "no such parameter", "invalid parameter",
+                 "not allowed", "not available")
+
+
+def rejected_param(e, extra_keys=()) -> str | None:
+    """把 400 分类为被拒的参数类别，供适配器降级链使用。返回：
+    "token_param"      - 需改用 max_completion_tokens（文本含该词即判定，无需关键词把关）
+    "sampling"         - temperature/top_p 被拒
+    "extra"            - LLM_EXTRA_BODY 中某个键被拒（extra_keys 传入当前键名集合）
+    "max_tokens_limit" - max_tokens 超过模型输出上限（Claude 路径用于解析上限并夹紧）
+    "tools"            - 后端不支持 function calling
+    None               - 不是参数拒绝，调用方应原样抛出
+    判定顺序固定如上。规则：
+    - 文本含 "thought_signature" 直接返回 None（Gemini 兼容端点的续传错误，含 "tool" 但非参数拒绝）
+    - param 命中（等于参数名或以 "参数名." 开头）即判定，不需要关键词
+    - 无 param 时：子串命中 且 文本含任一 _REJECT_HINTS 才判定；
+      唯二例外是 "token_param"（"max_completion_tokens" 足够特异）和
+      "max_tokens_limit"（需配合数字解析，误报会被"解析不出更小上限"挡住）
+    """
+    ...
 ```
 
-各适配器降级链把 `err = str(e).lower()` 改为 `err = error_text(e)`，判定子串本身
-（"temperature"、"top_p"、"max_completion_tokens"、"tool"、"thought_signature"、
-extra_body 键名、Claude 的 max_tokens 数字解析）不变。测试 16/17/20 构造的假异常
-`body=None`，走回退路径，不需要改断言。
+各适配器的降级链改为 `kind = base.rejected_param(e, extra_keys=...)` 后按 kind 分发，
+动作不变（粘性置 False / 夹紧 max_tokens / continue 重试），顺序天然由分类器统一。
+必须保留的既有行为：测试 16/17/20 构造的假异常（`body=None` 走文本回退）文案分别含
+"unsupported"、"unrecognized"、"not supported"，在新规则下判定结果不变。
 
 ### 3.7 __init__.py（装配）
 
@@ -288,22 +311,36 @@ if citations and segment.strip():
 
 ### 3.10 config.py / prompt.py
 
-- config 新增：`SYSTEM_PROMPT_OVERRIDE = os.getenv("SYSTEM_PROMPT", "")`。
-- prompt.py 改为 `SYSTEM_PROMPT = config.SYSTEM_PROMPT_OVERRIDE or t("system_prompt")`，
+- config 新增：`SYSTEM_PROMPT_OVERRIDE = os.getenv("SYSTEM_PROMPT")`——注意用
+  **None 哨兵**：未设置返回 None，显式设为空串表示「不要系统提示词」，两者语义不同，
+  必须保持与现状（`os.getenv("SYSTEM_PROMPT", 内置默认)`）逐字节一致。
+- prompt.py 改为：
+
+```python
+SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
+                 if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
+```
+
   删除 `import os`。拼接搜索段落的逻辑不变。
 
-### 3.11 对话缓存字节预算（tg.py）
+### 3.11 对话缓存内容量预算（tg.py）
 
-- config 新增常量：`CONVERSATION_MAX_BYTES = 64 * 1024 * 1024`
-  （64MB，含 base64 图片的历史总量上限；注释说明动机）。
+定位要诚实：这是**近似的内容字符量预算**，不是进程内存硬上限。会计规则是「对每条
+历史的 content 求字符长度之和」——CJK 文本的实际 UTF-8/内部存储可达每字符 2-4 字节，
+Python 对象另有开销；反方向上，追问链的各条缓存共享同一批消息 dict（`history + [...]`
+只新建外层 list），同一张 base64 图片会被多条缓存重复计数，导致高估。高估意味着
+提前驱逐，方向是安全的。目的只有一个：防止视觉模式下 base64 图片让缓存无界膨胀。
+
+- config 新增常量：`CONVERSATION_CONTENT_BUDGET = 64_000_000`
+  （所有缓存对话的 content 字符量之和上限，注释写明上述近似性质与动机）。
 - tg.py：
 
 ```python
 _conv_sizes: dict[tuple[int, int], int] = {}
 _conv_total = 0
 
-def _history_bytes(history) -> int:
-    """近似字节量：文本取长度，多模态取各块文本/data URL 长度之和。"""
+def _history_chars(history) -> int:
+    """近似内容量：文本取字符长度，多模态取各块文本/data URL 长度之和。"""
     total = 0
     for m in history:
         c = m.get("content", "")
@@ -315,63 +352,72 @@ def _history_bytes(history) -> int:
     return total
 
 def remember(chat_id, message_id, history):
-    # 覆盖同 key 时先扣旧值；随后按「条数超限或总字节超限」从最旧开始驱逐，
+    # 覆盖同 key 时先扣旧值；随后按「条数超限或总量超预算」从最旧开始驱逐，
     # 但至少保留刚插入的这条（单条超预算也不驱逐自己）
 ```
 
 驱逐循环条件：`while len(conversations) > 1 and (len(conversations) > CONVERSATION_CACHE_SIZE
-or _conv_total > CONVERSATION_MAX_BYTES)`，弹出最旧 key 时同步扣 `_conv_sizes`。
+or _conv_total > CONVERSATION_CONTENT_BUDGET)`，弹出最旧 key 时同步扣 `_conv_sizes` 与
+`_conv_total`。
 
 ## 4. 分阶段执行计划
 
 每阶段一个 commit，提交信息用中文一行概括 + 空行 + 要点。
 
-### 阶段 1：llm.py → llm/ 包（纯搬迁）
+（修订说明：原计划的「阶段 1 纯搬迁 + 兼容层」已取消——测试通过模块属性赋值和
+`global` 写回来打桩（`llm.llm = 假客户端`、`llm.sampling_supported`），代码搬进子模块后
+函数读的是子模块自己的全局，包级 re-export 骗不过赋值；且 `extra_body_supported` 被
+两条协议共用，纯搬迁本身无法保持单一全局。风险改由阶段 1 内部的固定子步骤顺序控制。）
 
-把 llm.py 按 3.1 拆成五个文件，**只搬代码与改名，不改任何逻辑**（`error_text` 此阶段
-还不引入；全局标志此阶段先原样搬进各协议模块的模块级——降级为中间态可以接受，
-阶段 2 收进实例）。`__init__.py` 先用兼容层把旧名字全部 re-export
-（`create_stream`、`_drain_stream`、`_tool_args`……指向新位置），chat.py、web.py、
-测试**一行都不改**。
+### 阶段 1：适配器落地（原阶段 1+2 合并）
 
-验收：`python tests/smoke_test.py` 22 项全过，chat/web/测试零改动。
+按以下固定顺序执行，中途状态不要求测试通过，全部完成后一次性跑套件：
 
-### 阶段 2：适配器接口 + chat 单循环 + 状态收编
+1. 建 `tgrok/llm/base.py`：搬入工具定义与共享 helpers（3.2 的清单），改公开名。
+2. 建 `tgrok/llm/openai.py`：`OpenAIAdapter`（3.3），粘性标志改实例属性，
+   `drain_stream` 保持模块级函数。
+3. 建 `tgrok/llm/claude.py`：`ClaudeAdapter`（3.4），同上。
+4. 建 `tgrok/llm/gemini.py`：genai 客户端 + `GeminiAdapter`（3.5）。
+5. 建 `tgrok/llm/__init__.py`（3.7），删除旧 `tgrok/llm.py`。
+6. 改 `chat.py`（3.8 单循环）与 `web.py`（3.9，含冷却状态迁移）。
+7. 按第 6 节对照表适配 `tests/smoke_test.py`：只改打桩目标与 import 路径，
+   断言语义不得删弱。
 
-- base.py 落 `RoundResult` / `BaseAdapter`；三个适配器类按 3.3-3.5 成形，
-  粘性标志改实例属性；`__init__.py` 按 3.7 装配 `adapter` 单例，删除阶段 1 的兼容层，
-  只保留 3.7 列出的公开名。
-- chat.py 按 3.8 改单循环；web.py 按 3.9 改 import 与冷却状态。
-- 测试按第 6 节对照表适配。
+验收：`python tests/smoke_test.py` 22 项全过；
+`grep -n "GEMINI_NATIVE_SEARCH\|CLAUDE_NATIVE" tgrok/chat.py` 无结果
+（chat 不再感知具体协议）；`tgrok/llm.py` 文件已不存在。
 
-验收：22 项全过（其中原 16/17/20 的降级断言改为断言适配器实例属性）；
-`grep -rn "GEMINI_NATIVE_SEARCH" tgrok/chat.py` 无结果（chat 不再感知具体协议）。
+### 阶段 2：结构化错误分类
 
-### 阶段 3：结构化错误解析
+base.py 加 `error_text` / `error_param` / `rejected_param`（3.6），三个适配器的
+降级链改用分类器。新增两个回归用例：
 
-base.py 加 `error_text`（3.6），三个适配器的降级链改用它。新增一个回归用例：
-构造带结构化 body 的 BadRequestError（`body={"error": {"param": "temperature",
-"message": "unsupported"}}`），断言采样降级触发——证明 param 路径生效。
-
-验收：23 项全过。
-
-### 阶段 4：配置归位
-
-按 3.10 迁移 SYSTEM_PROMPT 读取。验收：全过；`grep -rn "os.getenv" tgrok/ --include="*.py"`
-只在 config.py 有结果。
-
-### 阶段 5：对话缓存字节预算
-
-按 3.11 实施。新增回归用例：往 `tg.remember` 塞入多条含大 content 的历史，断言
-超预算后最旧条目被驱逐、`_conv_total` 与实际一致、单条超大历史自身不被驱逐。
+- 正向：构造 `body={"error": {"param": "temperature", "message": "unsupported"}}` 的
+  BadRequestError，断言走 param 路径触发采样降级；
+- 反向：构造 message 为 "unexpected `tool_use_id` found in `tool_result` blocks"、
+  `body=None` 的 BadRequestError，断言 `rejected_param` 返回 None（业务 400 不得
+  触发 tools 粘性禁用）。
 
 验收：24 项全过。
 
-### 阶段 6：文档同步
+### 阶段 3：配置归位
+
+按 3.10 迁移 SYSTEM_PROMPT 读取（None 哨兵语义）。验收：24 项全过；
+`grep -rn "os.getenv" tgrok/ --include="*.py"` 只在 config.py 有结果。
+
+### 阶段 4：对话缓存内容量预算
+
+按 3.11 实施。新增回归用例：往 `tg.remember` 塞入多条含大 content 的历史，断言
+超预算后最旧条目被驱逐、`_conv_total` 与逐条重算结果一致、单条超大历史自身不被驱逐、
+覆盖同 key 不重复计数。
+
+验收：25 项全过。
+
+### 阶段 5：文档同步
 
 - `docs/ARCHITECTURE.zh.md`：更新模块图（llm 包五文件、适配器接口、chat 单循环）、
-  三协议说明（`LLM_PROTOCOL`）、数据流描述；删除 `GEMINI_NATIVE_SEARCH` 作为配置项的表述
-  （只作为兼容旧键提及）。
+  三协议说明（`LLM_PROTOCOL`）、数据流描述；`GEMINI_NATIVE_SEARCH`/`CLAUDE_NATIVE`
+  只作为兼容旧键提及。
 - `README.md` / `README.zh-CN.md`：功能清单补 Claude 原生协议、`LLM_PROTOCOL`、
   采样参数（`LLM_TEMPERATURE`/`LLM_TOP_P`）、`LLM_EXTRA_BODY`；配置表与 `.env.example` 对齐。
 - 文档不用图标字符。
@@ -386,7 +432,7 @@ base.py 加 `error_text`（3.6），三个适配器的降级链改用它。新�
 - 不做部署；不碰服务器 .env 与 profiles。
 - 不为「未来可能的第四种协议」添加多余的钩子——三个实现 + 一个接口，够了。
 
-## 6. 测试适配对照表（阶段 2 使用）
+## 6. 测试适配对照表（阶段 1 使用）
 
 | 现用例 | 现挂钩 | 适配后 |
 |---|---|---|
@@ -410,4 +456,20 @@ base.py 加 `error_text`（3.6），三个适配器的降级链改用它。新�
   `segment` 上、必须发生在最终 `push(segment, final=True)` 之前（保持现在的顺序）。
 - `token_param` 粘性化后，若后端同时拒绝 max_completion_tokens 与其他参数，
   降级链的 `continue` 顺序保持原样（先 token 参数，再采样，再 extra_body，再 tools）。
-- 阶段 1 的「纯搬迁 + 兼容层」是安全网，别跳过它直接一步到位。
+- 阶段 1 体量最大且中途不可测，严格按 4.1 的子步骤顺序推进；如果卡在测试适配，
+  优先对照第 6 节表格逐条核对打桩目标，不要为了让测试通过而改断言语义。
+
+## 8. 修订记录
+
+针对执行前评审提出的四个硬冲突的裁定：
+
+1. **纯搬迁阶段取消**：测试用「模块属性赋值 + 函数内 `global` 写回」打桩，包级
+   re-export 无法拦截赋值；共享可变全局也无法在拆包后保持单一。原阶段 1/2 合并为
+   现阶段 1，用固定子步骤顺序代替中间安全网。
+2. **SYSTEM_PROMPT 语义**：迁移后用 None 哨兵区分「未设置」（用内置默认）与
+   「显式空值」（无系统提示词），与现状逐字节等价，不采用 `or` 回退。
+3. **缓存预算定位修正**：改为「近似内容字符量预算」（`CONVERSATION_CONTENT_BUDGET`），
+   明确不是内存硬上限；共享消息导致的重复计数按「高估→提前驱逐→安全」接受。
+4. **误禁 tools 防护**：降级判定升级为 param 精确匹配优先 + 文本回退需命中拒绝措辞
+   关键词；关键词表明确排除 "unexpected"（Anthropic 的 tool_use/tool_result 配对类
+   业务 400 含该词），并新增反向回归用例锁住这条边界。

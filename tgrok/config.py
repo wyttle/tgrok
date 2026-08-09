@@ -46,9 +46,8 @@ def _opt_json_obj(name: str) -> dict | None:
     return val
 
 
-# 额外请求体参数（JSON 对象）：原样并入每次 chat/completions 请求，用于
-# thinking、reasoning_effort 等厂商私有参数；仅 OpenAI 兼容路径生效，
-# 后端拒绝时同样去掉重试并粘性禁用
+# 额外请求体参数（JSON 对象）：OpenAI 兼容与 Claude 原生请求会原样透传，用于
+# thinking、reasoning_effort 等厂商私有参数；Gemini 原生忽略，后端拒绝时去掉重试并粘性禁用
 LLM_EXTRA_BODY = _opt_json_obj("LLM_EXTRA_BODY")
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 # 模型支持图片理解（多模态）时设为 true：群友发图或回复图片提问，图片会一并发给模型

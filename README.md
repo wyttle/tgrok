@@ -13,11 +13,12 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Follow-ups**: reply to the bot's answers to continue the conversation with full context
 - **Private chat**: just message the bot directly
 - **Image understanding**: with a vision-capable model, ask about photos sent in the group
-- **Web search**: the model can search the internet on its own via a `web_search` tool and answer with sources (Tavily / DuckDuckGo / SearXNG)
+- **Web search**: the model can search the internet on its own via a `web_search` tool and answer with sources (Tavily / DuckDuckGo / SearXNG / Serper)
 - **Streaming replies**: answers appear progressively (typewriter style); long generations won't be cut off by gateway idle timeouts
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
-- Works with any **OpenAI-compatible endpoint** (LM Studio / vLLM / llama.cpp server / Ollama / official OpenAI API)
+- **Three LLM protocols**: select OpenAI-compatible, native Gemini, or native Claude with `LLM_PROTOCOL`; native Claude keeps Anthropic thinking and tool-use semantics
+- Works with local servers, cloud gateways, official OpenAI, Google Gemini, and Anthropic APIs
 
 ## 1. Create a Telegram Bot
 
@@ -66,18 +67,30 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | token from BotFather | (required) |
 | `BOT_LANG` | bot message language: `en` or `zh` | `zh` |
-| `LLM_BASE_URL` | OpenAI-compatible endpoint | `http://localhost:1234/v1` |
+| `LLM_PROTOCOL` | reply-model protocol: `openai`, `gemini`, or `claude` | `openai` |
+| `LLM_BASE_URL` | OpenAI-compatible or Claude endpoint; Claude accepts a root URL or a URL ending in `/v1` | `http://localhost:1234/v1` |
+| `GEMINI_BASE_URL` | native Gemini endpoint for Gemini replies and grounding; empty = official Google endpoint | (empty) |
 | `LLM_MODEL` | model name | `local-model` |
-| `LLM_API_KEY` | anything works for most local servers | `not-needed` |
+| `LLM_API_KEY` | API key; anything works for most local servers | `not-needed` |
 | `LLM_USER_AGENT` | custom User-Agent (some cloud gateways validate it) | SDK default |
 | `SYSTEM_PROMPT` | system prompt | built-in default |
 | `MAX_TOKENS` | max tokens per reply | `1024` |
+| `LLM_TEMPERATURE` | sampling temperature; empty = backend default, auto-dropped if rejected | (empty) |
+| `LLM_TOP_P` | nucleus sampling; empty = backend default, auto-dropped if rejected | (empty) |
+| `LLM_EXTRA_BODY` | JSON object passed through by OpenAI-compatible and native Claude requests; ignored by native Gemini | (empty) |
 | `MAX_HISTORY` | messages kept per conversation | `20` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
-| `SEARCH_PROVIDER` | web search provider: `tavily` / `duckduckgo` / `searxng`, empty = off | (empty) |
-| `TAVILY_API_KEY` | Tavily API key (required with `SEARCH_PROVIDER=tavily`) | (empty) |
-| `SEARXNG_BASE_URL` | SearXNG instance URL (required with `SEARCH_PROVIDER=searxng`) | (empty) |
+| `MAX_IMAGES` | images attached per request | `4` |
+| `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
+| `TAVILY_API_KEY` | Tavily API key | (empty) |
+| `SERPER_API_KEY` | Serper API key | (empty) |
+| `SEARXNG_BASE_URL` | SearXNG instance URL | (empty) |
+| `GEMINI_SEARCH_MODEL` | dedicated Gemini grounding model for hybrid search | (empty) |
+| `GEMINI_API_KEY` | Gemini/grounding key; empty = reuse `LLM_API_KEY` | (empty) |
 | `SEARCH_MAX_RESULTS` | search results fed back to the model per query | `5` |
+| `FETCH_CHAR_LIMIT` | page-text characters fed back per `open_url` call | `3500` |
+| `JINA_FALLBACK` | use Jina Reader when direct page extraction fails | `true` |
+| `JINA_API_KEY` | optional Jina API key for higher rate limits | (empty) |
 | `ADMIN_USER_IDS` | super admin IDs (comma-separated) | (empty) |
 | `ALLOWED_USER_IDS` | initial whitelist, first start only | (empty) |
 
@@ -106,12 +119,19 @@ Whitelist changes apply immediately and persist to `allowed_users.json` across r
 To find your own user ID: message the bot `/start` (requires access), or use @userinfobot.
 Set yourself as admin in `ADMIN_USER_IDS` before the first start.
 
-## Cloud APIs / multimodal
+## LLM protocols and cloud APIs
 
-`LLM_BASE_URL` accepts any OpenAI-compatible service, not just local models. For the official
-OpenAI API: re-run `python configure.py`, set the endpoint to `https://api.openai.com/v1`,
-your API key, and a model name (the bot handles the `max_completion_tokens` requirement of
-newer official models automatically).
+Set `LLM_PROTOCOL` to choose the wire protocol:
+
+- `openai` (default): OpenAI-compatible `/chat/completions`, using `LLM_BASE_URL`.
+- `gemini`: native Gemini through the google-genai SDK, using `GEMINI_BASE_URL` (empty means Google's official endpoint). Google Search and URL context run server-side, so the bot's own tool loop is bypassed.
+- `claude`: native Anthropic Messages API, using `LLM_BASE_URL`. Native thinking blocks, signatures, and tool-use semantics are preserved, and the bot's own search tools remain available.
+
+`GEMINI_NATIVE_SEARCH` and `CLAUDE_NATIVE` are legacy compatibility keys only; new configurations should use `LLM_PROTOCOL`.
+
+For the official OpenAI API, use `LLM_PROTOCOL=openai` and set `LLM_BASE_URL` to `https://api.openai.com/v1`. The bot automatically handles newer models that require `max_completion_tokens`.
+
+`LLM_TEMPERATURE` and `LLM_TOP_P` are optional. `LLM_EXTRA_BODY` is a JSON object for vendor-specific fields such as reasoning effort or thinking settings; it is passed through by both OpenAI-compatible and native Claude requests, but not native Gemini. If a backend explicitly rejects these optional fields, the adapter retries without them and keeps them disabled for the current process.
 
 With a vision-capable model, set `ENABLE_VISION=true` (wizard step 6) to:
 
@@ -136,6 +156,7 @@ Set `SEARCH_PROVIDER` to pick a provider (or re-run `python configure.py`, wizar
 | `tavily` | `TAVILY_API_KEY` | hosted, LLM-optimized results, best quality; free tier ~1000 searches/mo ([tavily.com](https://tavily.com)) |
 | `duckduckgo` | none | zero-config, no key (uses the `ddgs` package); less reliable, may get rate-limited |
 | `searxng` | `SEARXNG_BASE_URL` | self-hosted metasearch, free and private; the instance must have JSON output enabled |
+| `serper` | `SERPER_API_KEY` | hosted Google results; can be combined with other providers |
 
 Notes:
 
@@ -193,7 +214,6 @@ journalctl -u tgbot -f
   and that the bot was re-added to the group afterwards.
 - **The model says it can't access the internet**: by default it really can't. Set
   `SEARCH_PROVIDER` to enable web search (see "Web search" above).
-- **"Failed to call the model"**: verify the LLM server is running and `LLM_BASE_URL` /
-  `LLM_MODEL` match the server.
+- **"Failed to call the model"**: verify the model service is running and the selected protocol's address and model match it: `LLM_BASE_URL` for OpenAI/Claude, `GEMINI_BASE_URL` for native Gemini, plus `LLM_MODEL`.
 - **Conversations forgotten after restart**: history lives in memory and is lost on restart;
   replying to the bot still works, with only its last answer as context.

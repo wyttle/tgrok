@@ -1,86 +1,122 @@
 # tgrok 架构设计文档
 
-Telegram 群聊 AI 助手（类似 X 上的 @grok 用法）。后端为任意 OpenAI 兼容接口,
-可选 Gemini 原生接入与 Google grounding 搜索。
+Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主模型支持 OpenAI 兼容、Gemini 原生和 Claude 原生三种协议，并可选 bot 工具搜索或 Google grounding 搜索。
 
 ## 模块划分
 
-```
-bot.py              入口（python bot.py），只做 from tgrok.tg import main
-configure.py        交互式配置向导 + 多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py 冒烟/回归套件（无需网络与真实 Telegram，python tests/smoke_test.py）
+```text
+bot.py                 入口（python bot.py），只做 from tgrok.tg import main
+configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
+tests/smoke_test.py    27 项冒烟和回归测试（无需网络与真实 Telegram）
 tgrok/
-├── config.py   环境变量解析、常量、日志与时区初始化（无内部依赖，最底层）
-├── i18n.py     全部界面/提示词文案（zh/en 键严格对齐）+ t()
-├── prompt.py   SYSTEM_PROMPT 组装（含搜索能力声明）+ 实时时间注入 with_time()
-├── llm.py      模型接入层：OpenAI 兼容流式(create_stream/_drain_stream)、
-│               Gemini 原生流式、工具 schema、tool_call 聚合与 assistant 消息重组
-├── web.py      联网层：多搜索源并发聚合、Gemini grounding 检索、
-│               网页抓取（进程隔离提取 + Jina 兜底）
-├── chat.py     会话层：TUI 进度显示、工具执行(同轮合并)、stream_reply 主循环、
-│               取消按钮回调
-├── tg_auth.py  白名单/管理员判定（chat 与 tg 共用，独立成小模块防循环导入）
-└── tg.py       Telegram 接入层：消息路由、图片/相册、管理命令、应用装配 main()
+|-- config.py          环境变量解析、常量、日志与时区初始化
+|-- i18n.py            全部界面和提示词文案，以及 t()
+|-- prompt.py          SYSTEM_PROMPT 组装和实时时间注入 with_time()
+|-- llm/
+|   |-- __init__.py    按 LLM_PROTOCOL 装配唯一 adapter 单例并导出共享 helper
+|   |-- base.py        RoundResult、BaseAdapter、工具定义、错误分类和共享 helper
+|   |-- openai.py      OpenAI 兼容协议适配器和流消费
+|   |-- gemini.py      Gemini 原生协议适配器、原生客户端和 grounding 共用客户端
+|   `-- claude.py      Claude 原生协议适配器、消息转换和流消费
+|-- web.py             多搜索源聚合、Gemini grounding、网页抓取和 Jina 兜底
+|-- chat.py            进度显示、工具执行、统一的 stream_reply 轮次循环和取消回调
+|-- tg_auth.py         白名单和管理员判定
+`-- tg.py              Telegram 路由、图片和相册、管理命令、对话缓存及 main()
 ```
 
-依赖方向自底向上：config ← i18n ← prompt/llm/web ← chat ← tg。无循环导入。
-可变运行时状态的归属：`llm.tools_supported`（后端拒绝 tools 的粘性开关）、
-`config._gemini_search_blocked_until`（grounding 429 冷却）、`chat.active_generations`
-（进行中生成任务，取消按钮用）、`tg_auth.allowed_users`、`tg.conversations`/`album_cache`。
-跨模块引用一律走模块属性（`config.X`/`llm.f()`），保证测试可 monkeypatch。
+主要依赖方向为 `config -> i18n/prompt/llm/web -> chat -> tg`。`web.py` 仅在执行 Gemini grounding 时在函数体内延迟导入 `llm.gemini`，避免其他协议无条件加载 Google SDK。
+
+## LLM 适配器接口
+
+`tgrok.llm` 根据 `LLM_PROTOCOL` 创建一个进程级 `adapter`。三个协议实现相同的最小接口：
+
+```python
+@dataclass
+class RoundResult:
+    calls: dict[int, dict] = field(default_factory=dict)
+    content: str = ""
+    citations: list[dict] = field(default_factory=list)
+
+
+class BaseAdapter:
+    name: str = ""
+    supports_tool_loop: bool = True
+
+    async def run_round(self, history, use_tools, on_text) -> RoundResult:
+        raise NotImplementedError
+```
+
+一轮调用同时完成建流和消费流。`RoundResult.calls` 保存聚合后的工具调用，`content` 保存本轮正文，`citations` 保存 Gemini 原生 grounding 引用。OpenAI 和 Claude 适配器支持 bot 自带工具循环；Gemini 原生适配器将 `supports_tool_loop` 设为 `False`，搜索与读页由 Google 服务端完成。
+
+后端能力降级状态属于适配器实例，例如 tools、采样参数和 `LLM_EXTRA_BODY` 是否被接受，以及协议特有的 token 参数探测结果。错误分类优先读取 SDK 的结构化错误字段，只在缺少结构化信息时使用受约束的文本回退，避免把普通业务错误误判为后端不支持 tools。
+
+## 三种主模型协议
+
+`LLM_PROTOCOL` 是主协议选择键：
+
+| 值 | 接口与地址 | 工具行为 |
+|---|---|---|
+| `openai` | OpenAI 兼容 `/chat/completions`；使用 `LLM_BASE_URL` | 支持 bot 的 `web_search` 和 `open_url` 工具循环 |
+| `gemini` | google-genai 原生接口；使用 `GEMINI_BASE_URL`，留空连接 Google 官方地址 | 单轮生成，Google 服务端执行 `google_search` 和 `url_context` |
+| `claude` | Anthropic Messages API；使用 `LLM_BASE_URL`，末尾 `/v1` 会在客户端根地址处理时剥离 | 支持 bot 工具循环，并保留原生 thinking 块和签名 |
+
+`LLM_PROTOCOL` 留空时默认为 `openai`。`GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 仅用于读取旧配置；新配置应只写 `LLM_PROTOCOL`。代码会把最终协议结果映射到这两个兼容属性，供尚未迁移的显示逻辑使用。
+
+`LLM_TEMPERATURE` 和 `LLM_TOP_P` 留空时不发送，由后端使用默认值。`LLM_EXTRA_BODY` 接受 JSON 对象，OpenAI 兼容和 Claude 原生适配器都会将其作为 `extra_body` 透传；Gemini 原生不使用该配置。后端明确拒绝可选采样参数或额外字段时，对应适配器会去掉参数重试，并在当前进程内粘性禁用。
 
 ## 一条消息的生命周期
 
-```
+```text
 Telegram update
-  → tg.handle_message：路由（@提及/回复bot/私聊）、鉴权、相册被动收集、
-    组装 history（system + 引用上下文 + 图片 + with_time 时间注入）
-  → chat.stream_reply：
-      占位气泡（带 取消按钮）→ 注册 active_generations
-      ┌ 原生模式(GEMINI_NATIVE_SEARCH)：llm.gemini_create_stream 单轮，
-      │ grounding 引用附「来源：」链接
-      └ 工具循环（≤SEARCH_MAX_ROUNDS 轮，最后一轮强制无工具）：
-          llm.create_stream(OpenAI 兼容) → llm._drain_stream
-          → 模型请求工具 → chat._execute_tool_calls
-              web_search → web.run_web_search：grounding 优先（429 冷却回退）
-                           → 多源并发聚合（交错合并+URL去重）
-              open_url   → web.run_fetch_url：直取（httpx 共享连接池 →
-                           独立进程 trafilatura 提取，10s 看门狗强杀）→ Jina 兜底
-          → 结果回灌，进度气泡逐行更新（搜索词/读取网页/结果摘要，不露 URL）
-      正文流式编辑（1.5s 节流，>3400 字自动分段多条消息）
-  → 定稿 MarkdownV2（失败回退纯文本）→ tg.remember 写对话缓存（供追问）
+  -> tg.handle_message
+     路由、鉴权、相册收集，组装 system、引用上下文、图片和实时时间
+  -> chat.stream_reply
+     创建占位消息和取消按钮，注册 active_generations
+     -> 取得 llm.adapter
+     -> 进入统一轮次循环
+        -> 每轮调用 adapter.run_round
+        -> 无输出的流中断重试一次；已有正文则按完成处理；429 不重试
+        -> 若返回工具调用且本轮允许 tools，执行 chat._execute_tool_calls
+           -> web_search 调用 web.run_web_search
+              -> 可选 Gemini grounding
+              -> 或多搜索源并发聚合、去重和交错合并
+           -> open_url 调用 web.run_fetch_url
+              -> httpx 抓取、独立进程提取正文、必要时 Jina 兜底
+        -> 工具结果追加到 working history 后进入下一轮
+        -> Gemini 原生返回的 citations 在循环结束后附到正文
+     -> 正文按节流间隔流式编辑，超过分段阈值时发送下一条消息
+  -> MarkdownV2 定稿，失败时回退纯文本
+  -> tg.remember 保存追问所需的对话历史
 ```
 
-## 关键设计决策（为什么这么写）
+OpenAI 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮，最后一轮强制不带 tools，避免无限工具调用。Gemini 原生仍走同一段 chat 循环，但固定为一轮且不启用 bot 工具。
 
-- **时间注入挂在最新一条用户消息末尾**而非系统提示：系统提示与历史轮次保持
-  字节不变，命中上游 prompt 缓存（prompt.with_time 的 docstring 有详述）。
-- **正文提取在独立进程**：trafilatura/lxml 是 CPU 密集纯 Python 工作，线程会
-  占住 GIL 饿死事件循环。子进程内先截断再 send（64KB 管道缓冲写阻塞 vs 父进程
-  join 等退出会互等死锁）；父进程 poll+recv 后再收尸。
-- **流式三层健壮性**（llm._drain_stream / chat.stream_reply 轮循环）：
-  ① 空闲看门狗——已有正文且无半截 tool_call 时 STREAM_IDLE_TIMEOUT 秒无新数据
-  视为完成（部分网关不发结束帧）；② 掐流但正文已到手 → 按完成处理入缓存；
-  ③ 零输出（含纯空白）掐流 → 静默重试一次；429 配额类错误不重试、独立文案。
-- **thought_signature 回传**：Gemini 3.x 思考型模型经兼容端点做 function calling
-  时，流式 tool_call 的 extra_content 必须原样回传，否则下轮 400。相应地
-  tool_call 无 index 时每 chunk 分配新槽位（该端点整调用单 chunk 发全）。
-- **grounding 当调研代理而非搜索框**：工具描述引导主模型一轮提交一个综合任务；
-  同轮多个 web_search 强制合并为一次 grounding 调研（每次 grounding 内部本就是
-  多跳检索）。GEMINI_API_KEY/GEMINI_BASE_URL 与主模型解耦，支持中转站转发原生格式。
-- **进度显示纯文本+缩进**：避免使用可能在部分 Telegram 客户端渲染成彩色图标的特殊符号；不向群成员暴露 URL/域名。
-- **SSRF 防护**：open_url 仅允许公网 http(s)，拒绝内网/回环 IP 字面量。
+## 关键设计决策
+
+- 实时时间追加到最新一条用户消息，而不是系统提示或历史消息。这样多轮间的 system prompt 与历史字节保持不变，有利于上游 prompt cache 命中。
+- SDK 内建重试被禁用，OpenAI 与 Anthropic 客户端均使用 `max_retries=0`。重试语义只由 chat 的统一循环控制。
+- 流消费使用空闲看门狗：仅在已有正文且没有半截工具调用时，连续 `STREAM_IDLE_TIMEOUT` 秒无新数据才按完成收尾。它不是整次请求的人为超时。
+- OpenAI 兼容路径会回传 Gemini 思考型模型 tool call 中的 `thought_signature`。Claude 原生路径会收集 thinking 和签名，并在工具续传时恢复为 Anthropic 消息块。
+- 网页正文提取运行在独立进程，避免 trafilatura 和 lxml 的 CPU 工作阻塞事件循环。
+- grounding 被视为调研代理。同轮多个 `web_search` 会合并为一个综合任务，减少重复调用。
+- 进度显示使用纯文本和缩进，不向群成员展示 URL。
+- `open_url` 只接受公网 HTTP(S) 地址，拒绝内网和回环 IP 字面量。
+- 对话缓存同时按条目数和近似内容字符量驱逐。字符预算统计文本、图片 data URL 等 content 长度，用于避免视觉历史无界增长；它不是进程内存硬上限，Python 对象开销、字符编码和共享消息对象都会使实际内存与统计值不同。
+
+## 运行时状态归属
+
+- `llm.adapter`：当前协议适配器及其粘性能力降级状态。
+- `web._grounding_cooldown_until`：Gemini grounding 遇到配额错误后的冷却状态。
+- `chat.active_generations`：正在生成的任务，供取消按钮定位。
+- `tg_auth.allowed_users`：运行时白名单。
+- `tg.conversations`、`tg._conv_sizes`、`tg._conv_total`：对话历史及近似内容字符预算会计。
+- `tg.album_cache`：相册聚合缓存。
 
 ## 配置
 
-全部经环境变量（.env），见 .env.example 逐项注释。多配置档存 profiles/*.env
-（完整快照，gitignore），configure.py 菜单交互式新建/切换/删除，切换自动备份
-.env 并询问重启容器。
+全部配置通过环境变量读取，示例和逐项注释见 `.env.example`。协议地址必须区分：OpenAI 和 Claude 使用 `LLM_BASE_URL`，Gemini 原生及 Gemini grounding 使用 `GEMINI_BASE_URL`。多配置档保存在 `profiles/*.env`，由 `configure.py` 新建、切换和删除。
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：14 项行为级断言（假流/假 Telegram 对象），覆盖
-  重试/看门狗/取消/分段/TUI/签名回传/合并调研/相册/SSRF。改动后必跑。
-- 部署：本地 commit → push → 服务器 `git pull && docker compose up -d --build
-  --force-recreate`（compose 偶发不重建容器，--force-recreate 保险），之后
-  `docker exec tgrok-bot-1 grep -c <新代码标识> bot.py` 或看启动日志验证。
+- `python tests/smoke_test.py`：27 项行为级断言，覆盖流重试、空闲看门狗、取消、分段、工具调用、三协议适配器、错误降级、引用、相册、SSRF 和对话缓存预算。
+- 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。

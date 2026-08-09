@@ -12,11 +12,12 @@ bot 会结合被引用的消息内容，调用你本地的 LLM 模型（或任�
 - **多轮追问**：回复 bot 的回答可以继续对话，上下文自动延续
 - **私聊**：私聊里直接发消息即可
 - **图片理解**：搭配视觉模型可以对群里的图片提问
-- **联网搜索**：模型可通过 `web_search` 工具自主联网搜索实时信息再回答、附来源（Tavily / DuckDuckGo / SearXNG 可选）
+- **联网搜索**：模型可通过 `web_search` 工具自主联网搜索实时信息再回答、附来源（Tavily / DuckDuckGo / SearXNG / Serper 可选）
 - **流式输出**：回复像打字机一样逐步出现；长生成不会被网关空闲超时掐断
 - **权限控制**：管理员用命令管理白名单，无权限用户静默忽略
 - **双语**：bot 消息和配置向导支持中文/英文（`BOT_LANG`）
-- 对接任意 **OpenAI 兼容接口**（LM Studio / vLLM / llama.cpp server / Ollama / OpenAI 官方 API）
+- **三种 LLM 协议**：通过 `LLM_PROTOCOL` 选择 OpenAI 兼容、Gemini 原生或 Claude 原生；Claude 原生保留 Anthropic thinking 与工具调用语义
+- 可连接本地模型服务、云端中转、OpenAI 官方、Google Gemini 和 Anthropic API
 
 ## 1. 创建 Telegram Bot
 
@@ -64,18 +65,30 @@ python bot.py
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | BotFather 给的 token | （必填） |
 | `BOT_LANG` | bot 消息语言：`zh` 或 `en` | `zh` |
-| `LLM_BASE_URL` | OpenAI 兼容接口地址 | `http://localhost:1234/v1` |
+| `LLM_PROTOCOL` | 主模型协议：`openai`、`gemini` 或 `claude` | `openai` |
+| `LLM_BASE_URL` | OpenAI 兼容或 Claude 接口地址；Claude 可填根地址或以 `/v1` 结尾的地址 | `http://localhost:1234/v1` |
+| `GEMINI_BASE_URL` | Gemini 原生回复和 grounding 的接口地址；留空连接 Google 官方 | （空） |
 | `LLM_MODEL` | 模型名称 | `local-model` |
-| `LLM_API_KEY` | 本地服务一般随便填 | `not-needed` |
+| `LLM_API_KEY` | API key；本地服务一般随便填 | `not-needed` |
 | `LLM_USER_AGENT` | 自定义请求 UA（部分云端网关会校验） | SDK 默认值 |
 | `SYSTEM_PROMPT` | 系统提示词 | 内置默认值 |
 | `MAX_TOKENS` | 单次回答最大 token 数 | `1024` |
+| `LLM_TEMPERATURE` | 采样温度；留空使用后端默认值，后端拒绝时自动去掉 | （空） |
+| `LLM_TOP_P` | 核采样 top_p；留空使用后端默认值，后端拒绝时自动去掉 | （空） |
+| `LLM_EXTRA_BODY` | JSON 对象；OpenAI 兼容与 Claude 原生请求会透传，Gemini 原生忽略 | （空） |
 | `MAX_HISTORY` | 多轮对话保留的消息条数 | `20` |
 | `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
-| `SEARCH_PROVIDER` | 联网搜索源：`tavily` / `duckduckgo` / `searxng`，留空关闭 | （空） |
-| `TAVILY_API_KEY` | Tavily API key（`SEARCH_PROVIDER=tavily` 时必填） | （空） |
-| `SEARXNG_BASE_URL` | SearXNG 实例地址（`SEARCH_PROVIDER=searxng` 时必填） | （空） |
+| `MAX_IMAGES` | 单次请求最多附带的图片数 | `4` |
+| `SEARCH_PROVIDER` | 逗号分隔搜索源：`tavily`、`duckduckgo`、`searxng`、`serper`；留空关闭 | （空） |
+| `TAVILY_API_KEY` | Tavily API key | （空） |
+| `SERPER_API_KEY` | Serper API key | （空） |
+| `SEARXNG_BASE_URL` | SearXNG 实例地址 | （空） |
+| `GEMINI_SEARCH_MODEL` | 混合搜索使用的 Gemini grounding 模型 | （空） |
+| `GEMINI_API_KEY` | Gemini/grounding key；留空复用 `LLM_API_KEY` | （空） |
 | `SEARCH_MAX_RESULTS` | 单次搜索回灌给模型的结果条数 | `5` |
+| `FETCH_CHAR_LIMIT` | 单次 `open_url` 回灌给模型的网页正文字数上限 | `3500` |
+| `JINA_FALLBACK` | 直接提取网页失败时使用 Jina Reader 兜底 | `true` |
+| `JINA_API_KEY` | 可选 Jina API key，用于提高速率限制 | （空） |
 | `ADMIN_USER_IDS` | 超级管理员 ID（逗号分隔），可用命令管理白名单 | （空） |
 | `ALLOWED_USER_IDS` | 白名单初始值，仅首次启动生效 | （空） |
 
@@ -101,11 +114,19 @@ python bot.py
 
 获取自己的用户 ID：私聊 bot 发 `/start`（需有权限），或使用 @userinfobot。建议先把自己的 ID 配置成管理员再启动。
 
-## 接入云端 API / 多模态
+## LLM 协议与云端 API
 
-`LLM_BASE_URL` 可以指向任何 OpenAI 兼容服务，不限于本地模型。例如接入 OpenAI 官方 API：
-重跑 `python configure.py`，接口地址填 `https://api.openai.com/v1`，API Key 填官方 key，
-模型名填官方模型（bot 已兼容官方新模型的 `max_completion_tokens` 参数要求）。
+通过 `LLM_PROTOCOL` 选择主模型协议：
+
+- `openai`（默认）：OpenAI 兼容 `/chat/completions`，地址使用 `LLM_BASE_URL`。
+- `gemini`：通过 google-genai SDK 连接 Gemini 原生接口，地址使用 `GEMINI_BASE_URL`，留空连接 Google 官方。Google Search 和 URL context 在服务端执行，因此不走 bot 自带工具循环。
+- `claude`：Anthropic Messages API 原生协议，地址使用 `LLM_BASE_URL`。保留原生 thinking 块、签名与工具语义，bot 自带搜索工具仍可使用。
+
+`GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 仅用于兼容旧配置；新配置只应设置 `LLM_PROTOCOL`。
+
+接入 OpenAI 官方 API 时，设置 `LLM_PROTOCOL=openai`，并把 `LLM_BASE_URL` 填为 `https://api.openai.com/v1`。bot 会自动兼容新模型要求的 `max_completion_tokens` 参数。
+
+`LLM_TEMPERATURE` 和 `LLM_TOP_P` 均可留空以使用后端默认值。`LLM_EXTRA_BODY` 接受 JSON 对象，可用于 reasoning effort、thinking 等厂商私有字段；OpenAI 兼容和 Claude 原生请求都会透传，Gemini 原生不会使用。后端明确拒绝这些可选参数时，适配器会去掉参数重试，并在当前进程内保持禁用。
 
 模型支持视觉输入时，把 `ENABLE_VISION` 设为 `true`（配置向导第 6 步），即可：
 
@@ -128,6 +149,7 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
 | `tavily` | `TAVILY_API_KEY` | 托管服务，结果为 LLM 优化，质量最好；免费额度约 1000 次/月（[tavily.com](https://tavily.com) 注册） |
 | `duckduckgo` | 无 | 零配置无需 key（走 `ddgs` 包）；稳定性一般，可能被限流 |
 | `searxng` | `SEARXNG_BASE_URL` | 自建元搜索引擎，完全免费、隐私最好；实例需开启 JSON 输出格式 |
+| `serper` | `SERPER_API_KEY` | 托管 Google 搜索结果，可与其他搜索源组合 |
 
 说明：
 
@@ -180,5 +202,5 @@ journalctl -u tgbot -f
 
 - **群里 @ 它没反应**：检查是否关闭了隐私模式（见上文步骤 4），且改完后重新拉群。
 - **模型说自己无法联网**：默认它确实不能。配置 `SEARCH_PROVIDER` 开启联网搜索（见上文「联网搜索」）。
-- **提示调用模型失败**：确认 LLM 服务在运行，`LLM_BASE_URL` 和 `LLM_MODEL` 与服务端一致。
+- **提示调用模型失败**：确认模型服务在运行，并检查所选协议对应的地址和模型：OpenAI/Claude 使用 `LLM_BASE_URL`，Gemini 原生使用 `GEMINI_BASE_URL`，同时确认 `LLM_MODEL`。
 - **多轮对话失忆**：对话历史保存在内存中，bot 重启后会丢失；此时回复 bot 消息仍可继续问，只是只带上 bot 上一条回答作为上下文。

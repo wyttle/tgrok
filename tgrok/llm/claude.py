@@ -1,7 +1,6 @@
 """Claude 原生协议适配器。"""
 
 import asyncio
-import base64
 import logging
 import re
 

@@ -129,8 +129,9 @@ class OpenAIAdapter(BaseAdapter):
     name = "openai"
 
     def __init__(self, client=None):
-        # client 可注入：测试用假对象替换，缺省按 config 构造真实 AsyncOpenAI
-        self.client = client or AsyncOpenAI(..., max_retries=0)   # 参数同现有
+        # client 可注入：测试用假对象替换，缺省按 config 构造真实 AsyncOpenAI。
+        # 用 is not None 判空而非 or：假客户端可能自定义真值
+        self.client = client if client is not None else AsyncOpenAI(..., max_retries=0)
         self.tools_supported = True
         self.sampling_supported = True
         self.extra_body_supported = True
@@ -156,7 +157,7 @@ class ClaudeAdapter(BaseAdapter):
     name = "claude"
 
     def __init__(self, client=None):
-        self.client = client or anthropic.AsyncAnthropic(..., max_retries=0)  # 参数同现有
+        self.client = client if client is not None else anthropic.AsyncAnthropic(..., max_retries=0)
         self.tools_supported = True
         self.sampling_supported = True
         self.extra_body_supported = True
@@ -171,6 +172,12 @@ class ClaudeAdapter(BaseAdapter):
 
 ### 3.5 gemini.py
 
+- **地址语义裁定**：Gemini 原生协议使用 `GEMINI_BASE_URL`，不用 `LLM_BASE_URL`。
+  理由：原生端点与 grounding 共用同一个 genai 客户端与同一地址；中转站的 Gemini
+  原生地址（根地址）与 OpenAI 兼容地址（带 /v1）不同；configure.py 向导与既有
+  profiles 都已按 `GEMINI_BASE_URL` 写档。据此，阶段 1 必须**修正 config.py 中
+  LLM_PROTOCOL 注释里「接口地址统一用 LLM_BASE_URL」的错误表述**为：
+  openai/claude 用 `LLM_BASE_URL`；gemini 用 `GEMINI_BASE_URL`（留空 = Google 官方）。
 - genai 客户端与 `gtypes` 从现 llm.py 顶部搬入，创建条件不变
   （`GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL` 时才 import google.genai 并建客户端）。
   grounding（web.py）与原生适配器共用这里的 `gemini_client` / `gtypes`。
@@ -178,6 +185,8 @@ class ClaudeAdapter(BaseAdapter):
   `gemini_create_stream` + `_drain_gemini_stream`，返回
   `RoundResult(calls={}, content=..., citations=...)`。
 - `to_gemini_contents(history)`（原 `_to_gemini_contents`）留在本模块。
+- `drain_stream(stream, on_text)` 保持模块级函数（只用 getattr 访问 chunk，
+  不依赖 genai 类型，可用假对象直测）。
 
 ### 3.6 结构化错误分类（base.py）
 
@@ -215,13 +224,23 @@ def rejected_param(e, extra_keys=()) -> str | None:
     None               - 不是参数拒绝，调用方应原样抛出
     判定顺序固定如上。规则：
     - 文本含 "thought_signature" 直接返回 None（Gemini 兼容端点的续传错误，含 "tool" 但非参数拒绝）
-    - param 命中（等于参数名或以 "参数名." 开头）即判定，不需要关键词
+    - "sampling" / "extra" / "max_tokens_limit"：param 命中（等于参数名或以 "参数名." 开头）
+      即判定，不需要关键词——这三类的降级动作只是丢弃可选参数或夹紧数值，误判代价温和
+    - "tools" 例外：**即使 param 命中也必须**同时满足「文本含 _REJECT_HINTS 之一」或
+      「error.code 属于 {"unknown_parameter", "unsupported_parameter"}」。
+      因为 param="tools[0].function.parameters..." 的 schema 校验错误（我们自己的工具
+      定义 bug）也会带 tools 前缀的 param，而禁用 tools 的代价是整只搜索功能静默消失，
+      必须要求后端明确表达「不支持」才降级
     - 无 param 时：子串命中 且 文本含任一 _REJECT_HINTS 才判定；
       唯二例外是 "token_param"（"max_completion_tokens" 足够特异）和
       "max_tokens_limit"（需配合数字解析，误报会被"解析不出更小上限"挡住）
     """
     ...
 ```
+
+`token_param` 的适配器侧守卫：只允许从 "max_tokens" 切换到 "max_completion_tokens"
+**一次**——处理时先检查 `self.token_param == "max_tokens"`，不满足则视为未分类、原样
+抛出，防止措辞奇特的后端让降级链在两个参数名之间打转。
 
 各适配器的降级链改为 `kind = base.rejected_param(e, extra_keys=...)` 后按 kind 分发，
 动作不变（粘性置 False / 夹紧 max_tokens / continue 重试），顺序天然由分类器统一。
@@ -302,9 +321,13 @@ if citations and segment.strip():
 
 ### 3.9 web.py
 
-- `from . import llm` 的用法改为：`llm.is_quota_error`；grounding 部分改
-  `from .llm import gemini as llm_gemini` 后用 `llm_gemini.gemini_client` /
-  `llm_gemini.gtypes`（访问时机不变：只有配置了 GEMINI_SEARCH_MODEL 才会走到）。
+- `from . import llm` 的用法改为：`llm.is_quota_error`。grounding 对 genai 的访问
+  **必须留在函数体内**：在 `_search_gemini_grounded` 内部
+  `from .llm import gemini as llm_gemini`，再用 `llm_gemini.gemini_client` /
+  `llm_gemini.gtypes`——不得提升到模块顶部，否则任何协议下 import web 都会加载
+  gemini 模块，破坏「不用 Gemini 就不 import google.genai」的延迟加载性质。
+  该函数只在配置了 GEMINI_SEARCH_MODEL 时到达，函数内 import 的开销可忽略
+  （模块首次加载后走 sys.modules 缓存）。
 - 冷却状态从 config 搬来：删除 config 的 `_gemini_search_blocked_until`，
   在 web.py 模块级加 `_grounding_cooldown_until = 0.0`，读写处加 `global`。
   `GEMINI_SEARCH_COOLDOWN` 常量留在 config。
@@ -352,13 +375,16 @@ def _history_chars(history) -> int:
     return total
 
 def remember(chat_id, message_id, history):
-    # 覆盖同 key 时先扣旧值；随后按「条数超限或总量超预算」从最旧开始驱逐，
+    # 覆盖同 key 时先扣旧值，写入后必须 conversations.move_to_end(key)——
+    # OrderedDict 对已存在 key 的赋值不改变位置，不挪到队尾的话刚更新的对话
+    # 仍会以「最旧」身份被驱逐；随后按「条数超限或总量超预算」从最旧开始驱逐，
     # 但至少保留刚插入的这条（单条超预算也不驱逐自己）
 ```
 
 驱逐循环条件：`while len(conversations) > 1 and (len(conversations) > CONVERSATION_CACHE_SIZE
 or _conv_total > CONVERSATION_CONTENT_BUDGET)`，弹出最旧 key 时同步扣 `_conv_sizes` 与
-`_conv_total`。
+`_conv_total`。tg.py 以 `from .config import CONVERSATION_CONTENT_BUDGET` 方式引入常量，
+使测试可以在 tg 模块上临时调小（见阶段 4 用例要求），用完还原。
 
 ## 4. 分阶段执行计划
 
@@ -379,11 +405,20 @@ or _conv_total > CONVERSATION_CONTENT_BUDGET)`，弹出最旧 key 时同步扣 `
 3. 建 `tgrok/llm/claude.py`：`ClaudeAdapter`（3.4），同上。
 4. 建 `tgrok/llm/gemini.py`：genai 客户端 + `GeminiAdapter`（3.5）。
 5. 建 `tgrok/llm/__init__.py`（3.7），删除旧 `tgrok/llm.py`。
-6. 改 `chat.py`（3.8 单循环）与 `web.py`（3.9，含冷却状态迁移）。
+6. 改 `chat.py`（3.8 单循环）与 `web.py`（3.9，含冷却状态迁移与函数内延迟 import）；
+   修正 config.py 中 LLM_PROTOCOL 注释的地址表述（见 3.5 的地址语义裁定）。
 7. 按第 6 节对照表适配 `tests/smoke_test.py`：只改打桩目标与 import 路径，
-   断言语义不得删弱。
+   断言语义不得删弱。测试文件头部把 `os.environ.setdefault` 换成**强制赋值**
+   `os.environ["LLM_PROTOCOL"] = "openai"`（config 会 load_dotenv，本地 .env 或
+   shell 里残留的协议设置不得影响套件对默认适配器的假设）。
+8. 补 Gemini 主链的两个用例（现套件对 Gemini 原生零覆盖）：
+   - chat 层：把 `llm.adapter` 临时换成 `supports_tool_loop=False`、返回
+     `RoundResult(content=..., citations=[...])` 的桩适配器，跑 `chat.stream_reply`，
+     断言只执行一轮、最终输出末尾带「来源」链接行；
+   - llm 层：用假 chunk 对象直调 `gemini.drain_stream`，断言正文透传、
+     grounding 引用按 uri 去重。
 
-验收：`python tests/smoke_test.py` 22 项全过；
+验收：`python tests/smoke_test.py` 24 项全过；
 `grep -n "GEMINI_NATIVE_SEARCH\|CLAUDE_NATIVE" tgrok/chat.py` 无结果
 （chat 不再感知具体协议）；`tgrok/llm.py` 文件已不存在。
 
@@ -398,20 +433,21 @@ base.py 加 `error_text` / `error_param` / `rejected_param`（3.6），三个适
   `body=None` 的 BadRequestError，断言 `rejected_param` 返回 None（业务 400 不得
   触发 tools 粘性禁用）。
 
-验收：24 项全过。
+验收：26 项全过。
 
 ### 阶段 3：配置归位
 
-按 3.10 迁移 SYSTEM_PROMPT 读取（None 哨兵语义）。验收：24 项全过；
+按 3.10 迁移 SYSTEM_PROMPT 读取（None 哨兵语义）。验收：26 项全过；
 `grep -rn "os.getenv" tgrok/ --include="*.py"` 只在 config.py 有结果。
 
 ### 阶段 4：对话缓存内容量预算
 
-按 3.11 实施。新增回归用例：往 `tg.remember` 塞入多条含大 content 的历史，断言
+按 3.11 实施。新增回归用例：往 `tg.remember` 塞入多条含大 content 的历史
+（把 `tg.CONVERSATION_CONTENT_BUDGET` 临时调成很小的值以便触发，结束后还原），断言
 超预算后最旧条目被驱逐、`_conv_total` 与逐条重算结果一致、单条超大历史自身不被驱逐、
-覆盖同 key 不重复计数。
+覆盖同 key 不重复计数、**覆盖同 key 后该条排到队尾**（不会紧接着被当最旧驱逐）。
 
-验收：25 项全过。
+验收：27 项全过。
 
 ### 阶段 5：文档同步
 
@@ -473,3 +509,21 @@ base.py 加 `error_text` / `error_param` / `rejected_param`（3.6），三个适
 4. **误禁 tools 防护**：降级判定升级为 param 精确匹配优先 + 文本回退需命中拒绝措辞
    关键词；关键词表明确排除 "unexpected"（Anthropic 的 tool_use/tool_result 配对类
    业务 400 含该词），并新增反向回归用例锁住这条边界。
+
+第二轮评审的五项裁定：
+
+5. **Gemini 地址语义**：原生协议用 `GEMINI_BASE_URL`（与 grounding 共用客户端与端点，
+   向导与既有 profiles 已按此写档）；config.py 的 LLM_PROTOCOL 注释中「地址统一用
+   LLM_BASE_URL」是错误表述，阶段 1 修正为按协议区分。
+6. **tools 类别收紧**：param 命中不再免检——schema 校验错误的 param 也带 tools 前缀，
+   而禁用 tools 代价最高；必须叠加拒绝措辞或 error.code ∈
+   {unknown_parameter, unsupported_parameter}。`token_param` 增加「仅允许从
+   max_tokens 切换一次」守卫。
+7. **Gemini 主链补测**：阶段 1 增加 chat 层（桩适配器 + citations 输出）与 llm 层
+   （drain_stream 假 chunk 去重）两个用例；web.py 对 gemini 模块的 import 必须留在
+   grounding 函数体内，保住延迟加载。
+8. **缓存覆盖语义**：同 key 覆盖后必须 `move_to_end`（OrderedDict 赋值不改位置，
+   否则刚更新的对话会被当最旧驱逐）；预算用例通过临时调小
+   `tg.CONVERSATION_CONTENT_BUDGET` 触发驱逐。
+9. **测试环境加固**：套件头部对 `LLM_PROTOCOL` 用强制赋值而非 setdefault（防本地
+   .env/shell 残留干扰）；适配器构造器判空用 `is not None`，不用 `or`。

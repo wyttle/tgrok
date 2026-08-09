@@ -22,6 +22,7 @@ from .config import (
 from .i18n import t
 
 logger = logging.getLogger(__name__)
+_grounding_cooldown_until = 0.0
 
 # 共享 HTTP 连接池：搜索/抓取复用连接，省掉每次请求的 TLS 握手。
 # 进程常驻，不显式关闭；超时在每次请求上单独指定。
@@ -133,19 +134,22 @@ async def _search_gemini_grounded(query: str) -> str | None:
     返回带来源链接的事实综述文本；失败返回 None（调用方回退普通搜索源），
     429 配额超限进入冷却期。
     """
-    if time.monotonic() < config._gemini_search_blocked_until[0]:
+    global _grounding_cooldown_until
+    from .llm import gemini as llm_gemini
+
+    if time.monotonic() < _grounding_cooldown_until:
         return None
-    tools = [llm.gtypes.Tool(google_search=llm.gtypes.GoogleSearch())]
+    tools = [llm_gemini.gtypes.Tool(google_search=llm_gemini.gtypes.GoogleSearch())]
     try:
-        tools.append(llm.gtypes.Tool(url_context=llm.gtypes.UrlContext()))
+        tools.append(llm_gemini.gtypes.Tool(url_context=llm_gemini.gtypes.UrlContext()))
     except AttributeError:
         pass
     logger.info("Gemini grounding 检索 (%s): %s", config.GEMINI_SEARCH_MODEL, query)
     try:
-        resp = await llm.gemini_client.aio.models.generate_content(
+        resp = await llm_gemini.gemini_client.aio.models.generate_content(
             model=config.GEMINI_SEARCH_MODEL,
             contents=query,
-            config=llm.gtypes.GenerateContentConfig(
+            config=llm_gemini.gtypes.GenerateContentConfig(
                 system_instruction=(
                     "你是检索助手。用搜索工具核实查询内容，简洁列出相关的最新事实要点，"
                     "逐条尽量注明日期；只给事实，不要评论。用查询本身的语言回答。"
@@ -155,8 +159,8 @@ async def _search_gemini_grounded(query: str) -> str | None:
             ),
         )
     except Exception as e:
-        if llm._is_quota_error(e):
-            config._gemini_search_blocked_until[0] = time.monotonic() + GEMINI_SEARCH_COOLDOWN
+        if llm.is_quota_error(e):
+            _grounding_cooldown_until = time.monotonic() + GEMINI_SEARCH_COOLDOWN
             logger.warning(
                 "Gemini grounding 配额超限（429），%.0f 分钟内回退自带搜索源",
                 GEMINI_SEARCH_COOLDOWN / 60,

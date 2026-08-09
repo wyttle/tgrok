@@ -64,7 +64,7 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
     merge_search = bool(config.GEMINI_SEARCH_MODEL) and len(search_calls) > 1
     merged_search_entry: dict | None = None
     for call in calls_list:
-        args = llm._tool_args(call) or {}
+        args = llm.tool_args(call) or {}
         if call["function"]["name"] == "open_url":
             if open_entry is None:
                 open_entry = {"kind": "open", "count": 0, "contents": [],
@@ -75,7 +75,7 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
         elif merge_search:
             if merged_search_entry is None:
                 queries = "；".join(
-                    str((llm._tool_args(c) or {}).get("query", "")).strip() or "?" for c in search_calls
+                    str((llm.tool_args(c) or {}).get("query", "")).strip() or "?" for c in search_calls
                 )
                 merged_search_entry = {"kind": "search", "count": len(search_calls), "contents": [],
                                        "text": t("tool_search", q=queries[:48]),
@@ -156,7 +156,7 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
         queries = []
         for i, call in enumerate(calls_list):
             if call["function"]["name"] != "open_url":
-                query = str((llm._tool_args(call) or {}).get("query", "")).strip()
+                query = str((llm.tool_args(call) or {}).get("query", "")).strip()
                 if query:
                     if first_search_i is None:
                         first_search_i = i
@@ -166,7 +166,7 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
 
     async def run_one(i: int, call: dict) -> dict:
         name = call["function"]["name"]
-        args = llm._tool_args(call)
+        args = llm.tool_args(call)
         if args is None:
             content = t("search_bad_args")
         elif name == "open_url":
@@ -324,43 +324,13 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
     generation_completed = False
     try:
-        if config.GEMINI_NATIVE_SEARCH:
-            # 原生模式：google_search/url_context 由 Google 服务端执行，单轮生成，
-            # 重试/掐流/空闲语义与 OpenAI 路径一致
-            citations: list[dict] = []
-            t0 = time.monotonic()
-            for attempt in range(2):
-                out_before = len(finalized) + len(segment.strip())
-                t0 = time.monotonic()
-                try:
-                    stream = await llm.gemini_create_stream(working)
-                    citations, _ = await llm._drain_gemini_stream(stream, on_text)
-                    break
-                except Exception as e:
-                    elapsed = time.monotonic() - t0
-                    if len(finalized) + len(segment.strip()) != out_before:
-                        logger.warning(
-                            "Gemini 流中断但正文已到手（%.1fs, %s），按完成处理",
-                            elapsed, type(e).__name__,
-                        )
-                        break
-                    if attempt or llm._is_quota_error(e):
-                        raise
-                    logger.warning(
-                        "Gemini 流中断且无输出（%.1fs, %s），重试一次", elapsed, type(e).__name__
-                    )
-                    await asyncio.sleep(1.5)
-            logger.info(
-                "Gemini 原生轮完成 %.1fs：正文 %d 字，引用 %d 条",
-                time.monotonic() - t0, len(finalized) + len(segment), len(citations),
-            )
-            if citations and segment.strip():
-                links = "\n".join(f"[{c['title']}]({c['uri']})" for c in citations[:5])
-                segment += "\n\n" + t("sources") + "\n" + links
-        rounds = 0 if config.GEMINI_NATIVE_SEARCH else config.SEARCH_MAX_ROUNDS + 1
+        adapter = llm.adapter
+        citations: list[dict] = []
+        rounds = config.SEARCH_MAX_ROUNDS + 1 if adapter.supports_tool_loop else 1
         for round_idx in range(rounds):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
-            use_tools = config.SEARCH_ENABLED and round_idx < config.SEARCH_MAX_ROUNDS
+            use_tools = (config.SEARCH_ENABLED and adapter.supports_tool_loop
+                         and round_idx < config.SEARCH_MAX_ROUNDS)
             if round_idx and not segment.strip():
                 # 工具执行完、新一轮生成开始：底部状态行原地替换为下一档思考阶段
                 stage = _stage_line(round_idx)
@@ -370,8 +340,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                 out_before = len(finalized) + len(segment.strip())
                 t0 = time.monotonic()
                 try:
-                    stream = await llm.create_stream(working, use_tools=use_tools)
-                    calls, content = await llm._drain_stream(stream, on_text)
+                    result = await adapter.run_round(working, use_tools, on_text)
                     break
                 except Exception as e:
                     elapsed = time.monotonic() - t0
@@ -381,9 +350,9 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                             "LLM 流中断但正文已到手（round=%d, %.1fs, %s），按完成处理",
                             round_idx, elapsed, type(e).__name__,
                         )
-                        calls, content = {}, segment
+                        result = llm.RoundResult(content=segment)
                         break
-                    if attempt or llm._is_quota_error(e):
+                    if attempt or llm.is_quota_error(e):
                         raise
                     logger.warning(
                         "LLM 流中断且本轮无输出（round=%d, %.1fs, %s），重试一次",
@@ -391,12 +360,15 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                     )
                     await asyncio.sleep(1.5)
             logger.info(
-                "LLM round=%d 完成 %.1fs：正文 %d 字，工具请求 %d 项",
-                round_idx, time.monotonic() - t0, len(content), len(calls),
+                "LLM round=%d 完成 %.1fs：正文 %d 字，工具请求 %d 项，引用 %d 条",
+                round_idx, time.monotonic() - t0, len(result.content), len(result.calls),
+                len(result.citations),
             )
-            if not calls or not use_tools:
+            if result.citations:
+                citations = result.citations
+            if not result.calls or not use_tools:
                 break
-            assistant_msg = llm._assistant_tool_call_msg(calls, content)
+            assistant_msg = llm.assistant_tool_call_msg(result.calls, result.content)
             # 追加本轮工具条目（同轮多个网页读取合并为一行）；执行期间底部状态行
             # 撤下，完成后挂上缩进的结果行，下一轮的思考阶段行再顶上
             stage = None
@@ -406,8 +378,11 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             working.append(assistant_msg)
             tool_results = await _execute_tool_calls(assistant_msg)
             working.extend(tool_results)
-            for entry, call, result in zip(call_map, assistant_msg["tool_calls"], tool_results):
-                _attach_result(entry, call, result["content"])
+            for entry, call, result_msg in zip(call_map, assistant_msg["tool_calls"], tool_results):
+                _attach_result(entry, call, result_msg["content"])
+        if citations and segment.strip():
+            links = "\n".join(f"[{c['title']}]({c['uri']})" for c in citations[:5])
+            segment += "\n\n" + t("sources") + "\n" + links
     except asyncio.CancelledError:
         # 提问者/管理员点了取消按钮：保留已有正文并标注，未输出则改为已取消
         if task is not None and hasattr(task, "uncancel"):
@@ -423,7 +398,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         return None, ""
     except Exception as e:
         logger.exception("调用 LLM 失败")
-        fail_text = t("llm_quota") if llm._is_quota_error(e) else t("llm_failed")
+        fail_text = t("llm_quota") if llm.is_quota_error(e) else t("llm_failed")
         try:
             if segment.strip():
                 # 已有部分内容：保留定稿，错误另发一条

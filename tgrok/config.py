@@ -82,7 +82,7 @@ JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率
 #            bot 自带工具循环不再使用；LLM_API_KEY 填 AI Studio key）
 #   claude = Anthropic Messages API 原生（anthropic SDK，原生 thinking 与工具语义，
 #            bot 自带工具循环照常可用）
-# 接口地址统一用 LLM_BASE_URL；留空 = 各协议的官方端点
+# openai/claude 用 LLM_BASE_URL；gemini 用 GEMINI_BASE_URL（留空 = Google 官方）
 LLM_PROTOCOL = os.getenv("LLM_PROTOCOL", "").strip().lower()
 if not LLM_PROTOCOL:
     # 兼容布尔开关时代的旧键
@@ -110,7 +110,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or LLM_API_KEY
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip().rstrip("/")
 # grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
 GEMINI_SEARCH_COOLDOWN = 600.0
-_gemini_search_blocked_until = [0.0]
 
 
 def _provider_ready(p: str) -> bool:

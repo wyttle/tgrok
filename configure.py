@@ -120,6 +120,7 @@ TEXT = {
         "p_name_ask": "配置档名称（字母/数字/下划线/短横线，如 relay、gemini）",
         "p_bad_name": "名称不合法，只能用字母、数字、下划线、短横线（1-32 字符）",
         "p_applied": "成功： 已启用配置档：{name}",
+        "p_synced": "成功： 修改已同步到配置档：{name}",
         "p_backup": "  原 .env 已备份为 {path}",
         "p_use_now": "立即启用该配置档？",
         "p_del_confirm": "确认删除配置档「{name}」？",
@@ -220,6 +221,7 @@ TEXT = {
         "p_name_ask": "Profile name (letters/digits/underscore/dash, e.g. relay, gemini)",
         "p_bad_name": "Invalid name: letters, digits, underscore, dash only (1-32 chars)",
         "p_applied": "Success: Activated profile: {name}",
+        "p_synced": "Success: Changes synced to profile: {name}",
         "p_backup": "  Previous .env backed up as {path}",
         "p_use_now": "Activate this profile now?",
         "p_del_confirm": "Delete profile \"{name}\"?",
@@ -439,6 +441,16 @@ def activate_profile(env_path: Path, name: str) -> None:
     env_path.write_bytes(src.read_bytes())
     print(T["p_applied"].format(name=name))
     offer_restart()
+
+
+def sync_profile(env_path: Path, name: str | None) -> None:
+    """编辑当前 .env 后写回它对应的配置档，否则切换配置档时修改会被旧档覆盖丢失。"""
+    if not name or not env_path.exists():
+        return
+    ppath = PROFILES_DIR / f"{name}.env"
+    if ppath.exists() and ppath.read_bytes() != env_path.read_bytes():
+        ppath.write_bytes(env_path.read_bytes())
+        print(T["p_synced"].format(name=name))
 
 
 def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile: bool = False) -> None:
@@ -735,7 +747,9 @@ def main() -> None:
         if raw in ("", "0", "q", "quit", "exit"):
             return
         if raw == "1":
+            act = active_profile(env_path)  # 编辑前记下当前对应的配置档，写完 .env 同步回去
             run_wizard(env_path, load_existing(env_path), can_check, lang)
+            sync_profile(env_path, act)
             offer_restart()
         elif raw == "2":
             name = pick_profile(env_path, T["p_pick_use"])

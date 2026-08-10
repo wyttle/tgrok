@@ -445,6 +445,29 @@ finally:
     tg.CONVERSATION_CONTENT_BUDGET = _saved_conv_budget
 ok("对话缓存内容预算/覆盖会计")
 
+# 28. 工具轮草稿不并入终稿：请求了工具的轮次正文被丢弃；终轮空手时回用草稿兜底
+rounds28 = {"n": 0}
+async def cs28(h, use_tools):
+    rounds28["n"] += 1
+    if rounds28["n"] == 1:
+        return stream_of([chunk_text("草稿正文。"), chunk_tool(0, "web_search", {"query": "q"})])
+    return stream_of([chunk_text("终稿正文。")])
+set_create(cs28)
+async def fake_search28(q): return "[1] r\nu\ns"
+web.run_web_search = fake_search28
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "终稿正文。", ans
+rounds28["n"] = 0
+async def cs28b(h, use_tools):
+    rounds28["n"] += 1
+    if rounds28["n"] == 1:
+        return stream_of([chunk_text("唯一草稿"), chunk_tool(0, "web_search", {"query": "q"})])
+    return stream_of([])
+set_create(cs28b)
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "唯一草稿", ans
+ok("工具轮草稿丢弃/兜底")
+
 llm.adapter = orig_adapter
 
 print(f"\nall {PASS} checks passed")

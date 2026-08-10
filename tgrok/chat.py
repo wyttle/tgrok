@@ -326,6 +326,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     try:
         adapter = llm.adapter
         citations: list[dict] = []
+        draft_fallback = ""  # 工具轮被丢弃的草稿，终轮空手时兜底回用
         rounds = config.SEARCH_MAX_ROUNDS + 1 if adapter.supports_tool_loop else 1
         for round_idx in range(rounds):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
@@ -368,6 +369,13 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                 citations = result.citations
             if not result.calls or not use_tools:
                 break
+            if segment.strip():
+                # 模型这一轮边写正文边请求工具（思考型模型常见：先写一版分析再搜索验证）：
+                # 这段正文只是过程草稿，工具结果回来后模型会重写完整回答，保留会造成
+                # 草稿+终稿拼接重复。丢弃并清空流式缓冲——已发出的中间编辑会被后续
+                # 轮次的内容原地覆盖；超长草稿已定稿分段的部分无法撤回，属可接受损耗
+                draft_fallback = segment
+                segment = ""
             assistant_msg = llm.assistant_tool_call_msg(result.calls, result.content)
             # 追加本轮工具条目（同轮多个网页读取合并为一行）；执行期间底部状态行
             # 撤下，完成后挂上缩进的结果行，下一轮的思考阶段行再顶上
@@ -417,6 +425,9 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             active_generations.pop(gen_id, None)
 
     try:
+        if not segment.strip() and draft_fallback:
+            # 终轮没有产出正文：回用最后一轮被丢弃的草稿，别让用户空手而归
+            segment = draft_fallback
         if segment.strip():
             await push(segment, final=True)
             finalized += segment

@@ -62,7 +62,8 @@ def _line(r: dict) -> str:
 
 def memory_block(chat_id: int) -> str:
     """注入给模型的记忆附注；没有记忆或未开启时返回空串。
-    摘要最多占 MEMORY_MAX_CHARS 的一半，剩余额度从最新往旧填最近问答。"""
+    摘要最多占 MEMORY_MAX_CHARS 的一半，剩余额度从最新往旧填最近的提问。
+    只放「谁问了什么」、不放 bot 当时的回答：带着旧回答原文，模型容易顺着把旧话题再讲一遍。"""
     if not config.MEMORY_ENABLED:
         return ""
     entry = _store.get(str(chat_id))
@@ -72,7 +73,7 @@ def memory_block(chat_id: int) -> str:
     digest = entry.get("digest", "")[: budget // 2]
     used, lines = len(digest), []
     for r in reversed(entry.get("recent", [])):
-        line = _line(r)
+        line = t("memory_brief_line", who=r["who"], q=r["q"])
         if used + len(line) > budget:
             break
         lines.append(line)
@@ -92,7 +93,7 @@ def record(chat_id: int, who: str, question: str, answer: str) -> None:
         return
     key = str(chat_id)
     entry = _store.setdefault(key, {"digest": "", "recent": []})
-    entry["recent"].append({"who": _clip(who, 32), "q": _clip(question, Q_CHARS),
+    entry["recent"].append({"who": _clip(who, 64), "q": _clip(question, Q_CHARS),
                             "a": _clip(answer, A_CHARS), "t": int(time.time())})
     del entry["recent"][:-RECENT_HARD_CAP]
     _save()

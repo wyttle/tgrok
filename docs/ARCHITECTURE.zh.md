@@ -7,7 +7,7 @@ Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主
 ```text
 bot.py                 入口（python bot.py），只做 from tgrok.tg import main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py    40 项冒烟和回归测试（无需网络与真实 Telegram）
+tests/smoke_test.py    41 项冒烟和回归测试（无需网络与真实 Telegram）
 tgrok/
 |-- config.py          环境变量解析、常量、日志与时区初始化
 |-- i18n.py            全部界面和提示词文案，以及 t()
@@ -109,7 +109,7 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 - 网页正文提取运行在独立进程，避免 trafilatura 和 lxml 的 CPU 工作阻塞事件循环。
 - 气泡更新单飞且在后台执行：占位、中间编辑和进度渲染同一时刻最多一个在途请求，流消费不等待 Telegram 往返或限流退避，编辑的网络错误只丢该次显示、不打断生成。定稿、取消和报错前先等在途编辑落地，避免旧编辑覆盖新内容。占位消息发送失败（如 bot 被踢出群）会取消本次生成。
 - 相册多图并发下载。
-- 回复 bot 的任一段消息（带不带 @ 都算）即为追问，接上缓存的历史；群聊里每条 user 消息带说话人名字，多人接力追问时模型分得清谁在问。历史过期时把 bot 那条回复并入本轮 user 消息，不伪造 assistant 轮；`trim_history` 截断后从 user 开始，满足严格交替的接口和本地模型对话模板。
+- 回复 bot 的任一段消息（带不带 @ 都算）即为追问，接上缓存的历史；群聊里每条 user 消息、被引用消息的作者和记忆里的说话人都标成「名字（@用户名，id）」，同名的人靠唯一 id 区分，系统提示词附带一句约定：回复时只用名字称呼，不念 id、不写 @用户名。历史过期时把 bot 那条回复并入本轮 user 消息，不伪造 assistant 轮；`trim_history` 截断后从 user 开始，满足严格交替的接口和本地模型对话模板。
 - 只订阅 `message` 和 `callback_query` 更新：编辑旧消息不会触发重复回答。
 - grounding 被视为调研代理。同轮多个 `web_search` 会合并为一个综合任务，减少重复调用。
 - 进度显示使用纯文本和缩进，不向群成员展示 URL。
@@ -124,7 +124,7 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 - `tg_auth.allowed_users`：运行时白名单。
 - `tg.conversations`、`tg._conv_sizes`、`tg._conv_total`：对话历史及近似内容字符预算会计。
 - `tg.album_cache`：相册聚合缓存。
-- `memory._store`：每个聊天的记忆摘要和最近问答，写入 `MEMORY_FILE`（原子替换）；注入块总字数不超过 `MEMORY_MAX_CHARS`，摘要最多占一半。记忆只注入一段对话的首条 user 消息，追问前缀字节不变，不影响 prompt 缓存。压缩期间被 `/forget` 清空时不写回结果。
+- `memory._store`：每个聊天的记忆摘要和最近问答，写入 `MEMORY_FILE`（原子替换）。注入块总字数不超过 `MEMORY_MAX_CHARS`，摘要最多占一半；最近问答只注入「谁问了什么」，不带 bot 的旧回答，附注要求模型默认忽略、只在相关时用，避免旧话题喧宾夺主。完整问答只交给压缩摘要的那次调用。记忆只注入一段对话的首条 user 消息，追问前缀字节不变，不影响 prompt 缓存。压缩期间被 `/forget` 清空时不写回结果。
 
 ## 配置
 
@@ -132,5 +132,5 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：40 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩和清空，以及贴纸和无字图片的回复。
+- `python tests/smoke_test.py`：41 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩和清空、贴纸和无字图片的回复，以及同名用户按 id 区分。
 - 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。

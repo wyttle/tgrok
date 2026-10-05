@@ -85,8 +85,8 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_FALLBACK_PROTOCOL` / `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` | fallback protocol, endpoint, and key; empty = same as the primary model | (empty) |
 | `LLM_FALLBACK_EXTRA_BODY` | extra request params for the fallback model (not inherited from `LLM_EXTRA_BODY`) | (empty) |
 | `MAX_HISTORY` | messages kept per conversation | `20` |
-| `MEMORY_ENABLED` | per-chat long-term memory (digest + recent Q&A injected into new conversations) | `true` |
-| `MEMORY_MAX_CHARS` | max characters of memory injected per conversation; the digest uses at most half | `1200` |
+| `MEMORY_ENABLED` | per-chat long-term memory (digest + recent questions injected into new conversations as background) | `true` |
+| `MEMORY_MAX_CHARS` | max characters of memory injected per conversation; the digest uses at most half | `800` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `MAX_IMAGES` | images attached per request | `4` |
 | `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
@@ -120,7 +120,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `/memory` | show this chat's memory (admins; anyone authorized in a private chat) |
 | `/forget` | clear this chat's memory (same permissions) |
 
-Memory is stored in `memory.json` next to the whitelist file (`/data` in Docker). Each new conversation starts with the chat's memory as a system note: a model-written digest (people, ongoing topics, agreements, preferences, running jokes; no passwords, keys, or contact details) plus the newest Q&A that fit the budget. Follow-ups reuse the same history, so memory is injected once per conversation. Every time six raw exchanges pile up, the model folds the older ones into the digest in the background (one short extra call, using the fallback model if the primary fails).
+Memory is stored in `memory.json` next to the whitelist file (`/data` in Docker). Each new conversation starts with the chat's memory as a background note: a model-written digest (who people are, what they want from the bot, agreements, running jokes; no one-off topics, passwords, keys, or contact details) plus the newest questions (who asked what, without the bot's old answers) that fit the budget. The note tells the model to ignore it unless someone asks about the past or the current question depends on it, so the bot doesn't drag old topics into new answers. Follow-ups reuse the same history, so memory is injected once per conversation. Every time six raw exchanges pile up, the model folds the older ones into the digest in the background (one short extra call on the primary model, falling back to the fallback model if it fails).
 
 In groups you can also **reply to someone's message** with `/adduser` / `/deluser` — no need
 to look up their ID.

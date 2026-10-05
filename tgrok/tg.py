@@ -80,6 +80,15 @@ def trim_history(history: list[dict]) -> list[dict]:
     start = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
     return [history[0]] + tail[start:]
 
+
+def person_label(user) -> str:
+    """给模型看的说话人标识：名字 + @用户名（有的话）+ 数字 id。
+    昵称可以重名、随时改，id 唯一不变，模型和记忆靠它区分同名的人。"""
+    if user.username:
+        return t("person_label_handle", name=user.full_name, username=user.username, uid=user.id)
+    return t("person_label", name=user.full_name, uid=user.id)
+
+
 def extract_question(msg: Message, bot_username: str) -> str:
     """去掉文本中对 bot 的 @提及，返回剩余的提问内容。"""
     text = msg.text or msg.caption or ""
@@ -128,7 +137,7 @@ def quoted_context(msg: Message) -> str | None:
     content = replied.text or replied.caption or media_note(replied)
     if not content:
         return None
-    author = replied.from_user.full_name if replied.from_user else t("someone")
+    author = person_label(replied.from_user) if replied.from_user else t("someone")
     return t("quoted_msg", author=author, content=content)
 
 
@@ -267,7 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # 群里多人可以轮流接着同一段对话聊：每条 user 消息都带上说话人，模型才分得清谁在问
     def speaker(text: str) -> str:
-        return text if is_private else t("question_from", name=msg.from_user.full_name, question=text)
+        return text if is_private else t("question_from", name=person_label(msg.from_user), question=text)
 
     def with_memory(text: str) -> str:
         # 记忆只在一段对话的第一条 user 消息里注入一次：之后的追问沿用同一份历史，
@@ -309,7 +318,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         own_image = bool(images) and not context_text
         user_content = question or note or (t("look_image") if own_image else t("comment_default"))
         if context_text:
-            user_content = context_text + "\n\n" + t("question_from", name=msg.from_user.full_name, question=user_content)
+            user_content = context_text + "\n\n" + t("question_from", name=person_label(msg.from_user), question=user_content)
         else:
             user_content = speaker(user_content)
         history = [
@@ -325,7 +334,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         full = history + [{"role": "assistant", "content": answer}]
         for message_id in answer_ids:
             remember(msg.chat_id, message_id, full)
-        memory.record(msg.chat_id, msg.from_user.full_name, topic, answer)
+        memory.record(msg.chat_id, person_label(msg.from_user), topic, answer)
     else:
         logger.warning("未产生回复 chat=%s user=%s", msg.chat_id, msg.from_user.id)
 

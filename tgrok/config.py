@@ -191,11 +191,11 @@ ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace("，",
 ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace("，", ",").split(",") if x.strip()}
 
 WHITELIST_FILE = Path(os.getenv("WHITELIST_FILE", str(Path(__file__).with_name("allowed_users.json"))))
-# 长期记忆：每个群/私聊一份「记忆摘要 + 最近几轮问答」，新对话开头注入给模型。
-# MEMORY_MAX_CHARS 是注入内容的总字数上限（摘要最多占一半，其余给最近问答），
+# 长期记忆：每个群/私聊一份「记忆摘要 + 最近几轮问答」，新对话开头作为背景注入给模型。
+# MEMORY_MAX_CHARS 是注入内容的总字数上限（摘要最多占一半，其余给最近的提问），
 # 控制每次请求多花的 token；摘要由模型定期把旧问答压缩而成。默认存到白名单文件旁边
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
-MEMORY_MAX_CHARS = int(os.getenv("MEMORY_MAX_CHARS", "1200"))
+MEMORY_MAX_CHARS = int(os.getenv("MEMORY_MAX_CHARS", "800"))
 MEMORY_FILE = Path(os.getenv("MEMORY_FILE", str(WHITELIST_FILE.with_name("memory.json"))))
 BOT_LANG = os.getenv("BOT_LANG", "zh").strip().lower()
 if BOT_LANG not in ("zh", "en"):

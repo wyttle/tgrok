@@ -8,6 +8,8 @@ from .i18n import STRINGS, t
 
 SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
                  if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
+# 说话人标识的约定：用 id 区分同名的人，回复里只用名字
+SYSTEM_PROMPT += "\n\n" + t("speaker_note")
 if config.LLM_PROTOCOL != "gemini":
     # Gemini 原生不走 bot 的工具循环；其余协议都会挂载 calculate
     SYSTEM_PROMPT += "\n\n" + t("calc_system_prompt")

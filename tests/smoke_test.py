@@ -724,7 +724,7 @@ ok("备用模型配置继承")
 # 39. 长期记忆：注入内容受总字数预算限制、保留最新问答且按时间顺序；攒够条数后台压缩进摘要并持久化
 from tgrok import memory  # noqa: E402
 _saved_budget = config.MEMORY_MAX_CHARS
-config.MEMORY_MAX_CHARS = 600  # 每条问答约 250 字：只放得下最新两条
+config.MEMORY_MAX_CHARS = 200  # 每条提问约 90 字：只放得下最新两条
 memory._store.clear()
 summaries = []
 class _SummaryAdapter:
@@ -744,6 +744,7 @@ async def memory_case():
     body = block.split("\n", 1)[1]
     assert len(body) <= config.MEMORY_MAX_CHARS, len(body)
     assert "群友4" in block and "群友3" in block and "群友2" not in block  # 预算不够时丢最旧的
+    assert "回答4" not in block  # 只注入谁问了什么，不带旧回答，免得模型顺着旧话题讲
     assert block.index("群友3") < block.index("群友4")  # 时间顺序
     assert memory.memory_block(-2) == ""
     # 第 6 条触发后台压缩：主模型失败时用备用模型；压缩期间新增的问答不会被吞掉
@@ -813,6 +814,24 @@ try:
 finally:
     tg.stream_reply, tg.ENABLE_VISION = _orig_reply, _orig_vision
 ok("贴纸/无字图片回复")
+
+# 41. 两个同名的人：模型看到的说话人标识和记进记忆的都带各自的 id，不会混成一个人
+from telegram import MessageEntity as _Entity  # noqa: E402
+tg.allowed_users.update({1001, 1002})
+_ming_a, _ming_b = _User(1001, "小明", False, username="ming_a"), _User(1002, "小明", False)
+tg.stream_reply = _fake_reply40
+try:
+    for _i, _u in enumerate((_ming_a, _ming_b)):
+        _m = _Message(20 + _i, _now, _chat, from_user=_u, text="@bot 我是谁",
+                      entities=[_Entity(_Entity.MENTION, 0, 4)])
+        run(tg.handle_message(types.SimpleNamespace(effective_message=_m), _ctx40))
+    _texts41 = [h[-1]["content"] for h in _captured40[-2:]]
+    assert "id 1001" in _texts41[0] and "@ming_a" in _texts41[0] and "id 1002" not in _texts41[0]
+    assert "id 1002" in _texts41[1] and "id 1001" not in _texts41[1].split("\n\n")[-2]
+finally:
+    tg.stream_reply = _orig_reply
+    tg.allowed_users.difference_update({1001, 1002})
+ok("同名用户按 id 区分")
 
 llm.adapter = orig_adapter
 

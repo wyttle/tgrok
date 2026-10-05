@@ -6,28 +6,38 @@ import logging
 import re
 
 from .. import config
-from ..config import (
-    GEMINI_API_KEY, GEMINI_BASE_URL, GEMINI_NATIVE_SEARCH, GEMINI_SEARCH_MODEL,
-    LLM_MODEL, MAX_TOKENS,
-)
+from ..config import GEMINI_API_KEY, GEMINI_BASE_URL, GEMINI_NATIVE_SEARCH, GEMINI_SEARCH_MODEL, MAX_TOKENS
 from .base import BaseAdapter, RoundResult
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
 
-if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL:
-    from google import genai as _genai
-    from google.genai import types as gtypes
+_genai = None
+gtypes = None
 
-    gemini_client = _genai.Client(
-        api_key=GEMINI_API_KEY,
-        http_options={"base_url": GEMINI_BASE_URL} if GEMINI_BASE_URL else None,
-    )
+
+def make_client(api_key: str, base_url: str):
+    """按需加载 google-genai SDK 并建客户端：只有用到 Gemini 的配置才导入它。"""
+    global _genai, gtypes
+    if _genai is None:
+        from google import genai
+        from google.genai import types
+        _genai, gtypes = genai, types
+    return _genai.Client(api_key=api_key, http_options={"base_url": base_url} if base_url else None)
+
+
+# grounding 搜索共用的客户端（web.py 使用）；主模型走 Gemini 原生时适配器另建自己的客户端
+gemini_client = make_client(GEMINI_API_KEY, GEMINI_BASE_URL) if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL else None
 
 
 class GeminiAdapter(BaseAdapter):
     name = "gemini"
     supports_tool_loop = False
+
+    def __init__(self, client=None, endpoint=None):
+        self.endpoint = endpoint or config.primary_endpoint()
+        self.model = self.endpoint.model
+        self.client = client if client is not None else make_client(self.endpoint.api_key, self.endpoint.base_url)
 
     async def run_round(self, history, use_tools, on_text) -> RoundResult:
         stream = await self._create_stream(history)
@@ -49,8 +59,8 @@ class GeminiAdapter(BaseAdapter):
             top_p=config.LLM_TOP_P,
             tools=tools,
         )
-        return await gemini_client.aio.models.generate_content_stream(
-            model=LLM_MODEL, contents=contents, config=gen_config
+        return await self.client.aio.models.generate_content_stream(
+            model=self.model, contents=contents, config=gen_config
         )
 
 

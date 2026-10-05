@@ -79,6 +79,9 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_TEMPERATURE` | sampling temperature; empty = backend default, auto-dropped if rejected | (empty) |
 | `LLM_TOP_P` | nucleus sampling; empty = backend default, auto-dropped if rejected | (empty) |
 | `LLM_EXTRA_BODY` | JSON object passed through by OpenAI-compatible, Responses, and native Claude requests; ignored by native Gemini | (empty) |
+| `LLM_FALLBACK_MODEL` | fallback model, used for a reply when the primary model errors before producing text; empty = disabled | (empty) |
+| `LLM_FALLBACK_PROTOCOL` / `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` | fallback protocol, endpoint, and key; empty = same as the primary model | (empty) |
+| `LLM_FALLBACK_EXTRA_BODY` | extra request params for the fallback model (not inherited from `LLM_EXTRA_BODY`) | (empty) |
 | `MAX_HISTORY` | messages kept per conversation | `20` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `MAX_IMAGES` | images attached per request | `4` |
@@ -130,6 +133,8 @@ Set `LLM_PROTOCOL` to choose the wire protocol:
 - `claude`: native Anthropic Messages API, using `LLM_BASE_URL`. Native thinking blocks, signatures, and tool-use semantics are preserved, and the bot's own search tools remain available.
 
 `GEMINI_NATIVE_SEARCH` and `CLAUDE_NATIVE` are legacy compatibility keys only; new configurations should use `LLM_PROTOCOL`.
+
+**Fallback model.** Set `LLM_FALLBACK_MODEL` (or use `python configure.py`, step 8.5) to add a backup. Every reply tries the primary model first. If it errors before any text has been streamed (HTTP errors, quota, timeouts, unknown model, and so on), the rest of that reply runs on the fallback model, the progress line says so while switching, and the reply ends with a note naming the fallback model. The note is display-only and is not stored in the follow-up history. If the primary already streamed text before failing, the partial answer is kept as before. The fallback can use a different protocol, endpoint, and key; empty fields reuse the primary model's.
 
 For the official OpenAI API, set `LLM_BASE_URL` to `https://api.openai.com/v1` and use `LLM_PROTOCOL=openai`, or `LLM_PROTOCOL=responses` for models that need the Responses API for tool calling. The bot automatically handles newer models that require `max_completion_tokens`.
 

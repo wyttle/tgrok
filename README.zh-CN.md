@@ -77,6 +77,9 @@ python bot.py
 | `LLM_TEMPERATURE` | 采样温度；留空使用后端默认值，后端拒绝时自动去掉 | （空） |
 | `LLM_TOP_P` | 核采样 top_p；留空使用后端默认值，后端拒绝时自动去掉 | （空） |
 | `LLM_EXTRA_BODY` | JSON 对象；OpenAI 兼容、Responses 与 Claude 原生请求会透传，Gemini 原生忽略 | （空） |
+| `LLM_FALLBACK_MODEL` | 备用模型；主模型还没输出正文就出错时，这条回复改用它；留空 = 不启用 | （空） |
+| `LLM_FALLBACK_PROTOCOL` / `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` | 备用模型的协议、地址和 key；留空沿用主模型 | （空） |
+| `LLM_FALLBACK_EXTRA_BODY` | 备用模型的额外请求参数（不继承 `LLM_EXTRA_BODY`） | （空） |
 | `MAX_HISTORY` | 多轮对话保留的消息条数 | `20` |
 | `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
 | `MAX_IMAGES` | 单次请求最多附带的图片数 | `4` |
@@ -125,6 +128,8 @@ python bot.py
 - `claude`：Anthropic Messages API 原生协议，地址使用 `LLM_BASE_URL`。保留原生 thinking 块、签名与工具语义，bot 自带搜索工具仍可使用。
 
 `GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 仅用于兼容旧配置；新配置只应设置 `LLM_PROTOCOL`。
+
+**备用模型。** 设置 `LLM_FALLBACK_MODEL`（或用 `python configure.py` 第 8.5 步）即可启用。每条回复都先调用主模型；主模型在输出任何正文之前出错（HTTP 错误、配额、超时、模型不存在等），这条回复剩下的部分改由备用模型完成，切换时进度行会提示，回复末尾注明由哪个备用模型回答。这条提示只用于显示，不进追问历史。主模型已经输出部分正文后才断开的，仍按原来的方式保留已有内容。备用模型可以用不同的协议、地址和 key，留空的项沿用主模型。
 
 接入 OpenAI 官方 API 时，把 `LLM_BASE_URL` 填为 `https://api.openai.com/v1`，协议用 `LLM_PROTOCOL=openai`；需要在 Responses API 上调用工具的模型改用 `LLM_PROTOCOL=responses`。bot 会自动兼容新模型要求的 `max_completion_tokens` 参数。
 

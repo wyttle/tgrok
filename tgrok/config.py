@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import timezone
@@ -102,8 +103,6 @@ if LLM_PROTOCOL not in ("openai", "responses", "gemini", "claude"):
     LLM_PROTOCOL = "openai"
 GEMINI_NATIVE_SEARCH = LLM_PROTOCOL == "gemini"
 CLAUDE_NATIVE = LLM_PROTOCOL == "claude"
-# anthropic SDK 需要根地址（自己拼 /v1/messages）：剥掉 OpenAI 习惯的 /v1 尾缀
-CLAUDE_BASE_URL = _llm_base_raw[:-3] if _llm_base_raw.endswith("/v1") else _llm_base_raw
 # 混合模式：web_search 工具由该 grounding 模型执行（如 gemini-2.5-flash，免费档可用），
 # 回复仍用 LLM_MODEL。与 GEMINI_NATIVE_SEARCH 互斥，留空关闭
 GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "").strip()
@@ -115,6 +114,62 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or LLM_API_KEY
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "").strip().rstrip("/")
 # grounding 配额超限（429）后的冷却秒数：期间 web_search 回退到自带搜索源
 GEMINI_SEARCH_COOLDOWN = 600.0
+
+# 备用模型：主模型调用出错（且还没输出正文）时，本条回复改用备用模型，并在回复末尾注明。
+# 留空 LLM_FALLBACK_MODEL = 不启用。协议/地址/key 留空时沿用主模型的设置；
+# 额外请求参数不继承，按备用模型自己的 LLM_FALLBACK_EXTRA_BODY
+LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "").strip()
+LLM_FALLBACK_PROTOCOL = os.getenv("LLM_FALLBACK_PROTOCOL", "").strip().lower()
+if LLM_FALLBACK_PROTOCOL and LLM_FALLBACK_PROTOCOL not in ("openai", "responses", "gemini", "claude"):
+    logging.getLogger(__name__).warning("未知 LLM_FALLBACK_PROTOCOL=%s，沿用主模型协议", LLM_FALLBACK_PROTOCOL)
+    LLM_FALLBACK_PROTOCOL = ""
+LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "").strip().rstrip("/")
+LLM_FALLBACK_API_KEY = os.getenv("LLM_FALLBACK_API_KEY", "").strip()
+LLM_FALLBACK_EXTRA_BODY = _opt_json_obj("LLM_FALLBACK_EXTRA_BODY")
+
+
+@dataclass(frozen=True)
+class LLMEndpoint:
+    """一个可调用的模型：协议、模型名、接口地址、key 和额外请求参数。
+    base_url 已按协议归一：openai/responses 为完整 /v1 地址，claude 为根地址（空 = 官方），
+    gemini 为原生接口根地址（空 = Google 官方）。"""
+    protocol: str
+    model: str
+    base_url: str
+    api_key: str
+    extra_body: dict | None
+
+
+def _endpoint(protocol: str, model: str, raw_base: str, api_key: str, extra_body: dict | None,
+              gemini_base: str, gemini_key: str) -> LLMEndpoint:
+    if protocol == "gemini":
+        return LLMEndpoint(protocol, model, gemini_base, gemini_key, extra_body)
+    if protocol == "claude":
+        # anthropic SDK 需要根地址（自己拼 /v1/messages）：剥掉 OpenAI 习惯的 /v1 尾缀
+        base = raw_base[:-3] if raw_base.endswith("/v1") else raw_base
+        return LLMEndpoint(protocol, model, base, api_key, extra_body)
+    return LLMEndpoint(protocol, model, raw_base or "http://localhost:1234/v1", api_key, extra_body)
+
+
+def primary_endpoint() -> LLMEndpoint:
+    """主模型。每次调用按当前模块属性现算，测试与运行时调整（如 LLM_EXTRA_BODY）都能生效。"""
+    return _endpoint(LLM_PROTOCOL, LLM_MODEL, _llm_base_raw, LLM_API_KEY, LLM_EXTRA_BODY,
+                     GEMINI_BASE_URL, GEMINI_API_KEY)
+
+
+def fallback_endpoint() -> LLMEndpoint | None:
+    """备用模型；未配置 LLM_FALLBACK_MODEL 时为 None。地址和 key 留空沿用主模型对应的设置。"""
+    if not LLM_FALLBACK_MODEL:
+        return None
+    protocol = LLM_FALLBACK_PROTOCOL or LLM_PROTOCOL
+    return _endpoint(
+        protocol, LLM_FALLBACK_MODEL,
+        LLM_FALLBACK_BASE_URL or _llm_base_raw,
+        LLM_FALLBACK_API_KEY or LLM_API_KEY,
+        LLM_FALLBACK_EXTRA_BODY,
+        LLM_FALLBACK_BASE_URL or GEMINI_BASE_URL,
+        LLM_FALLBACK_API_KEY or GEMINI_API_KEY,
+    )
 
 
 def _provider_ready(p: str) -> bool:

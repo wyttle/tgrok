@@ -218,6 +218,19 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
 
     return list(await asyncio.gather(*(run_one(i, c) for i, c in enumerate(calls_list))))
 
+
+def _without_vendor_extras(history: list[dict]) -> list[dict]:
+    """切换到备用模型时去掉工具调用上的厂商扩展字段（思考签名、加密推理条目等）。
+    这些字段只有产生它们的那个模型/协议认得，交给另一个后端可能直接 400。"""
+    out = []
+    for m in history:
+        if m.get("tool_calls") and any("extra_content" in c for c in m["tool_calls"]):
+            m = {**m, "tool_calls": [{k: v for k, v in c.items() if k != "extra_content"}
+                                     for c in m["tool_calls"]]}
+        out.append(m)
+    return out
+
+
 _gen_count = count(1)
 active_generations: dict[int, tuple[asyncio.Task, int]] = {}
 
@@ -404,10 +417,12 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
     generation_completed = False
     try:
         adapter = llm.adapter
+        fallback = llm.fallback_adapter
+        using_fallback = False
         citations: list[dict] = []
         draft_fallback = ""  # 工具轮被丢弃的草稿，终轮空手时兜底回用
-        rounds = config.SEARCH_MAX_ROUNDS + 1 if adapter.supports_tool_loop else 1
-        for round_idx in range(rounds):
+        # 不支持工具循环的协议（Gemini 原生）不会返回工具调用，首轮就会结束
+        for round_idx in range(config.SEARCH_MAX_ROUNDS + 1):
             # 最后一轮不带 tools，强制模型输出正文，防止无限连环调用工具。
             # calculate 总是可用，所以工具循环不再依赖是否配置了搜索源
             use_tools = adapter.supports_tool_loop and round_idx < config.SEARCH_MAX_ROUNDS
@@ -432,6 +447,20 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
                         )
                         result = llm.RoundResult(content=segment)
                         break
+                    if fallback is not None and not using_fallback:
+                        # 主模型出错且本轮还没输出：本条回复剩下的轮次全部交给备用模型
+                        logger.warning(
+                            "主模型 %s 调用失败（round=%d, %.1fs, %s: %.200s），切换备用模型 %s",
+                            getattr(adapter, "model", ""), round_idx, elapsed, type(e).__name__, e,
+                            getattr(fallback, "model", ""),
+                        )
+                        adapter, using_fallback = fallback, True
+                        use_tools = adapter.supports_tool_loop and round_idx < config.SEARCH_MAX_ROUNDS
+                        working = _without_vendor_extras(working)
+                        if not segment.strip():
+                            stage = t("fallback_stage")
+                            await show_progress()
+                        continue
                     if attempt or llm.is_quota_error(e):
                         raise
                     logger.warning(
@@ -508,15 +537,23 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         if not generation_completed:
             active_generations.pop(gen_id, None)
 
+    # 用了备用模型就在回复末尾注明；提示只用于显示，不进对话历史
+    note = "\n\n" + t("fallback_note", model=getattr(adapter, "model", "")) if using_fallback else ""
     try:
         if not segment.strip() and draft_fallback:
             # 终轮没有产出正文：回用最后一轮被丢弃的草稿，别让用户空手而归
             segment = draft_fallback
         if segment.strip():
-            await push(segment, final=True)
+            await push(segment + note, final=True)
             finalized += segment
             if sent is not None:
                 answer_ids.append(sent.message_id)
+        elif finalized and note:
+            # 正文恰好在分段边界结束：提示单独发一条
+            try:
+                await msg.reply_text(note.strip())
+            except TelegramError:
+                pass
         elif not finalized:
             try:
                 if sent is not None:

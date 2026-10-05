@@ -7,7 +7,7 @@ Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主
 ```text
 bot.py                 入口（python bot.py），只做 from tgrok.tg import main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py    36 项冒烟和回归测试（无需网络与真实 Telegram）
+tests/smoke_test.py    38 项冒烟和回归测试（无需网络与真实 Telegram）
 tgrok/
 |-- config.py          环境变量解析、常量、日志与时区初始化
 |-- i18n.py            全部界面和提示词文案，以及 t()
@@ -78,7 +78,9 @@ Telegram update
      -> 取得 llm.adapter
      -> 进入统一轮次循环
         -> 每轮调用 adapter.run_round
-        -> 无输出的流中断重试一次；已有正文则按完成处理；429 不重试
+        -> 无输出就出错：配置了备用模型时，本条回复剩余轮次改用 llm.fallback_adapter
+           （去掉工具调用上的厂商扩展字段，进度行提示切换，定稿末尾注明，提示不进历史）；
+           没配备用模型时重试一次，429 不重试；已有正文则按完成处理
         -> 若返回工具调用且本轮允许 tools，执行 chat._execute_tool_calls
            -> calculate 调用 calc.run_calculate
            -> web_search 调用 web.run_web_search
@@ -114,7 +116,7 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 
 ## 运行时状态归属
 
-- `llm.adapter`：当前协议适配器及其粘性能力降级状态。
+- `llm.adapter`、`llm.fallback_adapter`：主模型和备用模型的协议适配器（各自独立的粘性能力降级状态）。两者都由 `config.LLMEndpoint`（协议、模型、地址、key、额外参数）构造；`config.fallback_endpoint()` 中留空的协议、地址和 key 沿用主模型，额外参数不继承。
 - `web._grounding_cooldown_until`：Gemini grounding 遇到配额错误后的冷却状态。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
 - `tg_auth.allowed_users`：运行时白名单。
@@ -127,5 +129,5 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：36 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界，以及 Responses 转换、降级和工具循环。
+- `python tests/smoke_test.py`：38 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环，以及备用模型切换、提示和配置继承。
 - 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。

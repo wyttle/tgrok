@@ -20,7 +20,7 @@ from telegram.ext import (
 from . import config
 from .config import (
     ADMIN_USER_IDS, ALBUM_CACHE_SIZE, BOT_TOKEN, CONVERSATION_CACHE_SIZE,
-    CONVERSATION_CONTENT_BUDGET, ENABLE_VISION, LLM_BASE_URL, LLM_MODEL,
+    CONVERSATION_CONTENT_BUDGET, ENABLE_VISION,
     MAX_HISTORY, MAX_IMAGE_BYTES,
 )
 from .chat import on_cancel_button, stream_reply
@@ -394,15 +394,16 @@ def main() -> None:
             handle_message,
         )
     )
-    if config.CLAUDE_NATIVE:
-        api_url = config.CLAUDE_BASE_URL or "https://api.anthropic.com"
-    elif config.GEMINI_NATIVE_SEARCH:
-        api_url = config.GEMINI_BASE_URL or "https://generativelanguage.googleapis.com"
-    else:
-        api_url = LLM_BASE_URL
-    logger.info(
-        "Bot 启动中… 协议: %s, 接口: %s, 模型: %s", config.LLM_PROTOCOL, api_url, LLM_MODEL
-    )
+
+    def describe(ep: config.LLMEndpoint) -> str:
+        default_url = {"claude": "https://api.anthropic.com",
+                       "gemini": "https://generativelanguage.googleapis.com"}.get(ep.protocol, "")
+        return f"协议: {ep.protocol}, 接口: {ep.base_url or default_url}, 模型: {ep.model}"
+
+    logger.info("Bot 启动中… %s", describe(config.primary_endpoint()))
+    fallback = config.fallback_endpoint()
+    if fallback is not None:
+        logger.info("备用模型已配置（主模型出错时切换）：%s", describe(fallback))
     if config.GEMINI_NATIVE_SEARCH:
         logger.info("Gemini 原生搜索模式：google_search + url_context 由 Google 服务端执行")
     elif config.GEMINI_SEARCH_MODEL:

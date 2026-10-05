@@ -13,7 +13,7 @@ import logging
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from ..config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_USER_AGENT, MAX_TOKENS
+from ..config import LLM_USER_AGENT, MAX_TOKENS
 from .base import BaseAdapter, RoundResult, active_tools, error_param, error_text, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 class ResponsesAdapter(BaseAdapter):
     name = "responses"
 
-    def __init__(self, client=None):
+    def __init__(self, client=None, endpoint=None):
+        self.endpoint = endpoint or config.primary_endpoint()
+        self.model = self.endpoint.model
         self.client = client if client is not None else AsyncOpenAI(
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY,
+            base_url=self.endpoint.base_url,
+            api_key=self.endpoint.api_key,
             default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
             # 与其它适配器一致：禁用 SDK 内建重试，重试语义由 chat.stream_reply 统一控制
             max_retries=0,
@@ -43,11 +45,11 @@ class ResponsesAdapter(BaseAdapter):
     async def _create_stream(self, history: list[dict], use_tools: bool):
         include_tools = use_tools and self.tools_supported
         sampling = sampling_kwargs() if self.sampling_supported else {}
-        extra_body = config.LLM_EXTRA_BODY if self.extra_body_supported else None
+        extra_body = self.endpoint.extra_body if self.extra_body_supported else None
         while True:
             stateless = self.stateless_supported
             instructions, items = to_responses_input(history, keep_reasoning=stateless)
-            kwargs = {"model": LLM_MODEL, "input": items, "stream": True,
+            kwargs = {"model": self.model, "input": items, "stream": True,
                       "max_output_tokens": MAX_TOKENS, **sampling}
             if instructions:
                 kwargs["instructions"] = instructions

@@ -1,4 +1,4 @@
-"""LLM 接入层：按 config.LLM_PROTOCOL 装配协议适配器。"""
+"""LLM 接入层：按配置装配主模型与可选备用模型的协议适配器。"""
 
 from .. import config
 from . import base
@@ -7,18 +7,21 @@ from .base import (
 )
 
 
-def _make_adapter():
-    if config.LLM_PROTOCOL == "claude":
+def make_adapter(endpoint: config.LLMEndpoint):
+    if endpoint.protocol == "claude":
         from .claude import ClaudeAdapter
-        return ClaudeAdapter()
-    if config.LLM_PROTOCOL == "responses":
+        return ClaudeAdapter(endpoint=endpoint)
+    if endpoint.protocol == "responses":
         from .responses import ResponsesAdapter
-        return ResponsesAdapter()
-    if config.LLM_PROTOCOL == "gemini":
+        return ResponsesAdapter(endpoint=endpoint)
+    if endpoint.protocol == "gemini":
         from .gemini import GeminiAdapter
-        return GeminiAdapter()
+        return GeminiAdapter(endpoint=endpoint)
     from .openai import OpenAIAdapter
-    return OpenAIAdapter()
+    return OpenAIAdapter(endpoint=endpoint)
 
 
-adapter = _make_adapter()
+adapter = make_adapter(config.primary_endpoint())
+# 主模型出错且尚无正文输出时，本条回复改用它；未配置时为 None
+_fallback = config.fallback_endpoint()
+fallback_adapter = make_adapter(_fallback) if _fallback is not None else None

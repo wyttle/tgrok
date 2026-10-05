@@ -654,6 +654,69 @@ assert configure.effort_body("low", "") == {"reasoning_effort": "low"}
 assert configure.is_reasoning_gpt("openai/gpt-6.1-sol") and not configure.is_reasoning_gpt("gpt-4o")
 ok("配置向导额外参数/推理强度")
 
+# 37. 备用模型：主模型无输出就出错 → 本条改用备用模型并在回复末尾注明（提示不进历史）；
+#     已有正文后断流仍按完成处理、不切换；中途切换时去掉主模型的厂商扩展字段
+def openai_with(create):
+    return OpenAIAdapter(client=types.SimpleNamespace(chat=types.SimpleNamespace(
+        completions=FakeCompletions(create))), endpoint=config.LLMEndpoint("openai", "fb-model", "", "", None))
+async def dead(h, use_tools): raise RuntimeError("503 upstream unavailable")
+fb_seen = []
+async def fb_ok(h, use_tools):
+    fb_seen.append(h)
+    return stream_of([chunk_text("备用模型的回答")])
+set_create(dead)
+llm.fallback_adapter = openai_with(fb_ok)
+m = FakeMsg(); ids37, ans = run(chat.stream_reply(m, HIST))
+assert ans == "备用模型的回答"
+assert m.sent[0].text.startswith("备用模型的回答") and "fb-model" in m.sent[0].text.replace("\\", "")
+assert any("备用" in x for x in m.log[1:-1])  # 切换时进度行有提示
+# 主模型已经吐出正文再断流：按完成处理，不切换、不提示
+set_create(lambda h, use_tools: asyncio.sleep(0, stream_of([chunk_text("主模型正文")], tail="cut")))
+fb_seen.clear()
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "主模型正文" and not fb_seen and "fb-model" not in m.sent[0].text
+# 工具轮之后主模型出错：备用模型接着跑，拿到的历史里没有主模型的签名字段
+primary_rounds = {"n": 0}
+async def primary_then_dead(h, use_tools):
+    primary_rounds["n"] += 1
+    if primary_rounds["n"] == 1:
+        return stream_of([chunk_tool(0, "calculate", {"expression": "6*7"}, sig="SIG")])
+    raise RuntimeError("500")
+set_create(primary_then_dead)
+fb_seen.clear()
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "备用模型的回答" and len(fb_seen) == 1
+fb_calls = [c for msg_ in fb_seen[0] for c in msg_.get("tool_calls") or []]
+assert fb_calls and all("extra_content" not in c for c in fb_calls)
+assert any(msg_.get("role") == "tool" and "= 42" in msg_["content"] for msg_ in fb_seen[0])
+# 备用模型也失败：给出失败提示，不再重试
+llm.fallback_adapter = openai_with(dead)
+set_create(dead)
+m = FakeMsg(); r = run(chat.stream_reply(m, HIST))
+assert r == ([], "") and m.sent[0].text == chat.t("llm_failed")
+llm.fallback_adapter = None
+ok("备用模型切换与提示")
+
+# 38. 备用模型配置：地址和 key 留空沿用主模型；claude 地址剥掉 /v1；未配置模型名时不启用
+_saved38 = {k: getattr(config, k) for k in (
+    "LLM_FALLBACK_MODEL", "LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL", "LLM_FALLBACK_API_KEY",
+    "LLM_PROTOCOL", "_llm_base_raw", "LLM_API_KEY")}
+try:
+    config.LLM_PROTOCOL, config._llm_base_raw, config.LLM_API_KEY = "responses", "https://relay.example/v1", "sk-main"
+    config.LLM_FALLBACK_MODEL, config.LLM_FALLBACK_PROTOCOL = "", ""
+    assert config.fallback_endpoint() is None
+    config.LLM_FALLBACK_MODEL = "gpt-4.1"
+    config.LLM_FALLBACK_BASE_URL, config.LLM_FALLBACK_API_KEY = "", ""
+    fb38 = config.fallback_endpoint()
+    assert (fb38.protocol, fb38.base_url, fb38.api_key) == ("responses", "https://relay.example/v1", "sk-main")
+    config.LLM_FALLBACK_PROTOCOL, config.LLM_FALLBACK_API_KEY = "claude", "sk-ant"
+    fb38 = config.fallback_endpoint()
+    assert (fb38.protocol, fb38.base_url, fb38.api_key) == ("claude", "https://relay.example", "sk-ant")
+finally:
+    for k, v in _saved38.items():
+        setattr(config, k, v)
+ok("备用模型配置继承")
+
 llm.adapter = orig_adapter
 
 print(f"\nall {PASS} checks passed")

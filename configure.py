@@ -114,7 +114,14 @@ TEXT = {
         "sampling_skipped": "  推理模型不接受 temperature/top_p，已跳过并清空这两项",
         "extra_params": "其它额外请求参数（高级，可留空）：写成 键=值，多个用逗号分隔，嵌套键用点号，如 thinking.type=enabled, thinking.budget_tokens=1000；输入 - 清除",
         "extra_invalid": "格式应为 键=值（多个用逗号分隔，如 a=1, b.c=low），或输入 - 清除",
-        "extra_old_invalid": "  原 LLM_EXTRA_BODY 无法解析，已忽略：{raw}",
+        "extra_old_invalid": "  原有的额外参数无法解析，已忽略：{raw}",
+        "s_fb_a": "【8.5/9】备用模型（可选）",
+        "s_fb_b": "      主模型调用出错时，这条回复自动改用备用模型，并在回复末尾注明",
+        "fb_model": "备用模型名称（留空=不启用，输入 - 清除）",
+        "fb_protocol_pick": "备用模型接口：1=Chat Completions  2=Responses  3=Claude 原生  4=Gemini 原生",
+        "fb_protocol_invalid": "请输入 1~4",
+        "fb_base_url": "备用模型接口地址（留空=与主模型相同，输入 - 清除）",
+        "fb_key": "备用模型 API Key（留空=与主模型相同，输入 - 清除）",
         "max_history": "多轮对话保留消息条数",
         "tz": "时区（IANA 名称，用于告知模型当前真实时间；无法识别时 bot 会回退 UTC）",
         "int_invalid": "请输入正整数",
@@ -234,7 +241,14 @@ TEXT = {
         "sampling_skipped": "  Reasoning models don't accept temperature/top_p; skipped and cleared",
         "extra_params": "Other extra request params (advanced, optional): key=value, comma-separated, dots for nested keys, e.g. thinking.type=enabled, thinking.budget_tokens=1000; enter - to clear",
         "extra_invalid": "Use key=value (comma-separated, e.g. a=1, b.c=low), or enter - to clear",
-        "extra_old_invalid": "  Could not parse the existing LLM_EXTRA_BODY, ignoring it: {raw}",
+        "extra_old_invalid": "  Could not parse the existing extra params, ignoring them: {raw}",
+        "s_fb_a": "[8.5/9] Fallback model (optional)",
+        "s_fb_b": "      If the primary model errors, that reply automatically uses the fallback model and says so at the end",
+        "fb_model": "Fallback model name (empty = disabled, enter - to clear)",
+        "fb_protocol_pick": "Fallback API: 1=Chat Completions  2=Responses  3=native Claude  4=native Gemini",
+        "fb_protocol_invalid": "Enter 1-4",
+        "fb_base_url": "Fallback endpoint URL (empty = same as the primary model, enter - to clear)",
+        "fb_key": "Fallback API key (empty = same as the primary model, enter - to clear)",
         "max_history": "Messages kept per conversation",
         "tz": "Timezone (IANA name, used to tell the model the current real time; falls back to UTC if unrecognized)",
         "int_invalid": "Please enter a positive integer",
@@ -538,6 +552,43 @@ def validate_extra_params(raw: str):
     if raw.strip() == "-" or parse_extra_params(raw) is not None:
         return True, ""
     return False, T["extra_invalid"]
+
+
+# 备用模型可选的协议，顺序即向导里的序号
+FALLBACK_PROTOCOLS = ["openai", "responses", "claude", "gemini"]
+
+
+def load_extra(raw: str) -> dict:
+    """读取已有的额外参数；无法解析时打印原文提示并当作空，不悄悄丢掉。"""
+    extra = parse_extra_params(raw)
+    if extra is None:
+        print(T["extra_old_invalid"].format(raw=raw))
+        return {}
+    return extra
+
+
+def ask_effort(model: str, extra: dict) -> str:
+    """推理强度菜单：序号或自定义值；返回强度，- 表示不设置（返回空串）。"""
+    print(T["effort_intro"].format(model=model))
+    for i, name in enumerate(REASONING_EFFORTS, 1):
+        print(f"    {i}. {name:<8} {T['effort_desc'][name]}")
+    raw = ask(T["effort_pick"], default=current_effort(extra) or "low",
+              validate=validate_effort).strip().lower()
+    if raw.isdigit():
+        return REASONING_EFFORTS[int(raw) - 1]
+    return "" if raw == "-" else raw
+
+
+def ask_extra_params(extra: dict, effort: str, protocol: str, managed_effort: bool) -> str:
+    """问其它额外参数（键=值），再按协议并入推理强度，返回写入 .env 的 JSON（空 = 不设置）。
+    managed_effort 时推理强度由菜单管理：已有的两种写法都先清掉，避免混用或残留。"""
+    if managed_effort:
+        extra = {k: v for k, v in extra.items() if k not in _REASONING_KEYS}
+    raw = ask(T["extra_params"], default=format_extra_params(extra) if extra else "",
+              validate=validate_extra_params).strip()
+    merged = {} if raw == "-" else (parse_extra_params(raw) or {})
+    merged.update(effort_body(effort, protocol))
+    return json.dumps(merged, ensure_ascii=False, separators=(",", ":")) if merged else ""
 
 
 def check_telegram_token(token: str) -> str | None:
@@ -941,25 +992,8 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         old_max = "4096"
     cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old_max, validate=validate_int)
 
-    old_extra_raw = old.get("LLM_EXTRA_BODY", "")
-    extra = parse_extra_params(old_extra_raw)
-    if extra is None:
-        print(T["extra_old_invalid"].format(raw=old_extra_raw))
-        extra = {}
-
-    effort = ""
-    if reasoning_gpt:
-        print(T["effort_intro"].format(model=cfg["LLM_MODEL"]))
-        for i, name in enumerate(REASONING_EFFORTS, 1):
-            print(f"    {i}. {name:<8} {T['effort_desc'][name]}")
-        raw_e = ask(T["effort_pick"], default=current_effort(extra) or "low",
-                    validate=validate_effort).strip().lower()
-        if raw_e.isdigit():
-            effort = REASONING_EFFORTS[int(raw_e) - 1]
-        elif raw_e != "-":
-            effort = raw_e
-        # 推理强度由向导管理：两种写法都先清掉，再按当前协议写回
-        extra = {k: v for k, v in extra.items() if k not in _REASONING_KEYS}
+    extra = load_extra(old.get("LLM_EXTRA_BODY", ""))
+    effort = ask_effort(cfg["LLM_MODEL"], extra) if reasoning_gpt else ""
 
     if reasoning_gpt and effort != "none":
         # 推理档位不是 none 时，GPT 推理模型不接受 temperature/top_p
@@ -972,13 +1006,44 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
         cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
 
-    raw_x = ask(T["extra_params"], default=format_extra_params(extra) if extra else "",
-                validate=validate_extra_params).strip()
-    extra = {} if raw_x == "-" else (parse_extra_params(raw_x) or {})
-    extra.update(effort_body(effort, protocol))
-    cfg["LLM_EXTRA_BODY"] = json.dumps(extra, ensure_ascii=False, separators=(",", ":")) if extra else ""
+    cfg["LLM_EXTRA_BODY"] = ask_extra_params(extra, effort, protocol, managed_effort=reasoning_gpt)
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
+    print()
+
+    # ---- 8.5 Fallback model ----
+    print(T["s_fb_a"])
+    print(T["s_fb_b"])
+    fb_model = ask(T["fb_model"], default=old.get("LLM_FALLBACK_MODEL", "")).strip()
+    fb_keys = ("LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL", "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_EXTRA_BODY")
+    if fb_model in ("", "-"):
+        cfg["LLM_FALLBACK_MODEL"] = ""
+        for key in fb_keys:
+            cfg[key] = ""
+    else:
+        cfg["LLM_FALLBACK_MODEL"] = fb_model
+        primary_protocol = cfg.get("LLM_PROTOCOL") or "openai"
+        fb_default = old.get("LLM_FALLBACK_PROTOCOL", "").strip().lower() or primary_protocol
+        fb_default = fb_default if fb_default in FALLBACK_PROTOCOLS else primary_protocol
+
+        def validate_fb_protocol(raw: str):
+            ok = raw.strip() in [str(i) for i in range(1, len(FALLBACK_PROTOCOLS) + 1)]
+            return (True, "") if ok else (False, T["fb_protocol_invalid"])
+
+        raw_proto = ask(T["fb_protocol_pick"], default=str(FALLBACK_PROTOCOLS.index(fb_default) + 1),
+                        validate=validate_fb_protocol).strip()
+        fb_protocol = FALLBACK_PROTOCOLS[int(raw_proto) - 1]
+        # 和主模型同协议时不写，跟随主模型
+        cfg["LLM_FALLBACK_PROTOCOL"] = "" if fb_protocol == primary_protocol else fb_protocol
+        raw_base = ask(T["fb_base_url"], default=old.get("LLM_FALLBACK_BASE_URL", "")).strip().rstrip("/")
+        cfg["LLM_FALLBACK_BASE_URL"] = "" if raw_base == "-" else raw_base
+        raw_key = ask(T["fb_key"], default=old.get("LLM_FALLBACK_API_KEY", ""), secret=True).strip()
+        cfg["LLM_FALLBACK_API_KEY"] = "" if raw_key == "-" else raw_key
+        fb_extra = load_extra(old.get("LLM_FALLBACK_EXTRA_BODY", ""))
+        fb_reasoning = fb_protocol in ("openai", "responses") and is_reasoning_gpt(fb_model)
+        fb_effort = ask_effort(fb_model, fb_extra) if fb_reasoning else ""
+        cfg["LLM_FALLBACK_EXTRA_BODY"] = ask_extra_params(
+            fb_extra, fb_effort, "" if fb_protocol == "openai" else fb_protocol, managed_effort=fb_reasoning)
     print()
 
     # ---- 9. System prompt ----

@@ -8,7 +8,7 @@ import anthropic
 
 from .. import config
 from ..config import CLAUDE_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_USER_AGENT, MAX_TOKENS
-from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, error_text, rejected_param, sampling_kwargs, tool_args
+from .base import BaseAdapter, RoundResult, active_tools, error_text, rejected_param, sampling_kwargs, tool_args
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
@@ -95,7 +95,7 @@ def anthropic_tools() -> list[dict]:
             "description": t["function"]["description"],
             "input_schema": t["function"]["parameters"],
         }
-        for t in SEARCH_TOOLS
+        for t in active_tools()
     ]
 
 

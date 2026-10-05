@@ -1,5 +1,6 @@
 """Telegram 接入层：消息路由、图片/相册、管理命令与应用入口。"""
 
+import asyncio
 import base64
 import logging
 from collections import OrderedDict
@@ -68,10 +69,16 @@ def remember(chat_id: int, message_id: int, history: list[dict]) -> None:
 
 
 def trim_history(history: list[dict]) -> list[dict]:
-    """保留 system 消息 + 最近 MAX_HISTORY 条对话。"""
+    """保留 system 消息 + 最近 MAX_HISTORY 条对话，且截断后第一条对话必须是 user。
+
+    以 assistant 开头的历史会被 Claude 原生接口和多数本地模型的对话模板
+    （要求 user/assistant 严格交替）拒绝，也会丢掉那条回答对应的问题。
+    """
     if len(history) <= MAX_HISTORY + 1:
         return history
-    return [history[0]] + history[-MAX_HISTORY:]
+    tail = history[-MAX_HISTORY:]
+    start = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
+    return [history[0]] + tail[start:]
 
 def extract_question(msg: Message, bot_username: str) -> str:
     """去掉文本中对 bot 的 @提及，返回剩余的提问内容。"""
@@ -169,16 +176,19 @@ async def image_data_urls(bot, *messages: Message | None) -> list[str]:
             if entry["file_id"] not in seen:
                 seen.add(entry["file_id"])
                 refs.append(entry)
-    urls = []
-    for entry in refs[:config.MAX_IMAGES]:
+
+    async def fetch(entry: dict) -> str | None:
         try:
             file = await bot.get_file(entry["file_id"])
             data = bytes(await file.download_as_bytearray())
         except Exception:
             logger.exception("下载图片失败 file_id=%s", entry["file_id"])
-            continue
-        urls.append(f"data:{entry['mime']};base64," + base64.b64encode(data).decode())
-    return urls
+            return None
+        return f"data:{entry['mime']};base64," + base64.b64encode(data).decode()
+
+    # 相册多图并发下载：每张图都是 get_file + 下载两次往返，串行时首字延迟随图片数线性增长
+    urls = await asyncio.gather(*(fetch(entry) for entry in refs[:config.MAX_IMAGES]))
+    return [u for u in urls if u]
 
 
 def build_content(text: str, images: list[str]):
@@ -218,31 +228,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_reply_to_bot, question,
     )
 
-    if is_reply_to_bot and not mentioned:
-        # 追问：接上之前的对话历史
-        key = (msg.chat_id, replied.message_id)
-        history = conversations.get(key)
-        if history is None:
-            # 历史已过期（如 bot 重启），用 bot 上一条回复作为最小上下文
-            history = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "assistant", "content": replied.text or replied.caption or ""},
-            ]
+    # 群里多人可以轮流接着同一段对话聊：每条 user 消息都带上说话人，模型才分得清谁在问
+    def speaker(text: str) -> str:
+        return text if is_private else t("question_from", name=msg.from_user.full_name, question=text)
+
+    if is_reply_to_bot:
+        # 追问（回复 bot 的消息，带不带 @ 都算）：接上之前的对话历史
         images = await image_data_urls(bot, msg) if ENABLE_VISION else []
         if not question and not images:
             return
-        history = history + [{"role": "user", "content": with_time(build_content(question or t("look_image"), images))}]
+        user_content = speaker(question or t("look_image"))
+        history = conversations.get((msg.chat_id, replied.message_id))
+        if history is None:
+            # 历史已过期（如 bot 重启）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
+            # 不单独伪造 assistant 轮——以 assistant 开头的对话会被严格交替的接口拒绝
+            previous = replied.text or replied.caption or ""
+            if previous:
+                user_content = t("prev_reply", content=previous) + "\n\n" + user_content
+            history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history = history + [{"role": "user", "content": with_time(build_content(user_content, images))}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
-        quoted = None if is_reply_to_bot else replied
-        context_text = quoted_context(msg) if quoted else None
-        images = await image_data_urls(bot, msg, quoted) if ENABLE_VISION else []
+        context_text = quoted_context(msg) if replied else None
+        images = await image_data_urls(bot, msg, replied) if ENABLE_VISION else []
         if not question and not context_text and not images:
             await msg.reply_text(t("nudge"))
             return
         user_content = question or t("comment_default")
         if context_text:
             user_content = context_text + "\n\n" + t("question_from", name=msg.from_user.full_name, question=user_content)
+        else:
+            user_content = speaker(user_content)
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": with_time(build_content(user_content, images))},
@@ -250,10 +266,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = trim_history(history)
 
-    sent, answer = await stream_reply(msg, history)
-    if sent is not None and answer:
-        logger.info("已回复 chat=%s msg_id=%s len=%d", msg.chat_id, sent.message_id, len(answer))
-        remember(msg.chat_id, sent.message_id, history + [{"role": "assistant", "content": answer}])
+    answer_ids, answer = await stream_reply(msg, history)
+    if answer_ids and answer:
+        logger.info("已回复 chat=%s msg_ids=%s len=%d", msg.chat_id, answer_ids, len(answer))
+        full = history + [{"role": "assistant", "content": answer}]
+        for message_id in answer_ids:
+            remember(msg.chat_id, message_id, full)
     else:
         logger.warning("未产生回复 chat=%s user=%s", msg.chat_id, msg.from_user.id)
 
@@ -402,7 +420,8 @@ def main() -> None:
             "搜索源 %s 配置不完整或名称不识别（tavily 需 TAVILY_API_KEY，searxng 需 SEARXNG_BASE_URL），已跳过",
             ",".join(skipped),
         )
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # 只订阅用到的更新类型：不收 edited_message，群友编辑一条 @bot 的旧消息不会触发重复回答
+    app.run_polling(allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY], drop_pending_updates=True)
 
 
 if __name__ == "__main__":

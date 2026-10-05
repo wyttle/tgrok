@@ -7,7 +7,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
 from ..config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_USER_AGENT, MAX_TOKENS
-from .base import BaseAdapter, RoundResult, SEARCH_TOOLS, rejected_param, sampling_kwargs
+from .base import BaseAdapter, RoundResult, active_tools, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class OpenAIAdapter(BaseAdapter):
             if extra_body:
                 kwargs["extra_body"] = extra_body
             if include_tools:
-                kwargs["tools"] = SEARCH_TOOLS
+                kwargs["tools"] = active_tools()
                 kwargs["tool_choice"] = "auto"
             try:
                 return await self.client.chat.completions.create(**kwargs)

@@ -80,7 +80,40 @@ FETCH_URL_TOOL = {
     },
 }
 
-SEARCH_TOOLS = [WEB_SEARCH_TOOL, FETCH_URL_TOOL]
+CALCULATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": (
+            "Evaluate a math or date expression exactly. Use it instead of mental math whenever "
+            "an answer depends on arithmetic, percentages, unit conversions, or date math, "
+            "including checking numbers someone else claimed. Supports + - * / // % ** and "
+            "parentheses, comparisons (< <= > >= == !=) that return true/false, abs round min max "
+            "sqrt cbrt exp log(x, base) log10 log2 sin cos tan asin acos atan radians degrees "
+            "floor ceil factorial gcd lcm, constants pi and e, and dates: date('YYYY-MM-DD'), "
+            "today(), days(n), weekday(date). Subtracting two dates gives days; date +/- days(n) "
+            "gives a date. Write percentages as /100."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "One expression, e.g. 1299*0.85 or date('2026-12-25') - today().",
+                }
+            },
+            "required": ["expression"],
+        },
+    },
+}
+
+
+def active_tools() -> list[dict]:
+    """本次请求挂载的工具：calculate 总是可用，搜索与读网页只在配置了搜索源时提供。"""
+    tools = [CALCULATE_TOOL]
+    if config.SEARCH_ENABLED:
+        tools += [WEB_SEARCH_TOOL, FETCH_URL_TOOL]
+    return tools
 
 
 def sampling_kwargs() -> dict:

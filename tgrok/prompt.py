@@ -8,6 +8,9 @@ from .i18n import STRINGS, t
 
 SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
                  if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
+if config.LLM_PROTOCOL != "gemini":
+    # Gemini 原生不走 bot 的工具循环；其余协议都会挂载 calculate
+    SYSTEM_PROMPT += "\n\n" + t("calc_system_prompt")
 if SEARCH_ENABLED:
     # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
     SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")

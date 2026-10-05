@@ -5,24 +5,35 @@ from .config import BOT_LANG
 STRINGS = {
     "zh": {
         "system_prompt": (
-            "你是 Telegram 群聊里的 AI 助手。群友会 @ 你提问，或引用一条消息让你评论、"
-            "核实，请结合上下文直接回答。"
-            "用提问者提问所用的语言回复（对方明确指定语言时除外），"
-            "被引用内容是什么语言不影响回复语言。"
-            "像聊天一样自然作答：先给结论，长度与问题匹配，不要套固定模板，"
-            "非必要不用标题和分点，简单问题一两句话即可。"
-            "不确定的事情要明确说明，不要编造。"
+            "你是这个 Telegram 群里的一员。群友会 @ 你提问，或者引用一条消息让你评评理、辨辨真假。"
+            "说话要像群里一个懂行、靠谱、说话直的朋友，而不是客服、百科或写报告。\n"
+            "- 第一句就给结论或答案。不复述问题，不寒暄；不用「好的」「当然」「这是个好问题」开头，"
+            "不用「希望对你有帮助」「有问题随时问」收尾，也不写「总的来说」「综上所述」式总结。\n"
+            "- 口语、短句，长度跟着问题走：闲聊和简单问题一两句话就够，复杂问题再展开，但别写成文章。\n"
+            "- 默认不用标题、分点和加粗；只有步骤、清单这类本来就是列表的内容才分点。\n"
+            "- 可以有自己的看法和态度，可以接梗、适度幽默，跟着对方的语气走；对方随口一问就随口答。\n"
+            "- 让你核实消息时，先给判断（真的、假的、半真半假、目前没法确定），再用一两句说清关键依据。\n"
+            "- 不知道或拿不准就直说，不编造；但别每句都加免责声明，也别动不动提自己是 AI。\n"
+            "- 用提问者提问所用的语言回复（对方明确指定语言时除外），被引用内容是什么语言不影响回复语言。"
         ),
         "someone": "某人",
         "quoted_msg": "以下是群里 {author} 发的一条消息：\n「{content}」",
         "question_from": "{name} 的提问：{question}",
-        "comment_default": "请评论/核实这条消息。",
-        "look_image": "请看这张图片。",
+        "prev_reply": "（对方在接着你之前的这条回复聊：「{content}」）",
+        "comment_default": "这条你怎么看？靠谱吗？",
+        "look_image": "看看这张图。",
         "empty_reply": "（模型返回了空回复）",
         "thinking_stages": ["思考中", "深入思考中", "继续深挖", "就快好了"],
         "tool_search": "搜索: {q}",
         "tool_open": "读取网页",
         "tool_open_n": "读取 {n} 个网页",
+        "tool_calc": "计算: {expr}",
+        "calc_error": "（计算失败：{error}。检查表达式写法后重试，或说明这一步没算出来。）",
+        "tool_unknown": "（没有名为 {name} 的工具）",
+        "calc_system_prompt": (
+            "涉及算术、百分比、单位换算或日期推算（相差几天、某天星期几、多久以后）时，"
+            "用 calculate 工具算，不要心算；别人消息里的数字也可以用它核对。"
+        ),
         "res_results": "{n} 条结果",
         "res_chars": "{k} 字",
         "res_failed": "失败",
@@ -38,7 +49,7 @@ STRINGS = {
         "llm_failed": "调用模型失败，请稍后重试；若持续失败请联系管理员。",
         "llm_quota": "模型配额超限（429），请稍后再试；若持续出现请联系管理员检查额度/账单。",
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
-        "search_error": "（联网搜索失败：{error}。请基于已有知识回答，并说明信息未经联网核实。）",
+        "search_error": "（联网搜索失败：{error}。凭已有知识回答，顺带提一句没查到最新信息即可。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
         "search_merged": "（本轮多个 web_search 已合并为一次深度调研执行，结果见第一条 web_search 返回）",
         "search_agent_note": (
@@ -50,14 +61,14 @@ STRINGS = {
         "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
         "fetch_empty": "（该网页没有可提取的正文）",
         "search_system_prompt": (
-            "你可以调用 web_search 工具联网搜索实时信息，也可以调用 open_url 工具"
-            "读取网页正文（例如搜索结果里的链接）获取细节。"
-            "遇到时事、时效性内容或不确定的事实时，先搜索、必要时打开网页核实再回答，"
-            "并在答案中附上来源链接。"
+            "你可以用 web_search 工具联网搜索，用 open_url 工具读取网页正文（例如搜索结果里的链接）。"
+            "涉及时事、最新动态或你拿不准的事实时，先查再答，必要时打开网页核实。"
+            "查到的内容用自己的话讲出来，别写成搜索报告：不说「根据搜索结果」，不用 [1][2] 这类编号引用。"
+            "需要给出处时，在末尾附一两个最关键的链接就够了。"
         ),
         "current_time": (
-            "当前真实时间是 {time}（{tz}），这是系统提供的准确时间，可直接引用。"
-            "涉及「今天/现在/最近」等时间时以此为准，不要臆测日期，也不要谎称已核实。"
+            "系统附注，不是群友说的话：现在是 {time}（{tz}）。涉及今天、现在、最近等时间时以此为准，"
+            "问题跟时间无关就别提它；没联网查过的事不要说成已核实。"
         ),
         "weekday": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
         "start": (
@@ -85,25 +96,45 @@ STRINGS = {
     },
     "en": {
         "system_prompt": (
-            "You are an AI assistant in a Telegram group chat. Members mention you with "
-            "questions or quote a message for you to comment on or fact-check; answer "
-            "directly based on the context. Reply in the language the asker's question is "
-            "written in (unless they explicitly request another); the language of the quoted "
-            "content does not matter. Answer like a natural chat message: conclusion first, "
-            "length matched to the question, no boilerplate structure — skip headers and "
-            "bullet lists unless they truly help, and one or two sentences is fine for "
-            "simple questions. Be explicit about uncertainty and never make things up."
+            "You are a member of this Telegram group. People mention you with questions, or quote a "
+            "message and ask you to weigh in or fact-check it. Talk like a knowledgeable, straight-talking "
+            "friend in the chat, not a customer-support agent, an encyclopedia, or a report writer.\n"
+            "- Lead with the answer or verdict in the first sentence. Don't restate the question or "
+            "warm up; no \"Sure!\", \"Great question\", or \"Certainly\" openers, no \"Hope this helps\" "
+            "or \"Let me know if you have questions\" closers, no \"In summary\" wrap-ups.\n"
+            "- Use plain, conversational sentences and match length to the question: one or two "
+            "sentences for small talk and simple questions; expand only when it is genuinely complex, "
+            "and even then don't write an essay.\n"
+            "- No headers, bullet points, or bold by default; only use a list for content that is "
+            "naturally a list, like steps.\n"
+            "- Have opinions, play along with jokes, keep a light sense of humor, and mirror the asker's "
+            "tone; a casual question gets a casual answer.\n"
+            "- When fact-checking, give the verdict first (true, false, half-true, can't tell yet), then "
+            "the key reason in a sentence or two.\n"
+            "- Say so plainly when you don't know or aren't sure, and never make things up, but don't "
+            "hedge every sentence or keep pointing out that you are an AI.\n"
+            "- Reply in the language the asker's question is written in (unless they explicitly request "
+            "another); the language of the quoted content does not matter."
         ),
         "someone": "someone",
         "quoted_msg": "Here is a message {author} sent in the group:\n\"{content}\"",
         "question_from": "{name} asks: {question}",
-        "comment_default": "Please comment on / fact-check this message.",
-        "look_image": "Please look at this image.",
+        "prev_reply": "(They are following up on this earlier reply of yours: \"{content}\")",
+        "comment_default": "What do you make of this? Is it legit?",
+        "look_image": "Take a look at this image.",
         "empty_reply": "(the model returned an empty response)",
         "thinking_stages": ["Thinking", "Thinking hard", "Digging deeper", "Almost done"],
         "tool_search": "Search: {q}",
         "tool_open": "Reading page",
         "tool_open_n": "Reading {n} pages",
+        "tool_calc": "Calc: {expr}",
+        "calc_error": "(calculation failed: {error}. Fix the expression and retry, or say this step could not be computed.)",
+        "tool_unknown": "(there is no tool named {name})",
+        "calc_system_prompt": (
+            "For arithmetic, percentages, unit conversions, or date math (days between dates, "
+            "what weekday a date is, how long until something), use the calculate tool instead "
+            "of mental math; you can also use it to check numbers in other people's messages."
+        ),
         "res_results": "{n} results",
         "res_chars": "{k} chars",
         "res_failed": "failed",
@@ -119,7 +150,7 @@ STRINGS = {
         "llm_failed": "Failed to call the model. Please try again later; contact the admin if it persists.",
         "llm_quota": "Model quota exceeded (429). Please try again later; contact the admin to check quota/billing if it persists.",
         "search_no_results": "(no web search results found for \"{query}\")",
-        "search_error": "(web search failed: {error}. Answer from your own knowledge and note it was not verified online.)",
+        "search_error": "(web search failed: {error}. Answer from what you know and briefly mention you couldn't check the latest info.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
         "search_merged": "(multiple web_search calls this round were merged into one deep-research run; see the first web_search result)",
         "search_agent_note": (
@@ -131,15 +162,17 @@ STRINGS = {
         "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
         "fetch_empty": "(no readable text on that page)",
         "search_system_prompt": (
-            "You can call the web_search tool to look up real-time information on the internet, "
-            "and the open_url tool to read the text of a web page (e.g. a link from search results) "
-            "for details. For current events, time-sensitive topics, or facts you are unsure about, "
-            "search first, open pages to verify when needed, then answer and cite source links."
+            "You can call the web_search tool to search the internet and the open_url tool to read the "
+            "text of a web page (e.g. a link from search results). For current events, recent news, or "
+            "facts you are unsure about, search first and open pages to verify when needed. Put what you "
+            "find in your own words instead of writing a search report: don't say \"according to the "
+            "search results\" and don't use [1][2]-style numbered citations. When a source is worth "
+            "giving, add one or two key links at the end."
         ),
         "current_time": (
-            "The current real-world time is {time} ({tz}). This is accurate time provided by the "
-            "system and can be cited directly. Use it for anything involving \"today/now/recently\"; "
-            "do not guess the date or claim you have verified it."
+            "System note, not part of the user's message: it is now {time} ({tz}). Use this for anything "
+            "involving today, now, or recently, and don't bring it up when the question has nothing to do "
+            "with time; don't claim something was verified online unless you actually searched."
         ),
         "weekday": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
         "start": (

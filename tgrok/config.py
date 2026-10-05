@@ -16,7 +16,10 @@ _llm_base_raw = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
 LLM_BASE_URL = _llm_base_raw or "http://localhost:1234/v1"
 LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
-SYSTEM_PROMPT_OVERRIDE = os.getenv("SYSTEM_PROMPT")
+# 很多部署方式（未加引号的 .env 值、面板里的环境变量输入框）写不了真正的换行，
+# 所以提示词里字面的 \n 一律当换行处理；已经是真换行的值不受影响。None 表示未设置
+_system_prompt_raw = os.getenv("SYSTEM_PROMPT")
+SYSTEM_PROMPT_OVERRIDE = None if _system_prompt_raw is None else _system_prompt_raw.replace("\\n", "\n")
 # 自定义请求的 User-Agent（部分云端网关会校验 UA），留空使用 SDK 默认值
 LLM_USER_AGENT = os.getenv("LLM_USER_AGENT", "").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
@@ -78,11 +81,13 @@ JINA_FALLBACK = os.getenv("JINA_FALLBACK", "true").strip().lower() in ("1", "tru
 JINA_API_KEY = os.getenv("JINA_API_KEY", "").strip()  # 可选，配置后速率限制更宽松
 # 主模型协议（单键指定）：
 #   openai = OpenAI 兼容 /chat/completions（默认，中转站/LM Studio/vLLM/官方 OpenAI）
+#   responses = OpenAI Responses API /responses（GPT-6.1 Sol 等只在 Responses 上支持
+#            工具调用的模型必须用它，bot 自带工具循环照常可用）
 #   gemini = Gemini 原生（google-genai SDK，google_search + url_context 由服务端执行，
 #            bot 自带工具循环不再使用；LLM_API_KEY 填 AI Studio key）
 #   claude = Anthropic Messages API 原生（anthropic SDK，原生 thinking 与工具语义，
 #            bot 自带工具循环照常可用）
-# openai/claude 用 LLM_BASE_URL；gemini 用 GEMINI_BASE_URL（留空 = Google 官方）
+# openai/responses/claude 用 LLM_BASE_URL；gemini 用 GEMINI_BASE_URL（留空 = Google 官方）
 LLM_PROTOCOL = os.getenv("LLM_PROTOCOL", "").strip().lower()
 if not LLM_PROTOCOL:
     # 兼容布尔开关时代的旧键
@@ -92,7 +97,7 @@ if not LLM_PROTOCOL:
         LLM_PROTOCOL = "gemini"
     else:
         LLM_PROTOCOL = "openai"
-if LLM_PROTOCOL not in ("openai", "gemini", "claude"):
+if LLM_PROTOCOL not in ("openai", "responses", "gemini", "claude"):
     logging.getLogger(__name__).warning("未知 LLM_PROTOCOL=%s，回退 openai", LLM_PROTOCOL)
     LLM_PROTOCOL = "openai"
 GEMINI_NATIVE_SEARCH = LLM_PROTOCOL == "gemini"

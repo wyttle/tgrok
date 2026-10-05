@@ -34,7 +34,7 @@ class FakeMsg:
         s.sent=[]; s.log=[]; s.chat_id=-100
         s.from_user=types.SimpleNamespace(id=uid)
     async def reply_text(s, text, parse_mode=None, reply_markup=None):
-        fs=FakeSent(s.log); fs.text=text; s.sent.append(fs); s.log.append(text); return fs
+        fs=FakeSent(s.log); fs.text=text; fs.message_id=len(s.sent)+1; s.sent.append(fs); s.log.append(text); return fs
 
 def chunk_text(c):
     d=types.SimpleNamespace(content=c, tool_calls=None)
@@ -103,7 +103,7 @@ async def cs3(h, use_tools):
     raise RuntimeError("429 RESOURCE_EXHAUSTED")
 set_create(cs3)
 m=FakeMsg(); r=run(chat.stream_reply(m, HIST))
-assert r==(None,"") and n["v"]==1 and "配额超限" in m.sent[0].text
+assert r==([],"") and n["v"]==1 and "配额超限" in m.sent[0].text
 ok("429 无重试")
 
 # 4. 空闲看门狗收尾
@@ -160,9 +160,11 @@ ok("TUI 进度序列")
 big="\n".join("段%d %s" % (i, "内容"*40) for i in range(100))
 async def cs7(h, use_tools): return stream_of([chunk_text(big)])
 set_create(cs7)
-m=FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+m=FakeMsg(); ids, ans = run(chat.stream_reply(m, HIST))
 assert all(len(x) < 4096 for x in m.log)
 assert ans.replace("\n","").replace(" ","")==big.replace("\n","").replace(" ","")
+# 每一段都要能被回复追问：返回全部分段消息的 id，而不只是最后一条
+assert len(ids) > 1 and ids == [x.message_id for x in m.sent]
 ok("长输出分段")
 
 # 8. thought_signature 回传 + index=None 分槽
@@ -189,8 +191,9 @@ config.GEMINI_SEARCH_MODEL = ""
 ok("同轮搜索合并")
 
 # 10. 时间注入挂在用户消息尾部
+from datetime import datetime  # noqa: E402
 c = prompt.with_time("你好")
-assert c.startswith("你好") and "当前真实时间" in c
+assert c.startswith("你好") and datetime.now(config.BOT_TZ).strftime("%Y-%m-%d") in c
 ok("时间注入")
 
 # 11. 相册展开与回退
@@ -467,6 +470,189 @@ set_create(cs28b)
 m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
 assert ans == "唯一草稿", ans
 ok("工具轮草稿丢弃/兜底")
+
+# 29. 中间编辑遇到 Telegram 网络错误：只丢这一次显示，不能截断正文
+from telegram.error import TimedOut  # noqa: E402
+class FlakySent(FakeSent):
+    async def edit_text(s, text, parse_mode=None, reply_markup=None):
+        if not s.log or s.log[-1] != "flaky":
+            s.log.append("flaky")
+            raise TimedOut()
+        await FakeSent.edit_text(s, text, parse_mode, reply_markup)
+class FlakyMsg(FakeMsg):
+    async def reply_text(s, text, parse_mode=None, reply_markup=None):
+        fs = FlakySent(s.log); fs.text = text; s.sent.append(fs); return fs
+def slow_stream(parts):
+    class S:
+        def __init__(s): s.p = list(parts)
+        def __aiter__(s): return s
+        async def __anext__(s):
+            await asyncio.sleep(0.05)  # 让占位消息先落地，首个 delta 才会触发中间编辑
+            if s.p: return s.p.pop(0)
+            raise StopAsyncIteration
+        async def close(s): pass
+    return S()
+async def cs29(h, use_tools): return slow_stream([chunk_text("前半段，"), chunk_text("后半段。")])
+set_create(cs29)
+m = FlakyMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "前半段，后半段。", ans
+assert "flaky" in m.log and m.sent[0].text == "前半段，后半段。"
+ok("中间编辑网络错误不截断正文")
+
+# 30. 历史截断后第一条对话必须是 user（严格交替的接口/模板拒绝 assistant 开头）
+long_hist = [{"role": "system", "content": "s"}] + [
+    {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(2 * tg.MAX_HISTORY + 1)]
+trimmed = tg.trim_history(long_hist)
+assert trimmed[0]["role"] == "system" and trimmed[1]["role"] == "user"
+assert trimmed[-1] is long_hist[-1] and len(trimmed) <= tg.MAX_HISTORY + 1
+ok("历史截断从 user 开始")
+
+# 31. 配置向导读写多行值：不能截断提示词；写出的单行值 python-dotenv 读回逐字一致
+import importlib.util  # noqa: E402
+from dotenv import dotenv_values  # noqa: E402
+_spec = importlib.util.spec_from_file_location(
+    "configure", Path(__file__).resolve().parent.parent / "configure.py")
+configure = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(configure)
+prompt31 = '第一段\n\n# 标题\n- 带"引号"、反斜杠\\和 # 号\n结尾'
+parsed31 = configure.parse_env("A=1\nSYSTEM_PROMPT='" + prompt31 + "'\nB=2\n")
+assert parsed31 == {"A": "1", "SYSTEM_PROMPT": prompt31, "B": "2"}, parsed31
+line31 = configure.env_line("SYSTEM_PROMPT", prompt31)
+assert "\n" not in line31
+assert configure.parse_env(line31 + "\n")["SYSTEM_PROMPT"] == prompt31
+import io  # noqa: E402
+assert dotenv_values(stream=io.StringIO(line31 + "\n"))["SYSTEM_PROMPT"] == prompt31
+ok("配置向导多行值读写")
+
+# 32. calculate：结果精确、日期推算正确；越界表达式和沙箱逃逸被拒绝而不是执行
+from tgrok import calc  # noqa: E402
+assert calc.evaluate("1299*0.85") == "1104.15"
+assert calc.evaluate("2^10 + 3*(4-1)") == "1033"
+assert calc.evaluate("7/2 >= 3.5") == "true"
+assert calc.evaluate("date('2026-12-25') - date('2026-10-05')") == "81 days"
+assert calc.evaluate("date('2024-02-28') + days(1)").startswith("2024-02-29")
+for bad in ("9**9**9", "factorial(5000)", "__import__('os')", "(1).__class__", "'a'*10", "1/0"):
+    try:
+        calc.evaluate(bad)
+        raise AssertionError(f"accepted {bad}")
+    except calc.CalcError:
+        pass
+assert calc.run_calculate("1/0").startswith("（")  # 失败文案让进度行显示为失败
+ok("calculate 精确计算与边界")
+
+# 33. Responses：chat 历史转换（instructions/图片/推理回传/工具结果）与事件流聚合
+from tgrok.llm import responses as resp_mod  # noqa: E402
+hist33 = [
+    {"role": "system", "content": "SYS"},
+    {"role": "user", "content": [
+        {"type": "text", "text": "看图"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}]},
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_1", "function": {"name": "calculate", "arguments": '{"expression":"1+1"}'},
+         "extra_content": {"responses_reasoning": [
+             {"type": "reasoning", "id": "rs_1", "encrypted_content": "ENC", "summary": []}]}}]},
+    {"role": "tool", "tool_call_id": "call_1", "name": "calculate", "content": "1+1 = 2"},
+]
+instr33, items33 = resp_mod.to_responses_input(hist33)
+assert instr33 == "SYS"
+assert items33[0]["content"][1] == {"type": "input_image", "image_url": "data:image/png;base64,QUJD"}
+assert [i.get("type") for i in items33[1:]] == ["reasoning", "function_call", "function_call_output"]
+assert items33[2]["call_id"] == "call_1" and "id" not in items33[2]
+assert items33[3] == {"type": "function_call_output", "call_id": "call_1", "output": "1+1 = 2"}
+assert [i.get("type") for i in resp_mod.to_responses_input(hist33, keep_reasoning=False)[1][1:]] == [
+    "function_call", "function_call_output"]
+def rev(**kw): return types.SimpleNamespace(**kw)
+fc_item = rev(type="function_call", call_id="call_9", name="calculate", arguments="")
+events33 = [
+    rev(type="response.output_item.done", output_index=0,
+        item=rev(type="reasoning", id="rs_9", encrypted_content="E9", summary=[])),
+    rev(type="response.output_item.done", output_index=1,
+        item=rev(type="reasoning", id="rs_x", encrypted_content=None, summary=[])),
+    rev(type="response.output_text.delta", delta="先算一下"),
+    rev(type="response.output_item.added", output_index=2, item=fc_item),
+    rev(type="response.function_call_arguments.delta", output_index=2, delta='{"expression":'),
+    rev(type="response.function_call_arguments.delta", output_index=2, delta='"2*3"}'),
+    rev(type="response.completed"),
+    rev(type="response.output_text.delta", delta="不该被读到"),
+]
+got33 = []
+async def sink33(d): got33.append(d)
+calls33, content33 = run(resp_mod.drain_stream(stream_of(events33), sink33))
+assert content33 == "先算一下" and got33 == ["先算一下"]
+am33 = llm.assistant_tool_call_msg(calls33, content33)
+assert am33["tool_calls"][0]["id"] == "call_9"
+assert json.loads(am33["tool_calls"][0]["function"]["arguments"]) == {"expression": "2*3"}
+# 只回传带加密内容的推理条目：store=False 时没有加密内容的条目回传会报找不到
+assert [r["id"] for r in am33["tool_calls"][0]["extra_content"]["responses_reasoning"]] == ["rs_9"]
+try:
+    run(resp_mod.drain_stream(stream_of([rev(type="response.failed",
+        response=rev(error=rev(code="server_error", message="boom")))]), sink33))
+    raise AssertionError("failed event must raise")
+except RuntimeError as e:
+    assert "boom" in str(e)
+ok("Responses 历史转换/流聚合")
+
+# 34. Responses 降级：不认 store/include 时去掉重试并不再回传推理条目；采样参数被拒同样降级
+config.LLM_TEMPERATURE = 0.7
+seen34 = []
+class _RC:
+    async def create(s, **kw):
+        seen34.append(kw)
+        if len(seen34) == 1:
+            raise BadRequestError("Unsupported parameter: 'temperature' is not supported with this model.",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                body={"error": {"param": "temperature", "message": "unsupported"}})
+        if len(seen34) == 2:
+            raise BadRequestError("Unknown parameter: 'store'.",
+                response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                body={"error": {"param": "store", "message": "Unknown parameter: 'store'."}})
+        return "RS"
+a34 = resp_mod.ResponsesAdapter(client=types.SimpleNamespace(responses=_RC()))
+assert run(a34._create_stream(hist33, use_tools=True)) == "RS"
+assert seen34[0]["temperature"] == 0.7 and seen34[0]["store"] is False
+assert "temperature" not in seen34[1] and seen34[1]["include"] == ["reasoning.encrypted_content"]
+assert "store" not in seen34[2] and "include" not in seen34[2]
+assert all(i.get("type") != "reasoning" for i in seen34[2]["input"])
+assert seen34[2]["instructions"] == "SYS" and seen34[2]["tools"][0]["name"] == "calculate"
+assert a34.stateless_supported is False and a34.sampling_supported is False
+config.LLM_TEMPERATURE = None
+ok("Responses 参数降级")
+
+# 35. 端到端：Responses 适配器 + calculate 工具循环，算出的结果回灌给模型、进度显示算式
+config.SEARCH_ENABLED = False
+seen35 = []
+class _RC35:
+    async def create(s, **kw):
+        seen35.append(kw)
+        if len(seen35) == 1:
+            return stream_of([
+                rev(type="response.output_item.added", output_index=0,
+                    item=rev(type="function_call", call_id="c1", name="calculate", arguments="")),
+                rev(type="response.output_item.done", output_index=0,
+                    item=rev(type="function_call", call_id="c1", name="calculate",
+                             arguments='{"expression":"1299*0.85"}')),
+                rev(type="response.completed")])
+        return stream_of([rev(type="response.output_text.delta", delta="打完折 1104.15。"),
+                          rev(type="response.completed")])
+llm.adapter = resp_mod.ResponsesAdapter(client=types.SimpleNamespace(responses=_RC35()))
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "打完折 1104.15。", ans
+assert [t_["name"] for t_ in seen35[0]["tools"]] == ["calculate"]  # 没配搜索源也能用计算
+out35 = [i for i in seen35[1]["input"] if i.get("type") == "function_call_output"]
+assert out35 == [{"type": "function_call_output", "call_id": "c1", "output": "1299*0.85 = 1104.15"}]
+assert any("计算: 1299*0.85" in x and "= 1104.15" in x for x in m.log)
+ok("Responses + calculate 工具循环")
+
+# 36. 配置向导的额外参数：键=值 与 JSON 解析一致、能回显；推理强度按协议写成对应字段
+params36 = "thinking.type=enabled, thinking.budget_tokens=1000, verbosity=low, stream_usage=true"
+want36 = {"thinking": {"type": "enabled", "budget_tokens": 1000}, "verbosity": "low", "stream_usage": True}
+assert configure.parse_extra_params(params36) == want36
+assert configure.parse_extra_params(json.dumps(want36)) == want36
+assert configure.parse_extra_params(configure.format_extra_params(want36)) == want36
+assert configure.parse_extra_params("no-equals-sign") is None
+assert configure.effort_body("low", "responses") == {"reasoning": {"effort": "low"}}
+assert configure.effort_body("low", "") == {"reasoning_effort": "low"}
+assert configure.is_reasoning_gpt("openai/gpt-6.1-sol") and not configure.is_reasoning_gpt("gpt-4o")
+ok("配置向导额外参数/推理强度")
 
 llm.adapter = orig_adapter
 

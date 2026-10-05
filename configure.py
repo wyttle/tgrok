@@ -98,13 +98,30 @@ TEXT = {
         "temperature": "采样温度 temperature（0~2，越高越活泼；留空=后端默认，输入 - 清除已设值，模型不支持时自动忽略）",
         "top_p": "核采样 top_p（0~1，留空=后端默认，输入 - 清除已设值）",
         "float_invalid": "请输入数字（如 0.9），或输入 - 清除",
-        "extra_body": '额外请求体参数 JSON（厂商私有参数原样并入请求，如 {"reasoning_effort":"low"} 或 {"thinking":{"type":"enabled","budget_tokens":1000}}；留空=无，输入 - 清除已设值，后端不认时自动忽略）',
-        "json_invalid": '请输入 JSON 对象（如 {"reasoning_effort":"low"}），或输入 - 清除',
+        "max_tokens_reasoning": "  推理模型的思考过程也计入 token 上限，建议至少 4096，默认值已调高",
+        "effort_intro": "检测到 {model} 是推理型 GPT 模型，选择推理强度（越高越慢、越贵；群聊建议 low）：",
+        "effort_desc": {
+            "none": "不推理，最快（部分模型不支持，如 gpt-6.1-sol）",
+            "minimal": "极少推理（部分模型不支持）",
+            "low": "快，日常聊天推荐",
+            "medium": "多数模型的默认值",
+            "high": "更仔细，明显变慢",
+            "xhigh": "很慢，适合难题",
+            "max": "最慢最贵",
+        },
+        "effort_pick": "推理强度（填序号，或直接输入其它值；输入 - 表示不设置、用后端默认）",
+        "effort_invalid": "请输入列表里的序号、推理强度名称（如 low），或输入 -",
+        "sampling_skipped": "  推理模型不接受 temperature/top_p，已跳过并清空这两项",
+        "extra_params": "其它额外请求参数（高级，可留空）：写成 键=值，多个用逗号分隔，嵌套键用点号，如 thinking.type=enabled, thinking.budget_tokens=1000；输入 - 清除",
+        "extra_invalid": "格式应为 键=值（多个用逗号分隔，如 a=1, b.c=low），或输入 - 清除",
+        "extra_old_invalid": "  原 LLM_EXTRA_BODY 无法解析，已忽略：{raw}",
         "max_history": "多轮对话保留消息条数",
         "tz": "时区（IANA 名称，用于告知模型当前真实时间；无法识别时 bot 会回退 UTC）",
         "int_invalid": "请输入正整数",
         "s8": "【9/9】系统提示词（定义 bot 的角色和语气，跳过则使用内置默认值）",
         "sys_prompt": "系统提示词",
+        "multiline_hint": "  直接回车保留原值，输入 - 清除；也可以粘贴多行内容，粘贴完后单独一行输入 . 结束",
+        "api_pick": "接口类型：1 = Chat Completions（/chat/completions，兼容性最好）  2 = Responses（/responses，GPT-6.1 Sol 等新模型调用工具需要）",
         "summary": "配置汇总：",
         "write_confirm": "确认写入 {path}？",
         "cancelled": "已取消，未写入任何文件。",
@@ -201,13 +218,30 @@ TEXT = {
         "temperature": "Sampling temperature (0-2, higher = livelier; empty = backend default, enter - to clear, auto-ignored if unsupported)",
         "top_p": "Nucleus sampling top_p (0-1, empty = backend default, enter - to clear)",
         "float_invalid": "Enter a number (e.g. 0.9), or - to clear",
-        "extra_body": 'Extra request-body JSON (vendor params merged into every request, e.g. {"reasoning_effort":"low"} or {"thinking":{"type":"enabled","budget_tokens":1000}}; empty = none, enter - to clear, auto-ignored if the backend rejects it)',
-        "json_invalid": 'Enter a JSON object (e.g. {"reasoning_effort":"low"}), or - to clear',
+        "max_tokens_reasoning": "  Reasoning tokens count toward the limit; at least 4096 is recommended, so the default was raised",
+        "effort_intro": "{model} is a reasoning GPT model. Pick a reasoning effort (higher = slower and pricier; low suits group chat):",
+        "effort_desc": {
+            "none": "no reasoning, fastest (unsupported by some models, e.g. gpt-6.1-sol)",
+            "minimal": "very little reasoning (unsupported by some models)",
+            "low": "fast, recommended for chat",
+            "medium": "the default on most models",
+            "high": "more careful, noticeably slower",
+            "xhigh": "very slow, for hard problems",
+            "max": "slowest and most expensive",
+        },
+        "effort_pick": "Reasoning effort (enter a number or type another value; - = don't set, use the backend default)",
+        "effort_invalid": "Enter a number from the list, an effort name (e.g. low), or -",
+        "sampling_skipped": "  Reasoning models don't accept temperature/top_p; skipped and cleared",
+        "extra_params": "Other extra request params (advanced, optional): key=value, comma-separated, dots for nested keys, e.g. thinking.type=enabled, thinking.budget_tokens=1000; enter - to clear",
+        "extra_invalid": "Use key=value (comma-separated, e.g. a=1, b.c=low), or enter - to clear",
+        "extra_old_invalid": "  Could not parse the existing LLM_EXTRA_BODY, ignoring it: {raw}",
         "max_history": "Messages kept per conversation",
         "tz": "Timezone (IANA name, used to tell the model the current real time; falls back to UTC if unrecognized)",
         "int_invalid": "Please enter a positive integer",
         "s8": "[9/9] System prompt (defines the bot's role and tone; skip for the built-in default)",
         "sys_prompt": "System prompt",
+        "multiline_hint": "  Press Enter to keep, type - to clear, or paste multiple lines and finish with a line containing only .",
+        "api_pick": "API type: 1 = Chat Completions (/chat/completions, widest support)  2 = Responses (/responses, required for tool calling on GPT-6.1 Sol and similar models)",
         "summary": "Configuration summary:",
         "write_confirm": "Write to {path}?",
         "cancelled": "Cancelled. Nothing was written.",
@@ -241,23 +275,56 @@ TEXT = {
 T = TEXT["zh"]  # set after language selection
 
 
-def load_existing(path: Path) -> dict:
-    values = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+_DQ_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+
+
+def parse_env(text: str) -> dict:
+    """解析 .env 文本，语义与 python-dotenv / Docker Compose 一致的子集：
+    单引号值为字面量、双引号值支持 \\n \\t \\" \\\\ 转义，两种引号都可以跨行。
+    逐行解析会把多行提示词截成第一行，所以这里按字符扫描引号的闭合位置。
+    """
+    values, i, n = {}, 0, len(text)
+    while i < n:
+        end = text.find("\n", i)
+        end = n if end == -1 else end
+        line = text[i:end]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            i = end + 1
             continue
-        key, _, val = line.partition("=")
-        val = val.strip()
-        if len(val) >= 2 and val[0] == val[-1] == '"':
-            val = val[1:-1].replace('\\"', '"')
-        elif len(val) >= 2 and val[0] == val[-1] == "'":
-            # dotenv 的单引号值是字面量：只剥外层引号（如手写的 LLM_EXTRA_BODY='{...}'）
-            val = val[1:-1]
-        values[key.strip()] = val
+        key, _, rest = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        rest_start = i + len(line) - len(rest)
+        j = rest_start
+        while j < n and text[j] in " \t":
+            j += 1
+        quote = text[j] if j < n and text[j] in "'\"" else ""
+        if not quote:
+            values[key] = rest.strip()
+            i = end + 1
+            continue
+        buf, j = [], j + 1
+        while j < n and text[j] != quote:
+            if quote == '"' and text[j] == "\\" and j + 1 < n:
+                nxt = text[j + 1]
+                buf.append(_DQ_ESCAPES.get(nxt, "\\" + nxt))
+                j += 2
+                continue
+            buf.append(text[j])
+            j += 1
+        values[key] = "".join(buf)
+        # 跳过闭合引号所在行的剩余部分（行内注释等）
+        nl = text.find("\n", j)
+        i = n if nl == -1 else nl + 1
     return values
+
+
+def load_existing(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    return parse_env(path.read_text(encoding="utf-8"))
 
 
 def ask(label: str, default: str = "", required: bool = False, validate=None, secret: bool = False) -> str:
@@ -281,6 +348,44 @@ def ask(label: str, default: str = "", required: bool = False, validate=None, se
                 print(f"  {T['validation_error'].format(message=msg)}\n")
                 continue
         return raw
+
+
+def preview(val: str, limit: int = 80) -> str:
+    """单行显示：短的单行值原样返回，多行或过长的值显示首行开头 + 总字数。"""
+    text = val.strip()
+    first, sep, _ = text.partition("\n")
+    if not sep and len(first) <= limit:
+        return text
+    return f"{first[:limit]}…（{len(val)}）"
+
+
+def ask_multiline(label: str, default: str = "") -> str:
+    """多行输入：直接回车保留原值，输入 - 清除；否则可粘贴多行，单独一行输入 . 结束。
+    input() 一次只读一行，直接粘贴多行文本会被截成第一行、剩余行还会灌进后面的问题。
+    """
+    hint = f"[{T['keep']}: {preview(default)}]" if default else f"[{T['optional']}]"
+    print(f"{label} {hint}")
+    print(T["multiline_hint"])
+    try:
+        first = input("> ")
+    except EOFError:
+        return default
+    if not first.strip():
+        return default
+    if first.strip() == "-":
+        return ""
+    if first.strip() == ".":
+        return default
+    lines = [first]
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == ".":
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def confirm(prompt: str, default_yes: bool = False) -> bool:
@@ -321,15 +426,118 @@ def validate_opt_float(raw: str):
         return False, T["float_invalid"]
 
 
-def validate_opt_json(raw: str):
-    if raw == "-":
+# 推理强度候选（按从快到慢排列）；不同模型支持的子集不同，后端拒绝时 bot 会自动去掉该参数
+REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+_EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+# 两种协议各自的推理强度写法；切换协议或重选强度时先把两种都清掉
+_REASONING_KEYS = ("reasoning", "reasoning_effort")
+
+
+def is_reasoning_gpt(model: str) -> bool:
+    """o 系列与 GPT-5 及以后的模型支持 reasoning effort（兼容 openai/gpt-6.1-sol 这类带前缀的名字）。"""
+    name = model.strip().lower().rsplit("/", 1)[-1]
+    if re.match(r"o\d", name):
+        return True
+    m = re.match(r"gpt-(\d+)", name)
+    return bool(m) and int(m.group(1)) >= 5
+
+
+def current_effort(extra: dict) -> str:
+    reasoning = extra.get("reasoning")
+    if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
+        return reasoning["effort"]
+    effort = extra.get("reasoning_effort")
+    return effort if isinstance(effort, str) else ""
+
+
+def effort_body(effort: str, protocol: str) -> dict:
+    """Responses 用 reasoning.effort，Chat Completions 用顶层 reasoning_effort。"""
+    if not effort:
+        return {}
+    return {"reasoning": {"effort": effort}} if protocol == "responses" else {"reasoning_effort": effort}
+
+
+def validate_effort(raw: str):
+    raw = raw.strip().lower()
+    if raw == "-" or _EFFORT_RE.match(raw) or (raw.isdigit() and 1 <= int(raw) <= len(REASONING_EFFORTS)):
         return True, ""
-    try:
-        if isinstance(json.loads(raw), dict):
-            return True, ""
-    except ValueError:
-        pass
-    return False, T["json_invalid"]
+    return False, T["effort_invalid"]
+
+
+def _scalar(raw: str):
+    raw = raw.strip()
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low == "null":
+        return None
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if re.fullmatch(r"-?(\d+\.\d*|\.\d+|\d+(\.\d*)?[eE][-+]?\d+)", raw):
+        return float(raw)
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+        return raw[1:-1]
+    return raw
+
+
+def parse_extra_params(raw: str) -> dict | None:
+    """额外请求参数：键=值，多个用逗号分隔，嵌套键用点号（thinking.budget_tokens=1000）。
+    也接受 JSON 对象原文。无法解析时返回 None。"""
+    raw = raw.strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
+    out: dict = {}
+    for part in re.split(r"[,，;；]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        key, sep, val = part.partition("=")
+        keys = [k.strip() for k in key.split(".")]
+        if not sep or not all(keys):
+            return None
+        node = out
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+            if not isinstance(node, dict):
+                return None
+        node[keys[-1]] = _scalar(val)
+    return out
+
+
+def format_extra_params(extra: dict) -> str:
+    """dict → 键=值 文本（向导里展示和作为默认值）；含列表等无法扁平表示的值时回退 JSON。"""
+    pairs = []
+
+    def walk(prefix: str, node) -> bool:
+        for k, v in node.items():
+            key = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, dict) and v:
+                if not walk(key, v):
+                    return False
+            elif isinstance(v, (str, int, float, bool)) or v is None:
+                text = json.dumps(v) if isinstance(v, bool) or v is None else str(v)
+                if isinstance(v, str) and ("," in v or "=" in v or v != v.strip()):
+                    return False
+                pairs.append(f"{key}={text}")
+            else:
+                return False
+        return True
+
+    if walk("", extra):
+        return ", ".join(pairs)
+    return json.dumps(extra, ensure_ascii=False)
+
+
+def validate_extra_params(raw: str):
+    if raw.strip() == "-" or parse_extra_params(raw) is not None:
+        return True, ""
+    return False, T["extra_invalid"]
 
 
 def check_telegram_token(token: str) -> str | None:
@@ -354,8 +562,14 @@ def list_models(base_url: str, api_key: str, user_agent: str = "") -> list[str]:
 
 
 def env_line(key: str, val: str) -> str:
-    if any(c in val for c in (" ", "#", '"')):
-        val = '"' + val.replace('"', '\\"') + '"'
+    """写成单行：需要时加双引号，换行等控制字符转成 \\n 转义。
+    python-dotenv 和 Docker Compose 都会把双引号里的 \\n 还原成换行，
+    多行提示词因此不会把 .env 拆成多行、被逐行解析的工具截断。
+    """
+    if any(c in val for c in (" ", "#", '"', "\\", "\n", "\r", "\t")):
+        escaped = (val.replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+        val = f'"{escaped}"'
     return f"{key}={val}"
 
 
@@ -597,6 +811,11 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     if not model:
         model = ask(T["model_name"], default=model_default or "local-model", required=True)
     cfg["LLM_MODEL"] = model
+    if backend == "1" and not model.lower().startswith("gemini"):
+        # OpenAI 兼容后端可选 Responses 接口：GPT-6.1 Sol 等模型只在 /responses 上支持工具调用
+        api_default = "2" if old_protocol == "responses" or model.lower().startswith("gpt-6") else "1"
+        api = ask(T["api_pick"], default=api_default, validate=validate_route).strip()
+        cfg["LLM_PROTOCOL"] = "responses" if api == "2" else ""
     print()
 
     # ---- 6. Vision ----
@@ -713,20 +932,58 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
 
     # ---- 8. Generation params & timezone ----
     print(T["s7"])
-    cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old.get("MAX_TOKENS", "1024"), validate=validate_int)
-    raw_t = ask(T["temperature"], default=old.get("LLM_TEMPERATURE", ""), validate=validate_opt_float)
-    cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
-    raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
-    cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
-    raw_x = ask(T["extra_body"], default=old.get("LLM_EXTRA_BODY", ""), validate=validate_opt_json)
-    cfg["LLM_EXTRA_BODY"] = "" if raw_x == "-" else raw_x
+    protocol = cfg.get("LLM_PROTOCOL", "")
+    reasoning_gpt = protocol in ("", "responses") and is_reasoning_gpt(cfg["LLM_MODEL"])
+    old_max = old.get("MAX_TOKENS", "1024")
+    if reasoning_gpt and old_max.isdigit() and int(old_max) < 4096:
+        # 推理 token 也计入上限，1024 很容易被思考过程吃光，导致回复截断或为空
+        print(T["max_tokens_reasoning"])
+        old_max = "4096"
+    cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old_max, validate=validate_int)
+
+    old_extra_raw = old.get("LLM_EXTRA_BODY", "")
+    extra = parse_extra_params(old_extra_raw)
+    if extra is None:
+        print(T["extra_old_invalid"].format(raw=old_extra_raw))
+        extra = {}
+
+    effort = ""
+    if reasoning_gpt:
+        print(T["effort_intro"].format(model=cfg["LLM_MODEL"]))
+        for i, name in enumerate(REASONING_EFFORTS, 1):
+            print(f"    {i}. {name:<8} {T['effort_desc'][name]}")
+        raw_e = ask(T["effort_pick"], default=current_effort(extra) or "low",
+                    validate=validate_effort).strip().lower()
+        if raw_e.isdigit():
+            effort = REASONING_EFFORTS[int(raw_e) - 1]
+        elif raw_e != "-":
+            effort = raw_e
+        # 推理强度由向导管理：两种写法都先清掉，再按当前协议写回
+        extra = {k: v for k, v in extra.items() if k not in _REASONING_KEYS}
+
+    if reasoning_gpt and effort != "none":
+        # 推理档位不是 none 时，GPT 推理模型不接受 temperature/top_p
+        print(T["sampling_skipped"])
+        cfg["LLM_TEMPERATURE"] = ""
+        cfg["LLM_TOP_P"] = ""
+    else:
+        raw_t = ask(T["temperature"], default=old.get("LLM_TEMPERATURE", ""), validate=validate_opt_float)
+        cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
+        raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
+        cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
+
+    raw_x = ask(T["extra_params"], default=format_extra_params(extra) if extra else "",
+                validate=validate_extra_params).strip()
+    extra = {} if raw_x == "-" else (parse_extra_params(raw_x) or {})
+    extra.update(effort_body(effort, protocol))
+    cfg["LLM_EXTRA_BODY"] = json.dumps(extra, ensure_ascii=False, separators=(",", ":")) if extra else ""
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
     print()
 
     # ---- 9. System prompt ----
     print(T["s8"])
-    cfg["SYSTEM_PROMPT"] = ask(T["sys_prompt"], default=old.get("SYSTEM_PROMPT", ""))
+    cfg["SYSTEM_PROMPT"] = ask_multiline(T["sys_prompt"], default=old.get("SYSTEM_PROMPT", ""))
     print()
 
     # 向导未覆盖的自定义配置项（如 SEARCH_MAX_RESULTS、FETCH_CHAR_LIMIT 等）原样保留
@@ -741,7 +998,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         if not val:
             continue
         is_secret = "TOKEN" in key or key.endswith("_KEY")
-        shown = (val[:8] + "…" + val[-4:]) if is_secret and len(val) > 16 else val
+        shown = (val[:8] + "…" + val[-4:]) if is_secret and len(val) > 16 else preview(val)
         print(f"  {key} = {shown}")
     print("=" * 52)
     if not confirm(T["write_confirm"].format(path=env_path), default_yes=True):

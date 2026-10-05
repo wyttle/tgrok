@@ -12,7 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
-from . import config, llm, web
+from . import calc, config, llm, web
 from .config import STREAM_CURSOR, STREAM_EDIT_INTERVAL, STREAM_SEGMENT_LIMIT
 from .i18n import STRINGS, t
 from .config import BOT_LANG
@@ -40,6 +40,32 @@ def to_telegram_markdown(text: str) -> str:
     """
     return telegramify_markdown.markdownify(_normalize_headings(text))
 
+
+_MD_SPECIAL_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
+# 流式光标的 MarkdownV2 转义形式：中间编辑也走 MarkdownV2，光标字符必须转义
+_MD_CURSOR = _MD_SPECIAL_RE.sub(r"\\\1", STREAM_CURSOR)
+
+
+def _streaming_markdown(text: str) -> str:
+    """流式中间态的 MarkdownV2：未闭合的强调会被转义、未闭合的代码块会被补齐，
+    所以半截正文也能安全解析，定稿时不会从原始 ** 突然跳变成格式化文本。"""
+    md = to_telegram_markdown(text).rstrip("\n")
+    # 光标不能挂在代码块收尾的 ``` 同一行
+    return md + ("\n" if md.endswith("```") else "") + _MD_CURSOR
+
+
+def _is_not_modified(e: BadRequest) -> bool:
+    return "not modified" in str(e).lower()
+
+
+async def _quiet(coro) -> None:
+    """后台气泡更新：Telegram 网络抖动只影响这一次显示，不能打断生成。"""
+    try:
+        await coro
+    except TelegramError as e:
+        logger.warning("更新回复气泡失败：%s: %s", type(e).__name__, e)
+
+
 _RESULT_ROW_RE = re.compile(r"^\[\d+\]", re.M)
 
 
@@ -54,24 +80,35 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
 
     搜索每条一行（显示搜索词）；grounding 模式下同轮多个搜索合并为一行
     （执行时也会合并为一次调研）。同一轮的多个网页读取合并为一行，
-    结果聚合为总字数。不暴露 URL/域名给群成员。
+    结果聚合为总字数。计算每条一行（显示算式）。不暴露 URL/域名给群成员。
     返回 (条目列表, 逐调用到条目的映射)。
     """
     entries: list[dict] = []
     mapping: list[dict] = []
     open_entry: dict | None = None
-    search_calls = [c for c in calls_list if c["function"]["name"] != "open_url"]
+    search_calls = [c for c in calls_list if c["function"]["name"] == "web_search"]
     merge_search = bool(config.GEMINI_SEARCH_MODEL) and len(search_calls) > 1
     merged_search_entry: dict | None = None
+
+    def single(kind: str, text: str) -> None:
+        entry = {"kind": kind, "count": 1, "contents": [], "text": text, "done": False, "result": None}
+        entries.append(entry)
+        mapping.append(entry)
+
     for call in calls_list:
+        name = call["function"]["name"]
         args = llm.tool_args(call) or {}
-        if call["function"]["name"] == "open_url":
+        if name == "open_url":
             if open_entry is None:
                 open_entry = {"kind": "open", "count": 0, "contents": [],
                               "text": "", "done": False, "result": None}
                 entries.append(open_entry)
             open_entry["count"] += 1
             mapping.append(open_entry)
+        elif name == "calculate":
+            single("calc", t("tool_calc", expr=(str(args.get("expression", "")).strip() or "?")[:48]))
+        elif name != "web_search":
+            single("other", name)
         elif merge_search:
             if merged_search_entry is None:
                 queries = "；".join(
@@ -83,11 +120,7 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
                 entries.append(merged_search_entry)
             mapping.append(merged_search_entry)
         else:
-            query = str(args.get("query", "")).strip() or "?"
-            entry = {"kind": "search", "count": 1, "contents": [],
-                     "text": t("tool_search", q=query[:48]), "done": False, "result": None}
-            entries.append(entry)
-            mapping.append(entry)
+            single("search", t("tool_search", q=(str(args.get("query", "")).strip() or "?")[:48]))
     if open_entry is not None:
         open_entry["text"] = (
             t("tool_open") if open_entry["count"] == 1 else t("tool_open_n", n=open_entry["count"])
@@ -128,9 +161,11 @@ def _attach_result(entry: dict, call: dict, content: str) -> None:
 
 
 def _result_summary(tool_name: str, content: str) -> str:
-    """工具结果的一行摘要：搜索 → N 条结果，读网页 → 字数，错误文案 → 失败。"""
+    """工具结果的一行摘要：搜索 → N 条结果，读网页 → 字数，计算 → 结果，错误文案 → 失败。"""
     if content.startswith("（") or content.startswith("("):
         return t("res_failed")
+    if tool_name == "calculate":
+        return "= " + content.rsplit(" = ", 1)[-1][:40]
     if tool_name == "open_url":
         n = len(content)
         return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
@@ -155,7 +190,7 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
     if config.GEMINI_SEARCH_MODEL:
         queries = []
         for i, call in enumerate(calls_list):
-            if call["function"]["name"] != "open_url":
+            if call["function"]["name"] == "web_search":
                 query = str((llm.tool_args(call) or {}).get("query", "")).strip()
                 if query:
                     if first_search_i is None:
@@ -169,8 +204,12 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
         args = llm.tool_args(call)
         if args is None:
             content = t("search_bad_args")
+        elif name == "calculate":
+            content = calc.run_calculate(str(args.get("expression", "")))
         elif name == "open_url":
             content = await web.run_fetch_url(str(args.get("url", "")))
+        elif name != "web_search":
+            content = t("tool_unknown", name=name)
         elif merged_result is not None:
             content = merged_result if i == first_search_i else t("search_merged")
         else:
@@ -189,15 +228,16 @@ def _cancel_markup(gen_id: int) -> InlineKeyboardMarkup:
     )
 
 
-async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | None, str]:
+async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], str]:
     """流式生成并逐步编辑 Telegram 消息，支持模型通过 web_search 工具联网搜索。
 
-    先发送思考占位提示（推理模型思考期间无正文输出），首个正文数据块到达后原地替换；
-    单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
+    占位提示与首轮 LLM 请求并发发出（推理模型思考期间无正文输出），首个正文数据块
+    到达后原地替换；单条消息超过 STREAM_SEGMENT_LIMIT 时定稿当前消息、另起一条继续。
     模型请求搜索时在当前消息上显示搜索状态，执行后把结果回灌给模型继续生成
     （最多 config.SEARCH_MAX_ROUNDS 轮）。传入的 history 不会被修改，中间的 tool
     消息只存在于本次调用内部，不会进入对话缓存。
-    返回（最后一条已发送消息或 None, 完整回复文本）；失败/空回复时已就地提示，返回 (None, "")。
+    返回（承载回复的全部消息 id, 完整回复文本）——长回复分段时每一段都能被回复追问；
+    失败/空回复时已就地提示，返回 ([], "")。
     """
     gen_id = next(_gen_count)
     task = asyncio.current_task()
@@ -207,56 +247,73 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
     markup = _cancel_markup(gen_id)
     progress: list[dict] = []  # 工具条目 {text, done, result}：工具行 + 两空格缩进的结果行
     stage: str | None = _stage_line(0)  # 底部状态行：思考阶段文本，原地替换而非追加
-    try:
-        sent: Message | None = await msg.reply_text(f"{stage}…", reply_markup=markup)
-    except TelegramError:
-        logger.exception("发送占位消息失败")
-        active_generations.pop(gen_id, None)
-        return None, ""
+    sent: Message | None = None
     finalized = ""  # 已定稿消息承载的文本
+    answer_ids: list[int] = []  # 已定稿消息的 id
     segment = ""  # 当前消息正在累积的文本
     last_edit = 0.0
+    # 气泡更新单飞：占位、中间编辑、进度渲染都在后台任务里执行，同一时刻最多一个在途。
+    # 流消费不等 Telegram 往返、不被限流退避卡住，网络抖动也不会打断生成；
+    # 定稿/取消/报错前先 settle() 等在途更新落地，旧编辑不会覆盖新内容。
+    bubble_task: asyncio.Task | None = None
+    generating = True
+    placeholder_failed = False
+
+    async def settle() -> None:
+        nonlocal bubble_task
+        while bubble_task is not None:
+            pending = bubble_task
+            await asyncio.shield(pending)  # 调用方被取消时不连带取消在途的编辑
+            if bubble_task is pending:
+                bubble_task = None
+
+    def start_update(coro) -> None:
+        """调用方须保证此前的更新已 settle()。"""
+        nonlocal bubble_task
+        bubble_task = asyncio.create_task(_quiet(coro))
+
+    async def send_placeholder(text: str) -> None:
+        nonlocal sent, placeholder_failed
+        try:
+            sent = await msg.reply_text(text, reply_markup=markup)
+        except TelegramError:
+            logger.exception("发送占位消息失败，放弃本次生成")
+            placeholder_failed = True
+            if generating and task is not None:
+                task.cancel()
 
     async def push(text: str, final: bool) -> None:
+        """渲染一版正文：定稿不带光标和按钮，过程中带光标和取消按钮。
+        都优先 MarkdownV2，解析失败回退纯文本；限流时中间编辑直接跳过，定稿等待后重试一次。
+        """
         nonlocal sent
-        try:
+        if final:
+            md, plain, kb = to_telegram_markdown(text), text, None
+        else:
+            md, plain, kb = _streaming_markdown(text), text + STREAM_CURSOR, markup
+
+        async def deliver(body: str, mode: str | None) -> None:
+            nonlocal sent
             if sent is None:
-                # 首次发送：定稿走 MarkdownV2（不带按钮），中间过程用纯文本+光标+取消按钮
-                if final:
-                    try:
-                        sent = await msg.reply_text(
-                            to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
-                        )
-                    except BadRequest:
-                        sent = await msg.reply_text(text)
-                else:
-                    sent = await msg.reply_text(text + STREAM_CURSOR, reply_markup=markup)
-            elif final:
-                try:
-                    await sent.edit_text(
-                        to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
-                    )
-                except BadRequest:
-                    await sent.edit_text(text)
+                sent = await msg.reply_text(body, parse_mode=mode, reply_markup=kb)
             else:
-                await sent.edit_text(text + STREAM_CURSOR, reply_markup=markup)
-        except RetryAfter as e:
-            # Telegram 限流：等待后跳过本次中间编辑；定稿编辑重试一次
-            await asyncio.sleep(float(e.retry_after) + 0.5)
-            if final and sent is not None:
+                await sent.edit_text(body, parse_mode=mode, reply_markup=kb)
+
+        for _ in range(2):
+            try:
                 try:
-                    await sent.edit_text(
-                        to_telegram_markdown(text), parse_mode=ParseMode.MARKDOWN_V2
-                    )
-                except BadRequest:
-                    try:
-                        await sent.edit_text(text)
-                    except TelegramError:
-                        pass
-                except TelegramError:
-                    pass
-        except BadRequest:
-            pass  # 例如 message is not modified
+                    await deliver(md, ParseMode.MARKDOWN_V2)
+                except BadRequest as e:
+                    if _is_not_modified(e):
+                        return
+                    await deliver(plain, None)
+                return
+            except RetryAfter as e:
+                await asyncio.sleep(float(e.retry_after) + 0.5)
+                if not final:
+                    return
+            except BadRequest:
+                return  # 例如 message is not modified
 
     async def on_text(delta: str) -> None:
         nonlocal segment, sent, last_edit, finalized
@@ -271,20 +328,25 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             if cut == -1:
                 cut = STREAM_SEGMENT_LIMIT
             part, segment = segment[:cut], segment[cut:].lstrip("\n")
+            await settle()
             await push(part, final=True)
             finalized += part + "\n"
+            if sent is not None:
+                answer_ids.append(sent.message_id)
             sent, last_edit = None, 0.0
         now = time.monotonic()
-        if segment.strip() and now - last_edit >= STREAM_EDIT_INTERVAL:
-            await push(segment, final=False)
+        # 上一次更新还在途（慢网络或限流退避中）就跳过本次，等它落地后的下一个 delta 再刷新
+        if (segment.strip() and now - last_edit >= STREAM_EDIT_INTERVAL
+                and (bubble_task is None or bubble_task.done())):
+            await settle()
+            start_update(push(segment, final=False))
             last_edit = now
 
-    async def render_progress(suffix: str = "…") -> None:
-        """渲染进度：纯文本无符号，层级只靠缩进——工具行顶格、结果行缩进两格，
+    def progress_body(suffix: str = "…") -> str:
+        """进度文本：纯文本无符号，层级只靠缩进——工具行顶格、结果行缩进两格，
         底部一行是当前思考阶段（原地替换，省略号由 ticker 变化）。
-        已有部分正文时正文在上、日志在下。
+        已有部分正文时正文在上、日志在下。在调度时取快照，后台执行时状态可能已前进。
         """
-        nonlocal sent, last_edit
         lines = []
         for e in progress[-5:]:
             lines.append(e["text"])
@@ -295,8 +357,11 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         body = "\n".join(lines)
         if segment.strip():
             body = segment.rstrip() + "\n\n" + body
-        if len(body) > 4000:
-            body = body[-4000:]  # Telegram 上限 4096：截头保尾，进度日志在底部必须可见
+        # Telegram 上限 4096：截头保尾，进度日志在底部必须可见
+        return body[-4000:]
+
+    async def render_progress(body: str) -> None:
+        nonlocal sent, last_edit
         try:
             if sent is None:
                 sent = await msg.reply_text(body, reply_markup=markup)
@@ -308,17 +373,31 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             pass
         last_edit = 0.0  # 让下一次正文编辑立即生效
 
+    async def show_progress() -> None:
+        """等在途更新落地后在后台渲染进度，不阻塞随后的工具执行或下一轮请求。"""
+        await settle()
+        start_update(render_progress(progress_body()))
+
     async def _ticker() -> None:
         # 长时间等待时变化底部省略号，证明 bot 还活着
         frames = ["…", "……", "………"]
         i = 0
         while True:
             await asyncio.sleep(5)
-            if segment.strip():
-                continue  # 正文已开始流式输出，气泡由 on_text 接管
+            if segment.strip() or (bubble_task is not None and not bubble_task.done()):
+                continue  # 正文已开始流式输出（气泡由 on_text 接管），或上一次更新还在途
             i += 1
-            await render_progress(frames[i % len(frames)])
+            await settle()
+            start_update(render_progress(progress_body(frames[i % len(frames)])))
 
+    async def stop_updates() -> None:
+        """收尾前停掉 ticker 并等在途更新落地，此后由调用方独占气泡。"""
+        nonlocal generating
+        generating = False
+        ticker_task.cancel()
+        await settle()
+
+    start_update(send_placeholder(f"{stage}…"))
     ticker_task = asyncio.create_task(_ticker())
 
     working = list(history)  # 工具消息只追加到副本，调用方的 history 保持干净
@@ -329,13 +408,13 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         draft_fallback = ""  # 工具轮被丢弃的草稿，终轮空手时兜底回用
         rounds = config.SEARCH_MAX_ROUNDS + 1 if adapter.supports_tool_loop else 1
         for round_idx in range(rounds):
-            # 最后一轮不带 tools，强制模型输出正文，防止无限连环搜索
-            use_tools = (config.SEARCH_ENABLED and adapter.supports_tool_loop
-                         and round_idx < config.SEARCH_MAX_ROUNDS)
+            # 最后一轮不带 tools，强制模型输出正文，防止无限连环调用工具。
+            # calculate 总是可用，所以工具循环不再依赖是否配置了搜索源
+            use_tools = adapter.supports_tool_loop and round_idx < config.SEARCH_MAX_ROUNDS
             if round_idx and not segment.strip():
                 # 工具执行完、新一轮生成开始：底部状态行原地替换为下一档思考阶段
                 stage = _stage_line(round_idx)
-                await render_progress()
+                await show_progress()
             t0 = time.monotonic()
             for attempt in range(2):
                 out_before = len(finalized) + len(segment.strip())
@@ -382,7 +461,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
             stage = None
             entries, call_map = _round_entries(assistant_msg["tool_calls"])
             progress.extend(entries)
-            await render_progress()
+            await show_progress()
             working.append(assistant_msg)
             tool_results = await _execute_tool_calls(assistant_msg)
             working.extend(tool_results)
@@ -391,10 +470,14 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         if citations and segment.strip():
             links = "\n".join(f"[{c['title']}]({c['uri']})" for c in citations[:5])
             segment += "\n\n" + t("sources") + "\n" + links
+        await stop_updates()
     except asyncio.CancelledError:
         # 提问者/管理员点了取消按钮：保留已有正文并标注，未输出则改为已取消
         if task is not None and hasattr(task, "uncancel"):
             task.uncancel()
+        await stop_updates()
+        if placeholder_failed:
+            return [], ""
         logger.info("生成已被用户取消 chat=%s user=%s", msg.chat_id, requester)
         try:
             if segment.strip():
@@ -403,9 +486,10 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                 await sent.edit_text(t("cancelled"))
         except TelegramError:
             pass
-        return None, ""
+        return [], ""
     except Exception as e:
         logger.exception("调用 LLM 失败")
+        await stop_updates()
         fail_text = t("llm_quota") if llm.is_quota_error(e) else t("llm_failed")
         try:
             if segment.strip():
@@ -418,7 +502,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
                 await msg.reply_text(fail_text)
         except TelegramError:
             pass
-        return None, ""
+        return [], ""
     finally:
         ticker_task.cancel()
         if not generation_completed:
@@ -431,14 +515,16 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[Message | Non
         if segment.strip():
             await push(segment, final=True)
             finalized += segment
+            if sent is not None:
+                answer_ids.append(sent.message_id)
         elif not finalized:
             try:
                 if sent is not None:
                     await sent.edit_text(t("empty_reply"))
             except TelegramError:
                 pass
-            return None, ""
-        return sent, finalized.strip()
+            return [], ""
+        return answer_ids, finalized.strip()
     finally:
         generation_completed = True
         active_generations.pop(gen_id, None)

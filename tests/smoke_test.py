@@ -12,6 +12,10 @@ os.environ["LLM_PROTOCOL"] = "openai"
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "x")
 os.environ.setdefault("SEARCH_PROVIDER", "")
 os.environ.setdefault("ADMIN_USER_IDS", "999")
+import tempfile  # noqa: E402
+_TMP = Path(tempfile.mkdtemp(prefix="tgrok-test-"))
+os.environ["MEMORY_FILE"] = str(_TMP / "memory.json")  # 测试不碰仓库里的记忆文件
+os.environ["MEMORY_ENABLED"] = "true"
 
 from tgrok import chat, config, llm, prompt, tg, web  # noqa: E402
 from tgrok.llm import claude, gemini, openai  # noqa: E402
@@ -716,6 +720,99 @@ finally:
     for k, v in _saved38.items():
         setattr(config, k, v)
 ok("备用模型配置继承")
+
+# 39. 长期记忆：注入内容受总字数预算限制、保留最新问答且按时间顺序；攒够条数后台压缩进摘要并持久化
+from tgrok import memory  # noqa: E402
+_saved_budget = config.MEMORY_MAX_CHARS
+config.MEMORY_MAX_CHARS = 600  # 每条问答约 250 字：只放得下最新两条
+memory._store.clear()
+summaries = []
+class _SummaryAdapter:
+    model = "sum"
+    def __init__(s, text=None, fail=False, gate=None): s.text, s.fail, s.gate = text, fail, gate
+    async def run_round(s, history, use_tools, on_text):
+        summaries.append(history)
+        if s.gate is not None:
+            await s.gate.wait()
+        if s.fail:
+            raise RuntimeError("503")
+        return llm.RoundResult(content=s.text)
+async def memory_case():
+    for i in range(5):
+        memory.record(-1, f"群友{i}", f"问题{i} " + "长" * 80, f"回答{i} " + "长" * 150)
+    block = memory.memory_block(-1)
+    body = block.split("\n", 1)[1]
+    assert len(body) <= config.MEMORY_MAX_CHARS, len(body)
+    assert "群友4" in block and "群友3" in block and "群友2" not in block  # 预算不够时丢最旧的
+    assert block.index("群友3") < block.index("群友4")  # 时间顺序
+    assert memory.memory_block(-2) == ""
+    # 第 6 条触发后台压缩：主模型失败时用备用模型；压缩期间新增的问答不会被吞掉
+    llm.adapter = _SummaryAdapter(fail=True)
+    gate = asyncio.Event()
+    llm.fallback_adapter = _SummaryAdapter(text="群友0 在做 tgrok\n" + "很长" * 400, gate=gate)
+    memory.record(-1, "群友5", "问题5", "回答5")
+    await asyncio.sleep(0)
+    memory.record(-1, "群友6", "问题6", "回答6")
+    gate.set()
+    await asyncio.gather(*memory._tasks)
+    entry = memory._store["-1"]
+    assert entry["digest"].startswith("群友0 在做 tgrok") and len(entry["digest"]) <= config.MEMORY_MAX_CHARS // 2
+    assert [r["who"] for r in entry["recent"]] == ["群友4", "群友5", "群友6"]
+    assert "-1" in json.loads(config.MEMORY_FILE.read_text(encoding="utf-8"))
+    assert "群友0 在做 tgrok" in memory.memory_block(-1)
+    # 压缩期间被 /forget 清空：压缩结果不能写回
+    gate2 = asyncio.Event()
+    llm.adapter, llm.fallback_adapter = _SummaryAdapter(text="不该出现", gate=gate2), None
+    for i in range(6):
+        memory.record(-3, "某人", f"q{i}", f"a{i}")
+    await asyncio.sleep(0)
+    assert memory.clear(-3)
+    gate2.set()
+    await asyncio.gather(*memory._tasks)
+    assert "-3" not in memory._store and "不该出现" not in config.MEMORY_FILE.read_text(encoding="utf-8")
+run(memory_case())
+config.MEMORY_ENABLED = False
+assert memory.memory_block(-1) == ""
+config.MEMORY_ENABLED = True
+config.MEMORY_MAX_CHARS = _saved_budget
+llm.fallback_adapter = None
+memory._store.clear()
+ok("长期记忆预算/压缩/清空")
+
+# 40. 回复 bot 的贴纸/无字图片也要回应：贴纸带 emoji 说明，开视觉时把贴纸图片发给模型；
+#     没开视觉的图片说明看不到内容（之前贴纸被消息过滤器丢掉、无字图片直接沉默）
+import datetime as _dt  # noqa: E402
+from telegram import Chat as _Chat, Message as _Message, PhotoSize as _Photo, Sticker as _Sticker  # noqa: E402
+from telegram import Update as _Update, User as _User  # noqa: E402
+_now = _dt.datetime.now()
+_chat, _alice, _botu = _Chat(-7, "supergroup"), _User(999, "Alice", False), _User(42, "bot", True)
+_bot_msg = _Message(10, _now, _chat, from_user=_botu, text="这锅我可不背")
+_sticker_msg = _Message(11, _now, _chat, from_user=_alice, reply_to_message=_bot_msg,
+                        sticker=_Sticker("sfid", "sfuid", 512, 512, False, False, "regular", emoji="🤬"))
+_photo_msg = _Message(12, _now, _chat, from_user=_alice, reply_to_message=_bot_msg,
+                      photo=[_Photo("pfid", "pfuid", 512, 512)])
+assert tg.MESSAGE_FILTER.check_update(_Update(1, message=_sticker_msg))
+_captured40 = []
+async def _fake_reply40(msg, history):
+    _captured40.append(history)
+    return [], ""
+class _File40:
+    async def download_as_bytearray(s): return bytearray(b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 8)
+async def _get_file40(fid): return _File40()
+_ctx40 = types.SimpleNamespace(bot=types.SimpleNamespace(id=42, username="bot", get_file=_get_file40))
+_orig_reply, _orig_vision = tg.stream_reply, tg.ENABLE_VISION
+tg.stream_reply = _fake_reply40
+try:
+    tg.ENABLE_VISION = True
+    run(tg.handle_message(types.SimpleNamespace(effective_message=_sticker_msg), _ctx40))
+    content40 = _captured40[-1][-1]["content"]
+    assert "🤬" in content40[0]["text"] and content40[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    tg.ENABLE_VISION = False
+    run(tg.handle_message(types.SimpleNamespace(effective_message=_photo_msg), _ctx40))
+    assert chat.t("image_unseen") in _captured40[-1][-1]["content"]
+finally:
+    tg.stream_reply, tg.ENABLE_VISION = _orig_reply, _orig_vision
+ok("贴纸/无字图片回复")
 
 llm.adapter = orig_adapter
 

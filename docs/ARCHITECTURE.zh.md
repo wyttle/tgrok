@@ -7,12 +7,13 @@ Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主
 ```text
 bot.py                 入口（python bot.py），只做 from tgrok.tg import main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py    38 项冒烟和回归测试（无需网络与真实 Telegram）
+tests/smoke_test.py    40 项冒烟和回归测试（无需网络与真实 Telegram）
 tgrok/
 |-- config.py          环境变量解析、常量、日志与时区初始化
 |-- i18n.py            全部界面和提示词文案，以及 t()
 |-- prompt.py          SYSTEM_PROMPT 组装和实时时间注入 with_time()
 |-- calc.py            calculate 工具：白名单 AST 求值的算术、比较与日期推算
+|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、后台摘要压缩和持久化
 |-- llm/
 |   |-- __init__.py    按 LLM_PROTOCOL 装配唯一 adapter 单例并导出共享 helper
 |   |-- base.py        RoundResult、BaseAdapter、工具定义与 active_tools()、错误分类和共享 helper
@@ -72,7 +73,7 @@ class BaseAdapter:
 ```text
 Telegram update
   -> tg.handle_message
-     路由、鉴权、相册收集，组装 system、引用上下文、图片和实时时间
+     路由、鉴权、相册收集，组装 system、引用上下文、图片和实时时间；新对话的首条 user 消息带上 memory.memory_block
   -> chat.stream_reply
      后台发送占位消息和取消按钮（与首轮 LLM 请求并发），注册 active_generations
      -> 取得 llm.adapter
@@ -93,6 +94,7 @@ Telegram update
      -> 正文按节流间隔在后台流式编辑（中间态同样渲染 MarkdownV2），超过分段阈值时发送下一条消息
   -> 等在途编辑落地后 MarkdownV2 定稿，失败时回退纯文本
   -> tg.remember 按回复的每一段消息 id 保存追问所需的对话历史
+  -> memory.record 记下这一轮问答；原文攒到 6 条时后台调用模型把较早的并进摘要
 ```
 
 OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索和计算共用轮数），最后一轮强制不带 tools，避免无限工具调用。Gemini 原生仍走同一段 chat 循环，但固定为一轮且不启用 bot 工具。
@@ -122,6 +124,7 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 - `tg_auth.allowed_users`：运行时白名单。
 - `tg.conversations`、`tg._conv_sizes`、`tg._conv_total`：对话历史及近似内容字符预算会计。
 - `tg.album_cache`：相册聚合缓存。
+- `memory._store`：每个聊天的记忆摘要和最近问答，写入 `MEMORY_FILE`（原子替换）；注入块总字数不超过 `MEMORY_MAX_CHARS`，摘要最多占一半。记忆只注入一段对话的首条 user 消息，追问前缀字节不变，不影响 prompt 缓存。压缩期间被 `/forget` 清空时不写回结果。
 
 ## 配置
 
@@ -129,5 +132,5 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：38 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环，以及备用模型切换、提示和配置继承。
+- `python tests/smoke_test.py`：40 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩和清空，以及贴纸和无字图片的回复。
 - 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。

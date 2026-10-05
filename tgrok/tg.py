@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import config
+from . import config, memory
 from .config import (
     ADMIN_USER_IDS, ALBUM_CACHE_SIZE, BOT_TOKEN, CONVERSATION_CACHE_SIZE,
     CONVERSATION_CONTENT_BUDGET, ENABLE_VISION,
@@ -110,12 +110,22 @@ def is_mentioned(msg: Message, bot_username: str, bot_id: int) -> bool:
     return False
 
 
+def media_note(m: Message) -> str | None:
+    """没有文字的媒体消息给模型的说明：贴纸带上它的 emoji（看不到图时也能猜出情绪），
+    图片在未开启视觉时说明看不到内容。开启视觉的普通图片返回 None（图片本身会发给模型）。"""
+    if m.sticker:
+        return t("sticker_note", emoji=f" {m.sticker.emoji}" if m.sticker.emoji else "")
+    if not ENABLE_VISION and (m.photo or (m.document and (m.document.mime_type or "").startswith("image/"))):
+        return t("image_unseen")
+    return None
+
+
 def quoted_context(msg: Message) -> str | None:
     """如果该消息引用了别人的消息，返回一段描述引用内容的文本。"""
     replied = msg.reply_to_message
     if replied is None:
         return None
-    content = replied.text or replied.caption
+    content = replied.text or replied.caption or media_note(replied)
     if not content:
         return None
     author = replied.from_user.full_name if replied.from_user else t("someone")
@@ -130,14 +140,34 @@ album_cache: "OrderedDict[tuple[int, str], list[dict]]" = OrderedDict()
 
 
 def _msg_image_entry(m: Message) -> dict | None:
-    """从单条消息提取图片引用（压缩照片取最大尺寸；图片文件校验大小）。"""
+    """从单条消息提取图片引用（压缩照片取最大尺寸；图片文件校验大小；
+    静态贴纸本身就是 webp 图片，动态/视频贴纸取它的缩略图）。"""
     if m.photo:
         return {"file_id": m.photo[-1].file_id, "mime": "image/jpeg", "message_id": m.message_id}
     if m.document and (m.document.mime_type or "").startswith("image/"):
         if m.document.file_size and m.document.file_size > MAX_IMAGE_BYTES:
             return None
         return {"file_id": m.document.file_id, "mime": m.document.mime_type, "message_id": m.message_id}
+    if m.sticker:
+        if not (m.sticker.is_animated or m.sticker.is_video):
+            return {"file_id": m.sticker.file_id, "mime": "image/webp", "message_id": m.message_id}
+        if m.sticker.thumbnail:
+            return {"file_id": m.sticker.thumbnail.file_id, "mime": "image/webp", "message_id": m.message_id}
     return None
+
+
+def _sniff_mime(data: bytes, fallback: str) -> str:
+    """按文件头识别图片格式：贴纸缩略图可能是 webp 也可能是 jpeg，
+    声明的 MIME 和实际内容不符时 Claude 等接口会直接拒绝请求。"""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return fallback
 
 
 def remember_album(msg: Message) -> None:
@@ -184,7 +214,7 @@ async def image_data_urls(bot, *messages: Message | None) -> list[str]:
         except Exception:
             logger.exception("下载图片失败 file_id=%s", entry["file_id"])
             return None
-        return f"data:{entry['mime']};base64," + base64.b64encode(data).decode()
+        return f"data:{_sniff_mime(data, entry['mime'])};base64," + base64.b64encode(data).decode()
 
     # 相册多图并发下载：每张图都是 get_file + 下载两次往返，串行时首字延迟随图片数线性增长
     urls = await asyncio.gather(*(fetch(entry) for entry in refs[:config.MAX_IMAGES]))
@@ -198,6 +228,13 @@ def build_content(text: str, images: list[str]):
     return [{"type": "text", "text": text}] + [
         {"type": "image_url", "image_url": {"url": u}} for u in images
     ]
+
+
+# 交给 handle_message 的消息类型：文字、带说明的媒体、图片、图片文件和贴纸（命令除外）
+MESSAGE_FILTER = (
+    filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.IMAGE | filters.Sticker.ALL
+) & ~filters.COMMAND
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
@@ -232,12 +269,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     def speaker(text: str) -> str:
         return text if is_private else t("question_from", name=msg.from_user.full_name, question=text)
 
+    def with_memory(text: str) -> str:
+        # 记忆只在一段对话的第一条 user 消息里注入一次：之后的追问沿用同一份历史，
+        # 前缀字节不变，上游 prompt 缓存仍能命中
+        block = memory.memory_block(msg.chat_id)
+        return f"{block}\n\n{text}" if block else text
+
+    # 贴纸、看不到的图片：没有文字也要让模型知道对方发了什么
+    note = media_note(msg)
+
+    # 记进长期记忆的「问题」：引用别人的消息时带上一小段被引用内容，否则只有一句「怎么看」
+    topic = question or note or (t("look_image") if is_reply_to_bot else t("comment_default"))
+    if replied and not is_reply_to_bot and (replied.text or replied.caption):
+        topic = f"{topic}（{_clip_quote(replied.text or replied.caption)}）"
+
     if is_reply_to_bot:
         # 追问（回复 bot 的消息，带不带 @ 都算）：接上之前的对话历史
         images = await image_data_urls(bot, msg) if ENABLE_VISION else []
-        if not question and not images:
+        if not question and not images and not note:
             return
-        user_content = speaker(question or t("look_image"))
+        user_content = speaker(question or note or t("look_image"))
         history = conversations.get((msg.chat_id, replied.message_id))
         if history is None:
             # 历史已过期（如 bot 重启）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
@@ -245,23 +296,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             previous = replied.text or replied.caption or ""
             if previous:
                 user_content = t("prev_reply", content=previous) + "\n\n" + user_content
+            user_content = with_memory(user_content)
             history = [{"role": "system", "content": SYSTEM_PROMPT}]
         history = history + [{"role": "user", "content": with_time(build_content(user_content, images))}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
         context_text = quoted_context(msg) if replied else None
         images = await image_data_urls(bot, msg, replied) if ENABLE_VISION else []
-        if not question and not context_text and not images:
+        if not question and not context_text and not images and not note:
             await msg.reply_text(t("nudge"))
             return
-        user_content = question or t("comment_default")
+        own_image = bool(images) and not context_text
+        user_content = question or note or (t("look_image") if own_image else t("comment_default"))
         if context_text:
             user_content = context_text + "\n\n" + t("question_from", name=msg.from_user.full_name, question=user_content)
         else:
             user_content = speaker(user_content)
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": with_time(build_content(user_content, images))},
+            {"role": "user", "content": with_time(build_content(with_memory(user_content), images))},
         ]
 
     history = trim_history(history)
@@ -272,8 +325,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         full = history + [{"role": "assistant", "content": answer}]
         for message_id in answer_ids:
             remember(msg.chat_id, message_id, full)
+        memory.record(msg.chat_id, msg.from_user.full_name, topic, answer)
     else:
         logger.warning("未产生回复 chat=%s user=%s", msg.chat_id, msg.from_user.id)
+
+
+def _clip_quote(text: str, limit: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _can_manage_memory(update: Update) -> bool:
+    """管理员在任何聊天都能看/清记忆；私聊里白名单用户可以管自己的。"""
+    user, chat = update.effective_user, update.effective_chat
+    if user is None or chat is None:
+        return False
+    return is_admin(user.id) or (chat.type == "private" and is_authorized(user.id))
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _can_manage_memory(update):
+        return
+    if not config.MEMORY_ENABLED:
+        await update.effective_message.reply_text(t("memory_disabled"))
+        return
+    block = memory.memory_block(update.effective_chat.id)
+    await update.effective_message.reply_text(t("memory_show", block=block) if block else t("memory_empty"))
+
+
+async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _can_manage_memory(update):
+        return
+    cleared = memory.clear(update.effective_chat.id)
+    await update.effective_message.reply_text(t("memory_cleared") if cleared else t("memory_empty"))
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -360,6 +444,8 @@ async def post_init(app: Application) -> None:
         BotCommand("adduser", t("cmd_adduser")),
         BotCommand("deluser", t("cmd_deluser")),
         BotCommand("listusers", t("cmd_listusers")),
+        BotCommand("memory", t("cmd_memory")),
+        BotCommand("forget", t("cmd_forget")),
     ]
     await app.bot.set_my_commands(base)
     for admin_id in ADMIN_USER_IDS:
@@ -387,13 +473,10 @@ def main() -> None:
     app.add_handler(CommandHandler("adduser", cmd_adduser))
     app.add_handler(CommandHandler("deluser", cmd_deluser))
     app.add_handler(CommandHandler("listusers", cmd_listusers))
+    app.add_handler(CommandHandler("memory", cmd_memory))
+    app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^c:\d+$"))
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.IMAGE) & ~filters.COMMAND,
-            handle_message,
-        )
-    )
+    app.add_handler(MessageHandler(MESSAGE_FILTER, handle_message))
 
     def describe(ep: config.LLMEndpoint) -> str:
         default_url = {"claude": "https://api.anthropic.com",

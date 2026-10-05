@@ -3,5 +3,7 @@
 .venv/
 __pycache__/
 allowed_users.json
+memory.json
+memory.json.tmp
 profiles/
 

@@ -117,7 +117,7 @@ TEXT = {
         "extra_old_invalid": "  原有的额外参数无法解析，已忽略：{raw}",
         "s_fb_a": "【8.5/9】备用模型（可选）",
         "s_fb_b": "      主模型调用出错时，这条回复自动改用备用模型，并在回复末尾注明",
-        "fb_model": "备用模型名称（留空=不启用，输入 - 清除）",
+        "fb_enable": "启用备用模型？",
         "fb_protocol_pick": "备用模型接口：1=Chat Completions  2=Responses  3=Claude 原生  4=Gemini 原生",
         "fb_protocol_invalid": "请输入 1~4",
         "fb_base_url": "备用模型接口地址（留空=与主模型相同，输入 - 清除）",
@@ -244,7 +244,7 @@ TEXT = {
         "extra_old_invalid": "  Could not parse the existing extra params, ignoring them: {raw}",
         "s_fb_a": "[8.5/9] Fallback model (optional)",
         "s_fb_b": "      If the primary model errors, that reply automatically uses the fallback model and says so at the end",
-        "fb_model": "Fallback model name (empty = disabled, enter - to clear)",
+        "fb_enable": "Enable a fallback model?",
         "fb_protocol_pick": "Fallback API: 1=Chat Completions  2=Responses  3=native Claude  4=native Gemini",
         "fb_protocol_invalid": "Enter 1-4",
         "fb_base_url": "Fallback endpoint URL (empty = same as the primary model, enter - to clear)",
@@ -599,17 +599,59 @@ def check_telegram_token(token: str) -> str | None:
     return None
 
 
-def list_models(base_url: str, api_key: str, user_agent: str = "") -> list[str]:
-    headers = {"Authorization": f"Bearer {api_key}"}
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    resp = httpx.get(
-        base_url.rstrip("/") + "/models",
-        headers=headers,
-        timeout=10,
-    )
+ANTHROPIC_API = "https://api.anthropic.com"
+GEMINI_API = "https://generativelanguage.googleapis.com"
+
+
+def list_models(protocol: str, base_url: str, api_key: str, user_agent: str = "") -> list[str]:
+    """按协议拉取可用模型：OpenAI 兼容 GET {base}/models；Claude GET {root}/v1/models；
+    Gemini 原生 GET {root}/v1beta/models（只保留能 generateContent 的）。"""
+    headers = {"User-Agent": user_agent} if user_agent else {}
+    if protocol == "claude":
+        root = (base_url[:-3] if base_url.endswith("/v1") else base_url) or ANTHROPIC_API
+        auth = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        if base_url:
+            # 中转站（one-api/new-api 等）的 /v1/models 多按 Bearer 鉴权：两种头一起带上
+            auth["Authorization"] = f"Bearer {api_key}"
+        resp = httpx.get(root + "/v1/models", params={"limit": 1000}, timeout=10, headers={**headers, **auth})
+        resp.raise_for_status()
+        return [m["id"] for m in resp.json().get("data", [])]
+    if protocol == "gemini":
+        resp = httpx.get((base_url or GEMINI_API) + "/v1beta/models", params={"pageSize": 1000}, timeout=10,
+                         headers={**headers, "x-goog-api-key": api_key})
+        resp.raise_for_status()
+        return [m["name"].removeprefix("models/") for m in resp.json().get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", ["generateContent"])]
+    resp = httpx.get(base_url.rstrip("/") + "/models", timeout=10,
+                     headers={**headers, "Authorization": f"Bearer {api_key}"})
     resp.raise_for_status()
     return [m["id"] for m in resp.json().get("data", [])]
+
+
+def models_url(protocol: str, base_url: str) -> str:
+    if protocol == "claude":
+        return ((base_url[:-3] if base_url.endswith("/v1") else base_url) or ANTHROPIC_API) + "/v1/models"
+    if protocol == "gemini":
+        return (base_url or GEMINI_API) + "/v1beta/models"
+    return base_url.rstrip("/") + "/models"
+
+
+def pick_model(protocol: str, base_url: str, api_key: str, user_agent: str,
+               default: str, can_check: bool) -> str:
+    """联网拉取可用模型列表供选择（序号或直接输入名称）；拉不到时手动输入。"""
+    models: list[str] = []
+    if can_check:
+        try:
+            models = list_models(protocol, base_url, api_key, user_agent)
+        except Exception as e:
+            print(T["models_fail"].format(url=models_url(protocol, base_url), err=type(e).__name__))
+    if models:
+        print(T["models_found"])
+        for i, m in enumerate(models, 1):
+            print(f"    {i}. {m}")
+        raw = ask(T["model_pick"], default=default or models[0], required=True)
+        return models[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(models) else raw
+    return ask(T["model_name"], default=default or "local-model", required=True)
 
 
 def env_line(key: str, val: str) -> str:
@@ -813,7 +855,7 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         cfg["LLM_API_KEY"] = ask(T["claude_key"], default=old.get("LLM_API_KEY", ""),
                                  required=True, secret=True)
         cfg["LLM_USER_AGENT"] = ""
-        base_url = ""  # 跳过 OpenAI /models 探测（Anthropic 协议不兼容该接口）
+        base_url = cfg["LLM_BASE_URL"]
     elif backend == "2":
         # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
         route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
@@ -846,21 +888,10 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         model_default = "gemini-2.5-flash"
     if backend == "3" and not model_default.lower().startswith("claude"):
         model_default = "claude-opus-4-8"
-    model = ""
-    if can_check and base_url:
-        try:
-            models = list_models(base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"])
-        except Exception as e:
-            models = []
-            print(T["models_fail"].format(url=base_url, err=type(e).__name__))
-        if models:
-            print(T["models_found"])
-            for i, m in enumerate(models, 1):
-                print(f"    {i}. {m}")
-            raw = ask(T["model_pick"], default=model_default or models[0], required=True)
-            model = models[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(models) else raw
-    if not model:
-        model = ask(T["model_name"], default=model_default or "local-model", required=True)
+    # Claude 原生走 Anthropic 的模型列表接口；Gemini 后端回复走 OpenAI 兼容路径，用 /models 即可
+    list_protocol = "claude" if backend == "3" else "openai"
+    model = pick_model(list_protocol, base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"],
+                       model_default, can_check)
     cfg["LLM_MODEL"] = model
     if backend == "1" and not model.lower().startswith("gemini"):
         # OpenAI 兼容后端可选 Responses 接口：GPT-6.1 Sol 等模型只在 /responses 上支持工具调用
@@ -1014,14 +1045,12 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     # ---- 8.5 Fallback model ----
     print(T["s_fb_a"])
     print(T["s_fb_b"])
-    fb_model = ask(T["fb_model"], default=old.get("LLM_FALLBACK_MODEL", "")).strip()
-    fb_keys = ("LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL", "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_EXTRA_BODY")
-    if fb_model in ("", "-"):
-        cfg["LLM_FALLBACK_MODEL"] = ""
+    fb_keys = ("LLM_FALLBACK_MODEL", "LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL",
+               "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_EXTRA_BODY")
+    if not confirm(T["fb_enable"], default_yes=bool(old.get("LLM_FALLBACK_MODEL", "").strip())):
         for key in fb_keys:
             cfg[key] = ""
     else:
-        cfg["LLM_FALLBACK_MODEL"] = fb_model
         primary_protocol = cfg.get("LLM_PROTOCOL") or "openai"
         fb_default = old.get("LLM_FALLBACK_PROTOCOL", "").strip().lower() or primary_protocol
         fb_default = fb_default if fb_default in FALLBACK_PROTOCOLS else primary_protocol
@@ -1039,6 +1068,18 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         cfg["LLM_FALLBACK_BASE_URL"] = "" if raw_base == "-" else raw_base
         raw_key = ask(T["fb_key"], default=old.get("LLM_FALLBACK_API_KEY", ""), secret=True).strip()
         cfg["LLM_FALLBACK_API_KEY"] = "" if raw_key == "-" else raw_key
+        # 留空的地址和 key 按 bot 运行时的规则沿用主模型，拉模型列表时也用同样的值
+        if fb_protocol == "gemini":
+            list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg.get("GEMINI_BASE_URL", "")
+            list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg.get("GEMINI_API_KEY", "") or cfg["LLM_API_KEY"]
+        else:
+            list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg["LLM_BASE_URL"] or (
+                "" if fb_protocol == "claude" else "http://localhost:1234/v1")
+            list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg["LLM_API_KEY"]
+        ua = cfg.get("LLM_USER_AGENT", "") if fb_protocol in ("openai", "responses") else ""
+        fb_model = pick_model(fb_protocol, list_base, list_key, ua,
+                              old.get("LLM_FALLBACK_MODEL", ""), can_check)
+        cfg["LLM_FALLBACK_MODEL"] = fb_model
         fb_extra = load_extra(old.get("LLM_FALLBACK_EXTRA_BODY", ""))
         fb_reasoning = fb_protocol in ("openai", "responses") and is_reasoning_gpt(fb_model)
         fb_effort = ask_effort(fb_model, fb_extra) if fb_reasoning else ""

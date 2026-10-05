@@ -51,7 +51,8 @@ source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # interactive setup wizard: generates .env step by step
-# validates the token online and lists available models from your endpoint
+# validates the token online and lists available models for the primary and fallback
+# models using each one's protocol (OpenAI-compatible / Claude / Gemini)
 python configure.py
 
 # (or configure manually: copy .env.example to .env and edit)

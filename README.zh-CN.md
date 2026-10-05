@@ -49,7 +49,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 交互式配置向导：逐项询问并生成 .env（启动时可选界面语言）
-# 会在线验证 Token 有效性、自动列出 LLM 服务的可用模型供选择
+# 会在线验证 Token 有效性，并按协议（OpenAI 兼容 / Claude / Gemini）自动列出主模型和备用模型的可用模型供选择
 python configure.py
 
 # （也可以手动配置：复制 .env.example 为 .env 后编辑）

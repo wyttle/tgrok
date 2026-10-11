@@ -197,6 +197,11 @@ WHITELIST_FILE = Path(os.getenv("WHITELIST_FILE", str(Path(__file__).with_name("
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 MEMORY_MAX_CHARS = int(os.getenv("MEMORY_MAX_CHARS", "800"))
 MEMORY_FILE = Path(os.getenv("MEMORY_FILE", str(WHITELIST_FILE.with_name("memory.json"))))
+# 静默旁听：列出的群里，bot 不回复也会读所有消息，攒起来定期（不是每条）交给模型整理进记忆。
+# 需要在 BotFather 关闭隐私模式（/setprivacy → Disable）或把 bot 设为群管理员，否则收不到普通消息
+MEMORY_OBSERVE_CHATS = {int(x) for x in os.getenv("MEMORY_OBSERVE_CHATS", "").replace("，", ",").split(",") if x.strip()}
+MEMORY_OBSERVE_INTERVAL = int(os.getenv("MEMORY_OBSERVE_INTERVAL", "60"))  # 每个群最多多少分钟整理一次
+MEMORY_OBSERVE_MAX_CHARS = int(os.getenv("MEMORY_OBSERVE_MAX_CHARS", "12000"))  # 待整理消息的字数上限，超出丢最旧的
 BOT_LANG = os.getenv("BOT_LANG", "zh").strip().lower()
 if BOT_LANG not in ("zh", "en"):
     BOT_LANG = "zh"

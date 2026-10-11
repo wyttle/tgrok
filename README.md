@@ -87,6 +87,9 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `MAX_HISTORY` | messages kept per conversation | `20` |
 | `MEMORY_ENABLED` | per-chat long-term memory (digest + recent questions injected into new conversations as background) | `true` |
 | `MEMORY_MAX_CHARS` | max characters of memory injected per conversation; the digest uses at most half | `800` |
+| `MEMORY_OBSERVE_CHATS` | comma-separated group chat ids where the bot silently reads all messages for memory | (empty) |
+| `MEMORY_OBSERVE_INTERVAL` | minutes between summaries of overheard messages, per group | `60` |
+| `MEMORY_OBSERVE_MAX_CHARS` | max characters of overheard messages buffered per group; the oldest are dropped | `12000` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `MAX_IMAGES` | images attached per request | `4` |
 | `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
@@ -121,6 +124,10 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `/forget` | clear this chat's memory (same permissions) |
 
 Memory is stored in `memory.json` next to the whitelist file (`/data` in Docker). Each new conversation starts with the chat's memory as a background note: a model-written digest (who people are, what they want from the bot, agreements, running jokes; no one-off topics, passwords, keys, or contact details) plus the newest questions (who asked what, without the bot's old answers) that fit the budget. The note tells the model to ignore it unless someone asks about the past or the current question depends on it, so the bot doesn't drag old topics into new answers. Follow-ups reuse the same history, so memory is injected once per conversation. Every time six raw exchanges pile up, the model folds the older ones into the digest in the background (one short extra call on the primary model, falling back to the fallback model if it fails).
+
+Memory fades on purpose. Venting, jokes, exaggeration, and passing moods ("I got liquidated, gonna jump off a roof") are not written into the digest; the bot answers them in the moment and moves on. Recent questions older than three days are no longer injected. Each digest line carries the date it was last mentioned, and anything other than who people are, lasting preferences, requests to the bot, and agreements is dropped after 30 days without coming up again.
+
+**Silent observation.** List group ids in `MEMORY_OBSERVE_CHATS` (`/memory` in a group shows its id) and the bot also reads messages there that don't mention it, without replying. They are only buffered; once per `MEMORY_OBSERVE_INTERVAL` minutes per group, and only after at least 5 have piled up, the model folds them into that group's memory digest in one call. A failed summary keeps the buffer and waits for the next interval. `/memory` shows how many overheard messages are pending. Telegram only delivers ordinary group messages to bots with privacy mode off: in BotFather run `/setprivacy` → Disable and re-add the bot to the group, or make the bot a group admin.
 
 In groups you can also **reply to someone's message** with `/adduser` / `/deluser` — no need
 to look up their ID.

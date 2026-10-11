@@ -7,13 +7,13 @@ Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主
 ```text
 bot.py                 入口（python bot.py），只做 from tgrok.tg import main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py    41 项冒烟和回归测试（无需网络与真实 Telegram）
+tests/smoke_test.py    43 项冒烟和回归测试（无需网络与真实 Telegram）
 tgrok/
 |-- config.py          环境变量解析、常量、日志与时区初始化
 |-- i18n.py            全部界面和提示词文案，以及 t()
 |-- prompt.py          SYSTEM_PROMPT 组装和实时时间注入 with_time()
 |-- calc.py            calculate 工具：白名单 AST 求值的算术、比较与日期推算
-|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、后台摘要压缩和持久化
+|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、静默旁听缓冲、后台摘要整理和持久化
 |-- llm/
 |   |-- __init__.py    按 LLM_PROTOCOL 装配唯一 adapter 单例并导出共享 helper
 |   |-- base.py        RoundResult、BaseAdapter、工具定义与 active_tools()、错误分类和共享 helper
@@ -125,6 +125,8 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 - `tg.conversations`、`tg._conv_sizes`、`tg._conv_total`：对话历史及近似内容字符预算会计。
 - `tg.album_cache`：相册聚合缓存。
 - `memory._store`：每个聊天的记忆摘要和最近问答，写入 `MEMORY_FILE`（原子替换）。注入块总字数不超过 `MEMORY_MAX_CHARS`，摘要最多占一半；最近问答只注入「谁问了什么」，不带 bot 的旧回答，附注要求模型默认忽略、只在相关时用，避免旧话题喧宾夺主。完整问答只交给压缩摘要的那次调用。记忆只注入一段对话的首条 user 消息，追问前缀字节不变，不影响 prompt 缓存。压缩期间被 `/forget` 清空时不写回结果。
+- 记忆淡化：`memory.RECENT_TTL`（3 天）以外的提问不再注入，只剩过期提问时整块不注入；压缩时模型拿到今天的日期和每条问答的日期，摘要每行标最近一次提到的日期，非核心内容 30 天不提即删。情绪发泄、玩笑和一时的状态不进摘要。
+- 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息（含未授权用户的）由 `tg._observe` 交给 `memory.observe`，只进 `entry["observed"]` 缓冲区，不请求模型、不立刻写盘；`post_init` 启动的 `memory._observe_loop` 每分钟检查一次，满 `MEMORY_OBSERVE_INTERVAL` 分钟且攒够 5 条的群才串行整理，顺带把缓冲区落盘。问答压缩和旁听整理共用 `_compressing` 互斥，不会同时改同一个摘要；整理失败保留缓冲区，等下个周期。
 
 ## 配置
 
@@ -132,5 +134,5 @@ OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索�
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：41 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩和清空、贴纸和无字图片的回复，以及同名用户按 id 区分。
+- `python tests/smoke_test.py`：43 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩、清空和淡化、贴纸和无字图片的回复、同名用户按 id 区分，以及静默旁听的攒批定期整理。
 - 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。

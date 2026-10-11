@@ -261,10 +261,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     mentioned = is_mentioned(msg, bot.username, bot.id)
 
     if not (is_private or mentioned or is_reply_to_bot):
+        _observe(msg)
         return
 
     if not is_authorized(msg.from_user.id):
         logger.info("静默忽略未授权用户 %s (id=%s)", msg.from_user.full_name, msg.from_user.id)
+        _observe(msg)
         return
 
     question = extract_question(msg, bot.username)
@@ -358,8 +360,14 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not config.MEMORY_ENABLED:
         await update.effective_message.reply_text(t("memory_disabled"))
         return
-    block = memory.memory_block(update.effective_chat.id)
-    await update.effective_message.reply_text(t("memory_show", block=block) if block else t("memory_empty"))
+    chat_id = update.effective_chat.id
+    block = memory.memory_block(chat_id)
+    lines = [t("memory_show", block=block) if block else t("memory_empty")]
+    pending = memory.pending_observed(chat_id)
+    if pending:
+        lines.append(t("memory_pending", n=pending))
+    lines.append(t("memory_chat_id", chat_id=chat_id))
+    await update.effective_message.reply_text("\n\n".join(lines))
 
 
 async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -367,6 +375,19 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     cleared = memory.clear(update.effective_chat.id)
     await update.effective_message.reply_text(t("memory_cleared") if cleared else t("memory_empty"))
+
+
+def _observe(msg: Message) -> None:
+    """旁听群里没叫到 bot 的消息：只进记忆缓冲区，定期统一整理，不触发模型请求。"""
+    if not memory.is_observed(msg.chat_id):
+        return
+    text = msg.text or msg.caption
+    if not text and msg.sticker:
+        text = t("observed_sticker", emoji=f" {msg.sticker.emoji}" if msg.sticker.emoji else "")
+    elif not text and _msg_image_entry(msg):
+        text = t("observed_image")
+    if text:
+        memory.observe(msg.chat_id, person_label(msg.from_user), text)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -448,6 +469,7 @@ async def post_init(app: Application) -> None:
     """启动时向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊可见管理命令。"""
     from telegram import BotCommandScopeChat
 
+    memory.start_observer()
     base = [BotCommand("help", t("cmd_help"))]
     admin_cmds = base + [
         BotCommand("adduser", t("cmd_adduser")),

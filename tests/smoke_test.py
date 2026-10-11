@@ -780,6 +780,29 @@ llm.fallback_adapter = None
 memory._store.clear()
 ok("长期记忆预算/压缩/清空")
 
+# 39b. 记忆会淡化：超过 RECENT_TTL 的提问不再注入（一句旧气话不会一直跟着人）；
+#      压缩时模型拿到今天的日期和每条问答的日期，才能按日期删掉久不提起的内容
+import time as _time  # noqa: E402
+memory._store.clear()
+memory.record(-9, "老王（id 7）", "爆仓了，我要跳楼", "先别急")
+memory._store["-9"]["recent"][0]["t"] = _time.time() - memory.RECENT_TTL - 60
+assert memory.memory_block(-9) == ""  # 只剩过期提问时什么都不注入
+memory.record(-9, "老王（id 7）", "今天吃什么", "火锅")
+_block = memory.memory_block(-9)
+assert "今天吃什么" in _block and "跳楼" not in _block
+_seen_inputs = []
+class _DateProbe:
+    model = "probe"
+    async def run_round(s, history, use_tools, on_text):
+        _seen_inputs.append(history[-1]["content"])
+        return llm.RoundResult(content="老王（id 7）爱吃火锅（10-05）")
+llm.adapter, llm.fallback_adapter = _DateProbe(), None
+run(memory._summarize(memory._qa_input("", memory._store["-9"]["recent"])))
+_old_day = memory._date(memory._store["-9"]["recent"][0]["t"])
+assert memory._date(_time.time(), "%Y-%m-%d") in _seen_inputs[0] and f"[{_old_day}]" in _seen_inputs[0]
+memory._store.clear()
+ok("记忆淡化：旧提问过期、压缩带日期")
+
 # 40. 回复 bot 的贴纸/无字图片也要回应：贴纸带 emoji 说明，开视觉时把贴纸图片发给模型；
 #     没开视觉的图片说明看不到内容（之前贴纸被消息过滤器丢掉、无字图片直接沉默）
 import datetime as _dt  # noqa: E402
@@ -832,6 +855,67 @@ finally:
     tg.stream_reply = _orig_reply
     tg.allowed_users.difference_update({1001, 1002})
 ok("同名用户按 id 区分")
+
+# 43. 静默旁听：指定群里没叫 bot 的消息只进缓冲区、不请求模型；满一个周期且攒够条数才整理一次，
+#     整理期间新来的消息不会被吞；失败保留缓冲区等下个周期；未指定的群不旁听
+_obs_calls = []
+class _ObsAdapter:
+    model = "obs"
+    def __init__(s, fail=False): s.fail = fail
+    async def run_round(s, history, use_tools, on_text):
+        _obs_calls.append(history[-1]["content"])
+        if s.fail:
+            raise RuntimeError("503")
+        memory.observe(-50, "后来者（id 9）", "整理期间的新消息")
+        return llm.RoundResult(content="阿强（id 5）在养猫（10-05）")
+_saved_obs = (config.MEMORY_OBSERVE_CHATS, config.MEMORY_OBSERVE_INTERVAL)
+config.MEMORY_OBSERVE_CHATS, config.MEMORY_OBSERVE_INTERVAL = {-50}, 60
+memory._store.clear()
+tg.allowed_users.add(1005)
+try:
+    _reply_calls = []
+    async def _no_reply(msg, history):
+        _reply_calls.append(history)
+        return [], ""
+    tg.stream_reply = _no_reply
+    _qiang = _User(1005, "阿强", False)
+    _obs_chat = _Chat(-50, "supergroup")
+    for _i in range(6):
+        _m = _Message(100 + _i, _now, _obs_chat, from_user=_qiang, text=f"我家猫今天第{_i}次打翻水杯")
+        run(tg.handle_message(types.SimpleNamespace(effective_message=_m), _ctx40))
+    run(tg.handle_message(types.SimpleNamespace(effective_message=_Message(
+        200, _now, _Chat(-51, "supergroup"), from_user=_qiang, text="没指定的群")), _ctx40))
+    assert not _reply_calls and not _obs_calls  # 旁听不回复、不请求模型
+    assert memory.pending_observed(-50) == 6 and memory.pending_observed(-51) == 0
+    assert "阿强（id 1005）" in memory._store["-50"]["observed"][0]["who"]
+    _start = memory._store["-50"]["observed_at"]
+    llm.adapter, llm.fallback_adapter = _ObsAdapter(), None
+    run(memory.observe_tick(now=_start + 59 * 60))  # 还没满一个周期
+    assert not _obs_calls
+    run(memory.observe_tick(now=_start + 61 * 60))
+    assert len(_obs_calls) == 1 and "我家猫今天第5次打翻水杯" in _obs_calls[0]
+    assert memory._store["-50"]["digest"].startswith("阿强（id 5）在养猫")
+    assert [r["text"] for r in memory._store["-50"]["observed"]] == ["整理期间的新消息"]
+    # 整理失败：缓冲区原样保留，且要等下个周期才重试（不会每分钟打一次模型）
+    for _i in range(5):
+        memory.observe(-50, "阿强（id 1005）", f"又一条{_i}")
+    llm.adapter = _ObsAdapter(fail=True)
+    _t2 = memory._store["-50"]["observed_at"] + 61 * 60
+    run(memory.observe_tick(now=_t2))
+    run(memory.observe_tick(now=_t2 + 60))
+    assert len(_obs_calls) == 2 and memory.pending_observed(-50) == 6
+    # 缓冲区按字数封顶，丢最旧的
+    _saved_cap = config.MEMORY_OBSERVE_MAX_CHARS
+    config.MEMORY_OBSERVE_MAX_CHARS = 30
+    memory.observe(-50, "阿强（id 1005）", "很长" * 10)
+    assert sum(len(r["text"]) for r in memory._store["-50"]["observed"]) <= 30
+    config.MEMORY_OBSERVE_MAX_CHARS = _saved_cap
+finally:
+    tg.stream_reply = _orig_reply
+    tg.allowed_users.discard(1005)
+    config.MEMORY_OBSERVE_CHATS, config.MEMORY_OBSERVE_INTERVAL = _saved_obs
+    memory._store.clear()
+ok("静默旁听：攒批定期整理")
 
 llm.adapter = orig_adapter
 

@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import config, memory
+from . import config, memory, slang
 from .config import (
     ADMIN_USER_IDS, ALBUM_CACHE_SIZE, BOT_TOKEN, CONVERSATION_CACHE_SIZE,
     CONVERSATION_CONTENT_BUDGET, ENABLE_VISION,
@@ -286,6 +286,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         block = memory.memory_block(msg.chat_id)
         return f"{block}\n\n{text}" if block else text
 
+    def with_slang(text: str, scan: str) -> str:
+        # 消息里出现了以前弄明白过的梗，就把释义附在这条 user 消息前面（只附命中的几条）
+        block = slang.slang_block(scan, msg.chat_id)
+        return f"{block}\n\n{text}" if block else text
+
+    quoted_text = (replied.text or replied.caption or "") if replied else ""
+
     # 贴纸、看不到的图片：没有文字也要让模型知道对方发了什么
     note = media_note(msg)
 
@@ -304,11 +311,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if history is None:
             # 历史已过期（如 bot 重启）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
             # 不单独伪造 assistant 轮——以 assistant 开头的对话会被严格交替的接口拒绝
-            previous = replied.text or replied.caption or ""
-            if previous:
-                user_content = t("prev_reply", content=previous) + "\n\n" + user_content
-            user_content = with_memory(user_content)
+            if quoted_text:
+                user_content = t("prev_reply", content=quoted_text) + "\n\n" + user_content
+            user_content = with_memory(with_slang(user_content, question))
             history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        else:
+            user_content = with_slang(user_content, question)
         history = history + [{"role": "user", "content": with_time(build_content(user_content, images))}]
     else:
         # 新对话：@提及（群聊）或私聊直接提问
@@ -325,7 +333,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_content = speaker(user_content)
         history = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": with_time(build_content(with_memory(user_content), images))},
+            {"role": "user", "content": with_time(build_content(
+                with_memory(with_slang(user_content, f"{question}\n{quoted_text}")), images))},
         ]
 
     history = trim_history(history)
@@ -375,6 +384,52 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     cleared = memory.clear(update.effective_chat.id)
     await update.effective_message.reply_text(t("memory_cleared") if cleared else t("memory_empty"))
+
+
+async def cmd_slang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _can_manage_memory(update):
+        return
+    if not config.SLANG_ENABLED:
+        await update.effective_message.reply_text(t("slang_disabled"))
+        return
+    items = slang.entries_for(update.effective_chat.id)
+    if not items:
+        await update.effective_message.reply_text(t("slang_none"))
+        return
+    lines = "\n".join(slang.describe(v) for v in items)
+    await update.effective_message.reply_text(t("slang_list", n=len(items), lines=lines)[:4000])
+
+
+_GLOBAL_WORDS = ("通用", "global")
+
+
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """白名单用户都能教：/learn 词=解释（本群），/learn 通用 词=解释（所有群）。"""
+    user, msg = update.effective_user, update.effective_message
+    if user is None or not is_authorized(user.id):
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    raw = parts[1] if len(parts) > 1 else ""
+    scope = "chat"
+    head, _, rest = raw.partition(" ")
+    if head.lower() in _GLOBAL_WORDS:
+        scope, raw = slang.GLOBAL, rest
+    term, sep, rest = raw.replace("＝", "=").partition("=")
+    meaning, _, context = rest.replace("｜", "|").partition("|")
+    saved = slang.learn(term, meaning, update.effective_chat.id, scope=scope, context=context,
+                        by=person_label(user)) if sep else None
+    await msg.reply_text(t("slang_learned", term=saved) if saved else t("slang_usage"))
+
+
+async def cmd_unlearn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _can_manage_memory(update):
+        return
+    term = " ".join(context.args or [])
+    if not term:
+        await update.effective_message.reply_text(t("slang_usage"))
+        return
+    removed = slang.forget(term, update.effective_chat.id)
+    await update.effective_message.reply_text(t("slang_forgotten" if removed else "slang_not_found", term=term))
 
 
 def _observe(msg: Message) -> None:
@@ -470,13 +525,15 @@ async def post_init(app: Application) -> None:
     from telegram import BotCommandScopeChat
 
     memory.start_observer()
-    base = [BotCommand("help", t("cmd_help"))]
+    base = [BotCommand("help", t("cmd_help")), BotCommand("learn", t("cmd_learn"))]
     admin_cmds = base + [
         BotCommand("adduser", t("cmd_adduser")),
         BotCommand("deluser", t("cmd_deluser")),
         BotCommand("listusers", t("cmd_listusers")),
         BotCommand("memory", t("cmd_memory")),
         BotCommand("forget", t("cmd_forget")),
+        BotCommand("slang", t("cmd_slang")),
+        BotCommand("unlearn", t("cmd_unlearn")),
     ]
     await app.bot.set_my_commands(base)
     for admin_id in ADMIN_USER_IDS:
@@ -506,6 +563,9 @@ def main() -> None:
     app.add_handler(CommandHandler("listusers", cmd_listusers))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("slang", cmd_slang))
+    app.add_handler(CommandHandler("learn", cmd_learn))
+    app.add_handler(CommandHandler("unlearn", cmd_unlearn))
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^c:\d+$"))
     app.add_handler(MessageHandler(MESSAGE_FILTER, handle_message))
 

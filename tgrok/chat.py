@@ -12,7 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
-from . import calc, config, llm, web
+from . import calc, config, llm, slang, web
 from .config import STREAM_CURSOR, STREAM_EDIT_INTERVAL, STREAM_SEGMENT_LIMIT
 from .i18n import STRINGS, t
 from .config import BOT_LANG
@@ -52,6 +52,40 @@ def _streaming_markdown(text: str) -> str:
     md = to_telegram_markdown(text).rstrip("\n")
     # 光标不能挂在代码块收尾的 ``` 同一行
     return md + ("\n" if md.endswith("```") else "") + _MD_CURSOR
+
+
+_LIST_MARK_RE = re.compile(r"^\s*(?:[-*+•·]|\d+[.、)]|#{1,6})\s+")
+_CJK_RE = re.compile(r"[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]")
+_END_PUNCT = "。！？.!?；;：:，,、…）)」』】》\"'"
+
+
+def _single_paragraph(text: str) -> str:
+    """把模型输出压成一整段：去掉分点、编号和标题符号，按中英文习惯把各行接起来。
+    代码块原样保留（里面的换行有意义）。"""
+    parts = re.split(r"(```.*?(?:```|$))", text, flags=re.S)
+    out = ""
+    for i, part in enumerate(parts):
+        if i % 2:  # 代码块
+            out = out.rstrip() + ("\n" if out.strip() else "") + part.strip("\n") + "\n"
+            continue
+        for line in part.splitlines():
+            line = _LIST_MARK_RE.sub("", line).strip()
+            if not line:
+                continue
+            if not out or out.endswith("\n"):
+                out += line
+            elif out[-1] in _END_PUNCT:
+                out += ("" if _CJK_RE.match(out[-1]) else " ") + line
+            elif _CJK_RE.match(out[-1]):
+                out += "，" + line  # 中文行没收尾就换行了（标题、分点），补个逗号接上
+            else:
+                out += ", " + line  # 英文分点同理
+    return out.strip()
+
+
+def _shape(text: str) -> str:
+    """按配置决定是否把回复压成一段。"""
+    return _single_paragraph(text) if config.REPLY_SINGLE_PARAGRAPH else text
 
 
 def _is_not_modified(e: BadRequest) -> bool:
@@ -107,6 +141,8 @@ def _round_entries(calls_list: list[dict]) -> tuple[list[dict], list[dict]]:
             mapping.append(open_entry)
         elif name == "calculate":
             single("calc", t("tool_calc", expr=(str(args.get("expression", "")).strip() or "?")[:48]))
+        elif name == "remember_slang":
+            single("slang", t("tool_slang", term=(str(args.get("term", "")).strip() or "?")[:32]))
         elif name != "web_search":
             single("other", name)
         elif merge_search:
@@ -166,6 +202,8 @@ def _result_summary(tool_name: str, content: str) -> str:
         return t("res_failed")
     if tool_name == "calculate":
         return "= " + content.rsplit(" = ", 1)[-1][:40]
+    if tool_name == "remember_slang":
+        return t("res_saved")
     if tool_name == "open_url":
         n = len(content)
         return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
@@ -177,7 +215,7 @@ def _result_summary(tool_name: str, content: str) -> str:
     return t("res_chars", k=f"{n / 1000:.1f}k" if n >= 1000 else str(n))
 
 
-async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
+async def _execute_tool_calls(assistant_msg: dict, chat_id: int | None = None) -> list[dict]:
     """并发执行一轮内的所有工具调用（相互独立），按原顺序返回 tool 消息。
 
     grounding 模式下同一轮的多个 web_search 合并为一次深度调研（每次 grounding
@@ -206,6 +244,8 @@ async def _execute_tool_calls(assistant_msg: dict) -> list[dict]:
             content = t("search_bad_args")
         elif name == "calculate":
             content = calc.run_calculate(str(args.get("expression", "")))
+        elif name == "remember_slang":
+            content = slang.run_remember(args, chat_id)
         elif name == "open_url":
             content = await web.run_fetch_url(str(args.get("url", "")))
         elif name != "web_search":
@@ -340,7 +380,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
                 cut = segment.rfind(" ", STREAM_SEGMENT_LIMIT // 2, STREAM_SEGMENT_LIMIT)
             if cut == -1:
                 cut = STREAM_SEGMENT_LIMIT
-            part, segment = segment[:cut], segment[cut:].lstrip("\n")
+            part, segment = _shape(segment[:cut]), segment[cut:].lstrip("\n")
             await settle()
             await push(part, final=True)
             finalized += part + "\n"
@@ -352,7 +392,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         if (segment.strip() and now - last_edit >= STREAM_EDIT_INTERVAL
                 and (bubble_task is None or bubble_task.done())):
             await settle()
-            start_update(push(segment, final=False))
+            start_update(push(_shape(segment), final=False))
             last_edit = now
 
     def progress_body(suffix: str = "…") -> str:
@@ -492,7 +532,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
             progress.extend(entries)
             await show_progress()
             working.append(assistant_msg)
-            tool_results = await _execute_tool_calls(assistant_msg)
+            tool_results = await _execute_tool_calls(assistant_msg, msg.chat_id)
             working.extend(tool_results)
             for entry, call, result_msg in zip(call_map, assistant_msg["tool_calls"], tool_results):
                 _attach_result(entry, call, result_msg["content"])
@@ -510,7 +550,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         logger.info("生成已被用户取消 chat=%s user=%s", msg.chat_id, requester)
         try:
             if segment.strip():
-                await push(segment.rstrip() + "\n\n" + t("cancelled_suffix"), final=True)
+                await push(_shape(segment).rstrip() + "\n\n" + t("cancelled_suffix"), final=True)
             elif sent is not None and not finalized:
                 await sent.edit_text(t("cancelled"))
         except TelegramError:
@@ -523,7 +563,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         try:
             if segment.strip():
                 # 已有部分内容：保留定稿，错误另发一条
-                await push(segment, final=True)
+                await push(_shape(segment), final=True)
                 await msg.reply_text(fail_text)
             elif sent is not None and not finalized:
                 await sent.edit_text(fail_text)
@@ -544,6 +584,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
             # 终轮没有产出正文：回用最后一轮被丢弃的草稿，别让用户空手而归
             segment = draft_fallback
         if segment.strip():
+            segment = _shape(segment)
             await push(segment + note, final=True)
             finalized += segment
             if sent is not None:

@@ -16,6 +16,8 @@ import tempfile  # noqa: E402
 _TMP = Path(tempfile.mkdtemp(prefix="tgrok-test-"))
 os.environ["MEMORY_FILE"] = str(_TMP / "memory.json")  # 测试不碰仓库里的记忆文件
 os.environ["MEMORY_ENABLED"] = "true"
+os.environ["SLANG_FILE"] = str(_TMP / "slang.json")
+os.environ["SLANG_ENABLED"] = "true"
 
 from tgrok import chat, config, llm, prompt, tg, web  # noqa: E402
 from tgrok.llm import claude, gemini, openai  # noqa: E402
@@ -640,7 +642,8 @@ class _RC35:
 llm.adapter = resp_mod.ResponsesAdapter(client=types.SimpleNamespace(responses=_RC35()))
 m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
 assert ans == "打完折 1104.15。", ans
-assert [t_["name"] for t_ in seen35[0]["tools"]] == ["calculate"]  # 没配搜索源也能用计算
+_names35 = [t_["name"] for t_ in seen35[0]["tools"]]
+assert "calculate" in _names35 and "web_search" not in _names35  # 没配搜索源也能用计算
 out35 = [i for i in seen35[1]["input"] if i.get("type") == "function_call_output"]
 assert out35 == [{"type": "function_call_output", "call_id": "c1", "output": "1299*0.85 = 1104.15"}]
 assert any("计算: 1299*0.85" in x and "= 1104.15" in x for x in m.log)
@@ -798,10 +801,26 @@ class _DateProbe:
         return llm.RoundResult(content="老王（id 7）爱吃火锅（10-05）")
 llm.adapter, llm.fallback_adapter = _DateProbe(), None
 run(memory._summarize(memory._qa_input("", memory._store["-9"]["recent"])))
-_old_day = memory._date(memory._store["-9"]["recent"][0]["t"])
+_old_day = memory._date(memory._store["-9"]["recent"][0]["t"], "%Y-%m-%d")
 assert memory._date(_time.time(), "%Y-%m-%d") in _seen_inputs[0] and f"[{_old_day}]" in _seen_inputs[0]
+# 注入的每条都标距今多久；摘要里过期的一时话题不注入，带 [长期] 的一直留；旧格式（MM-DD）也认
+from datetime import datetime as _dtime, timedelta as _td  # noqa: E402
+_today = _dtime.now(config.BOT_TZ).date()
 memory._store.clear()
-ok("记忆淡化：旧提问过期、压缩带日期")
+memory._store["-9"] = {"digest": "\n".join([
+    f"[长期] 老王（id 7）是程序员（{(_today - _td(days=200)).isoformat()}）",
+    f"老王在搬家（{(_today - _td(days=20)).isoformat()}）",
+    f"老王在减肥（{(_today - _td(days=2)).isoformat()}）",
+    f"老王在学吉他（{(_today - _td(days=1)).strftime('%m-%d')}）",
+    "没写日期的旧条目",
+]), "recent": [{"who": "老王（id 7）", "q": "今天吃啥", "a": "火锅", "t": int(_time.time()) - 2 * 3600}]}
+_block = memory.memory_block(-9)
+assert "是程序员（约 6 个月前）" in _block  # 长期信息再久也留，标上时间
+assert "搬家" not in _block  # 20 天前的一时话题超过 MEMORY_FRESH_DAYS，不注入
+assert "在减肥（2 天前）" in _block and "在学吉他（昨天）" in _block and "没写日期的旧条目" in _block
+assert "今天吃啥（2 小时前）" in _block
+memory._store.clear()
+ok("记忆淡化：旧提问过期、压缩带日期、注入标距今多久")
 
 # 40. 回复 bot 的贴纸/无字图片也要回应：贴纸带 emoji 说明，开视觉时把贴纸图片发给模型；
 #     没开视觉的图片说明看不到内容（之前贴纸被消息过滤器丢掉、无字图片直接沉默）
@@ -916,6 +935,93 @@ finally:
     config.MEMORY_OBSERVE_CHATS, config.MEMORY_OBSERVE_INTERVAL = _saved_obs
     memory._store.clear()
 ok("静默旁听：攒批定期整理")
+
+# 44. 梗词典：模型弄明白一个梗后调用 remember_slang 记下这种用法（带语境和原句）；之后消息里出现这个词
+#     就作为参考附上。同一个词可以有好几种用法，新的在前、最多 3 种；本群专属的只在本群出现，
+#     通用的所有群都有；/learn 能手动教（可带语境），/unlearn 能删
+from tgrok import slang  # noqa: E402
+slang._entries.clear()
+_rounds44 = {"n": 0}
+async def cs44(h, use_tools):
+    _rounds44["n"] += 1
+    if _rounds44["n"] == 1:
+        return stream_of([chunk_tool(0, "remember_slang", {
+            "term": "电子榨菜", "meaning": "吃饭时看的下饭视频，不是真的榨菜",
+            "context": "说自己吃饭时在看什么", "example": "今天的电子榨菜是老番", "scope": "global"})])
+    return stream_of([chunk_text("哦，下饭视频啊。")])
+set_create(cs44)
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert ans == "哦，下饭视频啊。"
+assert any("记住: 电子榨菜" in x and "已记住" in x for x in m.log)
+_saved44 = json.loads(config.SLANG_FILE.read_text(encoding="utf-8"))["global|电子榨菜"]["senses"][0]
+assert _saved44["context"] == "说自己吃饭时在看什么" and _saved44["example"] == "今天的电子榨菜是老番"
+_captured44 = []
+async def _cap44(msg, history):
+    _captured44.append(history)
+    return [], ""
+tg.stream_reply = _cap44
+tg.allowed_users.add(1007)
+try:
+    _u44 = _User(1007, "小李", False)
+    def _ask44(chat_id, text, mid):
+        _m = _Message(mid, _now, _Chat(chat_id, "supergroup"), from_user=_u44, text="@bot " + text,
+                      entities=[_Entity(_Entity.MENTION, 0, 4)])
+        run(tg.handle_message(types.SimpleNamespace(effective_message=_m), _ctx40))
+        return _captured44[-1][-1]["content"]
+    assert "下饭视频" in _ask44(-60, "今天的电子榨菜是啥", 300)  # 通用梗所有群可见
+    assert "下饭视频" not in _ask44(-60, "今天吃啥", 301)  # 没出现这个词就不附
+    # 本群专属：在 -60 群教的，-61 群看不到
+    _replies44 = []
+    async def _reply44(text, **kw): _replies44.append(text)
+    _upd = types.SimpleNamespace(
+        effective_user=_u44, effective_chat=_Chat(-60, "supergroup"),
+        effective_message=types.SimpleNamespace(text="/learn 老地方=群主家楼下那家烧烤", reply_text=_reply44))
+    run(tg.cmd_learn(_upd, None))
+    assert "老地方" in _replies44[-1]
+    _block44 = _ask44(-60, "晚上老地方见", 303)
+    assert "烧烤" in _block44
+    assert "烧烤" not in _ask44(-61, "晚上老地方见", 304)
+    # 同一个词的第二种用法：两种都附上，新的在前；释义相同的不重复；最多留 3 种
+    slang.learn("老地方", "群里吵架时说的「回老地方」指去私聊单挑", -60, context="两个人吵起来时")
+    _block44 = _ask44(-60, "有本事老地方见", 306)
+    assert _block44.index("单挑") < _block44.index("烧烤") and "两个人吵起来时" in _block44
+    slang.learn("老地方", "群里吵架时说的「回老地方」指去私聊单挑", -60, context="两个人吵起来时")
+    for _i in range(3):
+        slang.learn("老地方", f"第{_i}种", -60)
+    assert len(slang._entries["-60|老地方"]["senses"]) == slang.MAX_SENSES
+    assert slang.forget("老地方", -60) and "烧烤" not in _ask44(-60, "老地方", 305)
+    # 单字梗只在短句里命中：「太典了」附上，长句里的「字典」不附
+    slang.learn("典", "嘲讽某人的发言老套又经典", -60, context="单发一个字或很短的回复")
+    assert "老套又经典" in _ask44(-60, "太典了", 307)
+    assert "老套又经典" not in _ask44(-60, "字典里查不到这个词怎么办啊各位", 308)
+    # 参数不合格（空词或空释义）不写入，返回让模型能看懂的失败文案
+    assert slang.run_remember({"term": "", "meaning": "x", "scope": "chat"}, -60).startswith("（")
+    assert slang.run_remember({"term": "啥", "meaning": "", "scope": "chat"}, -60).startswith("（")
+finally:
+    tg.stream_reply = _orig_reply
+    tg.allowed_users.discard(1007)
+    slang._entries.clear()
+ok("梗词典：记住、按词附上、按群隔离")
+
+# 45. 只回一段：开启 REPLY_SINGLE_PARAGRAPH 后，模型分段、分点、带标题的输出在显示前被压成一段，
+#     中文行之间不加多余空格、没收尾的行补逗号，代码块原样保留；返回给对话历史的也是这一段；关闭时原样显示
+assert chat._single_paragraph("## 结论\n能。\n\n步骤：\n1. 先烧水\n2. 放面") == "结论，能。步骤：先烧水，放面"
+assert chat._single_paragraph("Short answer: yes.\n\n- one\n- two") == "Short answer: yes. one, two"
+_code45 = chat._single_paragraph("看代码：\n\n```python\nprint(1)\nprint(2)\n```\n\n就这。")
+assert "```python\nprint(1)\nprint(2)\n```" in _code45 and "\n\n" not in _code45
+async def cs45(h, use_tools):
+    return stream_of([chunk_text("就你还想捏爆？\n\n整只握在手心没事。\n\n"), chunk_text("- 指尖戳一下就行")])
+set_create(cs45)
+config.REPLY_SINGLE_PARAGRAPH = True
+try:
+    m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+    assert ans == "就你还想捏爆？整只握在手心没事。指尖戳一下就行"
+    assert "\n" not in m.sent[0].text
+finally:
+    config.REPLY_SINGLE_PARAGRAPH = False
+m = FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
+assert "\n\n" in ans  # 关闭时不改动模型的分段
+ok("只回一段：压成整段、代码块保留")
 
 llm.adapter = orig_adapter
 

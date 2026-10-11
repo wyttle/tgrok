@@ -5,5 +5,7 @@ __pycache__/
 allowed_users.json
 memory.json
 memory.json.tmp
+slang.json
+slang.json.tmp
 profiles/
 

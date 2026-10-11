@@ -16,6 +16,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Web search**: the model can search the internet on its own via a `web_search` tool and answer with sources (Tavily / DuckDuckGo / SearXNG / Serper)
 - **Calculator**: a built-in `calculate` tool lets the model check arithmetic, percentages, unit conversions, and date math instead of guessing (no setup needed)
 - **Long-term memory**: remembers who's who and what the chat has talked about, within a fixed character budget (`MEMORY_MAX_CHARS`)
+- **Slang glossary**: once the bot figures out a meme or metaphor (or someone corrects it), it remembers the real meaning and uses it next time
 - **Streaming replies**: answers appear progressively (typewriter style); long generations won't be cut off by gateway idle timeouts
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
@@ -77,6 +78,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_API_KEY` | API key; anything works for most local servers | `not-needed` |
 | `LLM_USER_AGENT` | custom User-Agent (some cloud gateways validate it) | SDK default |
 | `SYSTEM_PROMPT` | system prompt; keep it on one line and use `\n` for line breaks (double quotes recommended) | built-in default |
+| `REPLY_SINGLE_PARAGRAPH` | reply as one paragraph: adds a prompt rule and merges paragraphs, lists, and headings before display (code blocks kept) | `false` |
 | `MAX_TOKENS` | max tokens per reply | `1024` |
 | `LLM_TEMPERATURE` | sampling temperature; empty = backend default, auto-dropped if rejected | (empty) |
 | `LLM_TOP_P` | nucleus sampling; empty = backend default, auto-dropped if rejected | (empty) |
@@ -87,9 +89,12 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `MAX_HISTORY` | messages kept per conversation | `20` |
 | `MEMORY_ENABLED` | per-chat long-term memory (digest + recent questions injected into new conversations as background) | `true` |
 | `MEMORY_MAX_CHARS` | max characters of memory injected per conversation; the digest uses at most half | `800` |
+| `MEMORY_FRESH_DAYS` | passing topics in the digest stop being injected once last mentioned more than this many days ago | `14` |
 | `MEMORY_OBSERVE_CHATS` | comma-separated group chat ids where the bot silently reads all messages for memory | (empty) |
 | `MEMORY_OBSERVE_INTERVAL` | minutes between summaries of overheard messages, per group | `60` |
 | `MEMORY_OBSERVE_MAX_CHARS` | max characters of overheard messages buffered per group; the oldest are dropped | `12000` |
+| `SLANG_ENABLED` | slang glossary: the model saves memes it figured out with `remember_slang`; matching terms get their meaning attached | `true` |
+| `SLANG_MAX_ENTRIES` | max glossary entries; the least recently used are dropped | `500` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `MAX_IMAGES` | images attached per request | `4` |
 | `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
@@ -122,12 +127,17 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `/listusers` | show the current whitelist |
 | `/memory` | show this chat's memory (admins; anyone authorized in a private chat) |
 | `/forget` | clear this chat's memory (same permissions) |
+| `/learn term=meaning\|when` | teach a usage for this chat (the context part is optional); `/learn global ...` for all chats (authorized users) |
+| `/slang` | list saved memes and expressions (admins; anyone authorized in a private chat) |
+| `/unlearn term` | delete a saved expression (same permissions as `/slang`) |
 
 Memory is stored in `memory.json` next to the whitelist file (`/data` in Docker). Each new conversation starts with the chat's memory as a background note: a model-written digest (who people are, what they want from the bot, agreements, running jokes; no one-off topics, passwords, keys, or contact details) plus the newest questions (who asked what, without the bot's old answers) that fit the budget. The note tells the model to ignore it unless someone asks about the past or the current question depends on it, so the bot doesn't drag old topics into new answers. Follow-ups reuse the same history, so memory is injected once per conversation. Every time six raw exchanges pile up, the model folds the older ones into the digest in the background (one short extra call on the primary model, falling back to the fallback model if it fails).
 
-Memory fades on purpose. Venting, jokes, exaggeration, and passing moods ("I got liquidated, gonna jump off a roof") are not written into the digest; the bot answers them in the moment and moves on. Recent questions older than three days are no longer injected. Each digest line carries the date it was last mentioned, and anything other than who people are, lasting preferences, requests to the bot, and agreements is dropped after 30 days without coming up again.
+Memory fades on purpose. Venting, jokes, exaggeration, and passing moods ("I got liquidated, gonna jump off a roof") are not written into the digest; the bot answers them in the moment and moves on. Every injected line shows how long ago it was ("2 h ago", "yesterday", "about 3 months ago"), so the model knows what's old news. Digest lines are either tagged as lasting (who people are, lasting preferences, requests to the bot, agreements), which always stay, or passing topics, which stop being injected after `MEMORY_FRESH_DAYS` days without coming up and are deleted after 30. Recent questions older than three days are no longer injected.
 
 **Silent observation.** List group ids in `MEMORY_OBSERVE_CHATS` (`/memory` in a group shows its id) and the bot also reads messages there that don't mention it, without replying. They are only buffered; once per `MEMORY_OBSERVE_INTERVAL` minutes per group, and only after at least 5 have piled up, the model folds them into that group's memory digest in one call. A failed summary keeps the buffer and waits for the next interval. `/memory` shows how many overheard messages are pending. Telegram only delivers ordinary group messages to bots with privacy mode off: in BotFather run `/setprivacy` → Disable and re-add the bot to the group, or make the bot a group admin.
+
+**Slang glossary.** Chinese memes, slang, puns, and metaphors rarely mean what they literally say, and the same word can mean different things in different sentences. So the glossary doesn't map a term to one fixed meaning: each term keeps up to three usages, each with when it carries that meaning and the message where it was used that way. When the model works out a usage, from a page that explains it or because someone corrected or explained it, it saves it with the `remember_slang` tool; a correction is added as the newest usage. Whenever a later message (or the message it quotes) contains a saved term, its usages are attached as a reference, with an explicit note to judge by the current context and that the word may well be meant literally. Only terms that actually appear are attached, at most 5; single-character memes such as 典 or 急 only count in short messages. General internet memes are shared by every chat; group in-jokes stay in the group where they were learned. People can teach usages with `/learn term=meaning|when it means this`. With web search on, the bot is also told how to look up memes properly: search "X 是什么梗 / 出处", open pages that explain that specific meme (Moegirl, Zhihu, Baidu Baike, Bilibili explainers) and read them instead of trusting snippets, then check which layer the message uses. The glossary is stored in `slang.json` next to the whitelist file.
 
 In groups you can also **reply to someone's message** with `/adduser` / `/deluser` — no need
 to look up their ID.

@@ -11,8 +11,9 @@ MEMORY_MAX_CHARS 限制（摘要最多占一半），控制每次请求多花的
 import asyncio
 import json
 import logging
+import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 from . import config, llm
 from .i18n import t
@@ -66,12 +67,68 @@ def _date(ts: float, fmt: str = "%m-%d") -> str:
 
 def _line(r: dict) -> str:
     """给压缩摘要那次调用看的完整一行：日期、说话人、问题和当时的回答。"""
-    return t("memory_line", date=_date(r.get("t", time.time())), who=r["who"], q=r["q"], a=r["a"])
+    return t("memory_line", date=_date(r.get("t", time.time()), "%Y-%m-%d"), who=r["who"], q=r["q"], a=r["a"])
+
+
+def _age(seconds: float) -> str:
+    """距今多久，给模型看的说法：刚才、3 小时前、昨天、5 天前、约 2 个月前。"""
+    if seconds < 3600:
+        return t("age_just_now")
+    if seconds < 86400:
+        return t("age_hours", n=int(seconds // 3600))
+    return _age_days(int(seconds // 86400))
+
+
+def _age_days(days: int) -> str:
+    if days <= 0:
+        return t("age_today")
+    if days == 1:
+        return t("age_yesterday")
+    if days < 60:
+        return t("age_days", n=days)
+    if days < 365:
+        return t("age_months", n=days // 30)
+    return t("age_years", n=days // 365)
+
+
+# 摘要行末尾的日期：模型按要求写（YYYY-MM-DD），旧摘要里可能是（MM-DD）
+_DIGEST_DATE_RE = re.compile(r"\s*[（(]\s*(?:(\d{4})-)?(\d{1,2})-(\d{1,2})\s*[)）]\s*$")
+_LASTING_TAGS = ("[长期]", "[lasting]")
+
+
+def _digest_lines(digest: str, today: date) -> list[str]:
+    """把摘要里每行末尾的日期换成「距今多久」，并去掉过期的一时话题。
+    带 [长期] 标记的（谁是谁、长期偏好、约定）一直保留；其它行最近一次提到超过
+    MEMORY_FRESH_DAYS 天就不再注入（真正删除由下次压缩时的模型完成）。没标日期的行原样保留。"""
+    out = []
+    for line in digest.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _DIGEST_DATE_RE.search(line)
+        if not m:
+            out.append(line)
+            continue
+        year = int(m.group(1)) if m.group(1) else today.year
+        try:
+            when = date(year, int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            out.append(line)
+            continue
+        if not m.group(1) and when > today:
+            when = when.replace(year=year - 1)  # 只有月日、却在今天之后：是去年的
+        days = (today - when).days
+        lasting = any(tag in line for tag in _LASTING_TAGS)
+        if not lasting and days > config.MEMORY_FRESH_DAYS:
+            continue
+        out.append(f"{line[: m.start()]}{t('age_suffix', age=_age_days(days))}")
+    return out
 
 
 def memory_block(chat_id: int) -> str:
     """注入给模型的记忆附注；没有记忆或未开启时返回空串。
     摘要最多占 MEMORY_MAX_CHARS 的一半，剩余额度从最新往旧填最近的提问。
+    每条都标上距今多久，过期的一时话题不注入，免得模型聊着聊着翻出很早以前的事。
     只放「谁问了什么」、不放 bot 当时的回答：带着旧回答原文，模型容易顺着把旧话题再讲一遍。"""
     if not config.MEMORY_ENABLED:
         return ""
@@ -79,19 +136,21 @@ def memory_block(chat_id: int) -> str:
     if not entry or not (entry.get("digest") or entry.get("recent")):
         return ""
     budget = config.MEMORY_MAX_CHARS
-    digest = entry.get("digest", "")[: budget // 2]
+    now = time.time()
+    digest = "\n".join(_digest_lines(entry.get("digest", ""), datetime.fromtimestamp(now, config.BOT_TZ).date()))
+    digest = digest[: budget // 2]
     used, lines = len(digest), []
-    cutoff = time.time() - RECENT_TTL
+    cutoff = now - RECENT_TTL
     for r in reversed(entry.get("recent", [])):
         if r.get("t", 0) < cutoff:
             break  # 按时间追加，再往前只会更旧
-        line = t("memory_brief_line", who=r["who"], q=r["q"])
+        line = t("memory_brief_line", who=r["who"], q=r["q"], age=_age(now - r.get("t", now)))
         if used + len(line) > budget:
             break
         lines.append(line)
         used += len(line)
     if not digest and not lines:
-        return ""  # 只剩过期的提问：什么都不注入
+        return ""  # 只剩过期的内容：什么都不注入
     parts = [t("memory_header")]
     if digest:
         parts.append(digest)
@@ -180,7 +239,7 @@ async def summarize_observed(key: str) -> bool:
     _compressing.add(key)
     try:
         batch = list(entry["observed"])
-        lines = "\n".join(t("memory_observed_line", date=_date(r["t"], "%m-%d %H:%M"), who=r["who"], text=r["text"])
+        lines = "\n".join(t("memory_observed_line", date=_date(r["t"], "%Y-%m-%d %H:%M"), who=r["who"], text=r["text"])
                           for r in batch)
         digest = await _summarize(t("memory_summarize_observed_input", today=_date(time.time(), "%Y-%m-%d"),
                                     digest=entry.get("digest", "") or t("memory_none"), lines=lines))

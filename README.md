@@ -18,7 +18,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Calculator**: a built-in `calculate` tool lets the model check arithmetic, percentages, unit conversions, and date math instead of guessing (no setup needed)
 - **Long-term memory**: per chat, curated entries (group notes and a profile per person) plus a searchable log of past messages, modeled on Hermes Agent and OpenClaw
 - **Slang glossary**: once the bot figures out a meme or metaphor (or someone corrects it), it remembers the real meaning and uses it next time
-- **Streaming replies**: answers appear progressively (typewriter style); long generations won't be cut off by gateway idle timeouts
+- **Streaming replies**: answers appear progressively (typewriter style); while waiting, the progress line shows a running timer and the tool being run, and the chat shows "typing…"; long generations won't be cut off by gateway idle timeouts
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
 - **Four LLM protocols**: select OpenAI-compatible Chat Completions, the OpenAI Responses API, native Gemini, or native Claude with `LLM_PROTOCOL`; native Claude keeps Anthropic thinking and tool-use semantics

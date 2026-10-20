@@ -11,8 +11,8 @@ import time
 from collections.abc import Callable
 
 from telegram import InlineKeyboardMarkup, Message
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 from . import config, render
 from .i18n import t
@@ -20,8 +20,16 @@ from .tools import ProgressLine
 
 logger = logging.getLogger(__name__)
 
-TICK_SECONDS = 5
-_TICK_FRAMES = ["…", "……", "………"]
+# 还没出正文时多久刷新一次进度（计时）。Telegram 建议同一聊天每秒最多一条，群里每分钟最多约 20 条，
+# 编辑也算在内，所以群里放慢
+TICK_PRIVATE, TICK_GROUP = 2.0, 4.0
+TYPING_SECONDS = 4.5  # 「正在输入」状态在客户端显示约 5 秒，到期前续一次
+SHOW_ELAPSED_AFTER = 3  # 等满这么多秒才显示计时，秒回的请求不闪一下数字
+
+
+def elapsed_text(seconds: float) -> str:
+    s = int(seconds)
+    return t("elapsed_s", s=s) if s < 60 else t("elapsed_m", m=s // 60, s=s % 60)
 
 
 async def _quiet(coro) -> None:
@@ -44,9 +52,15 @@ class Bubble:
         self.progress: list[ProgressLine] = []  # 工具行 + 两空格缩进的结果行
         self.stage: str | None = None  # 底部状态行（思考阶段），原地替换而非追加
         self.placeholder_failed = False
-        self._last_edit = 0.0
+        group = getattr(getattr(msg, "chat", None), "type", "private") != "private"
+        self._tick_seconds = TICK_GROUP if group else TICK_PRIVATE
+        self._edit_interval = config.STREAM_EDIT_INTERVAL_GROUP if group else config.STREAM_EDIT_INTERVAL_PRIVATE
+        self._t0 = time.monotonic()
+        self._last_edit = 0.0  # 上一次正文编辑
+        self._last_render = 0.0  # 上一次任何显示更新（占位、进度、正文），进度刷新据此限速
         self._task: asyncio.Task | None = None
         self._ticker: asyncio.Task | None = None
+        self._typing: asyncio.Task | None = None
         self._live = True
 
     @property
@@ -58,10 +72,13 @@ class Bubble:
         return len(self.finalized) + len(self.segment.strip())
 
     def open(self, stage: str) -> None:
-        """发占位消息（和首轮模型请求并发），并开始在长时间等待时跳动省略号。"""
+        """发占位消息（和首轮模型请求并发），开始计时刷新进度，并持续显示「正在输入」。"""
         self.stage = stage
+        self._t0 = time.monotonic()
         self._start(self._send_placeholder(f"{stage}…"))
+        self._last_render = time.monotonic()
         self._ticker = asyncio.create_task(self._tick())
+        self._typing = asyncio.create_task(self._keep_typing())
 
     async def settle(self) -> None:
         while self._task is not None:
@@ -88,7 +105,8 @@ class Bubble:
 
     async def push(self, text: str, final: bool) -> None:
         """渲染一版正文：定稿不带光标和按钮，过程中带光标和取消按钮。
-        都优先 MarkdownV2，解析失败回退纯文本；限流时中间编辑直接跳过，定稿等待后重试一次。"""
+        都优先 MarkdownV2，解析失败回退纯文本；限流时中间编辑直接跳过，定稿等待后重试一次；
+        定稿编辑网络超时也重试一次，不然气泡会停在带光标的中间版本上。"""
         if final:
             md, plain, kb = render.to_telegram_markdown(text), text, None
         else:
@@ -100,7 +118,8 @@ class Bubble:
             else:
                 await self.sent.edit_text(body, parse_mode=mode, reply_markup=kb)
 
-        for _ in range(2):
+        for attempt in range(2):
+            editing = self.sent is not None
             try:
                 try:
                     await deliver(md, ParseMode.MARKDOWN_V2)
@@ -115,6 +134,11 @@ class Bubble:
                     return
             except BadRequest:
                 return  # 例如 message is not modified
+            except NetworkError:
+                # 超时的编辑可能其实已经生效，重试时会得到 not modified；新发的消息不重试，免得发出两条
+                if not final or attempt or not editing:
+                    raise
+                await asyncio.sleep(1)
 
     async def on_text(self, delta: str) -> None:
         """模型的正文增量。"""
@@ -138,10 +162,10 @@ class Bubble:
             self.sent, self._last_edit = None, 0.0
         now = time.monotonic()
         # 上一次更新还在途（慢网络或限流退避中）就跳过本次，等它落地后的下一个 delta 再刷新
-        if self.has_text and now - self._last_edit >= config.STREAM_EDIT_INTERVAL and not self._busy():
+        if self.has_text and now - self._last_edit >= self._edit_interval and not self._busy():
             await self.settle()
             self._start(self.push(render.shape(self.segment), final=False))
-            self._last_edit = now
+            self._last_edit = self._last_render = now
 
     def take_draft(self) -> str:
         """模型这一轮边写正文边请求工具：这段正文只是过程草稿，工具结果回来后模型会重写完整回答，
@@ -150,18 +174,25 @@ class Bubble:
         draft, self.segment = self.segment, ""
         return draft
 
-    def _progress_body(self, suffix: str = "…") -> str:
-        """进度文本：纯文本，层级只靠缩进；底部一行是当前思考阶段。
+    def _since(self, start: float, now: float) -> str:
+        seconds = now - start
+        return " " + elapsed_text(seconds) if seconds >= SHOW_ELAPSED_AFTER else ""
+
+    def _progress_body(self) -> str:
+        """进度文本：纯文本，层级只靠缩进；底部一行是当前思考阶段，带从提问起的总计时。
+        还在执行的工具行带这个工具的计时，长时间的调研也看得出没卡住。
         已有部分正文时正文在上、进度在下。在调度时取快照，后台执行时状态可能已前进。"""
+        now = time.monotonic()
         lines = []
         for line in self.progress[-5:]:
-            # 工具还在执行（没有底部状态行时）：省略号挂在没出结果的工具行上，长时间的调研也看得出没卡住
-            pending = line.result is None and not self.stage
-            lines.append(line.text + (suffix if pending else ""))
+            if line.result is None and not self.stage:  # 没有底部状态行时就是工具还在执行
+                lines.append(line.text + "…" + self._since(line.started, now))
+            else:
+                lines.append(line.text)
             if line.result:
                 lines.append(f"  {line.result}")
         if self.stage:
-            lines.append(self.stage + suffix)
+            lines.append(self.stage + "…" + self._since(self._t0, now))
         body = "\n".join(lines)
         if self.has_text:
             body = self.segment.rstrip() + "\n\n" + body
@@ -169,6 +200,7 @@ class Bubble:
         return body[-4000:]
 
     async def _render_progress(self, body: str) -> None:
+        self._last_render = time.monotonic()
         try:
             if self.sent is None:
                 self.sent = await self.msg.reply_text(body, reply_markup=self.markup)
@@ -181,7 +213,11 @@ class Bubble:
         self._last_edit = 0.0  # 让下一次正文编辑立即生效
 
     async def show_progress(self) -> None:
-        """等在途更新落地后在后台渲染进度，不阻塞随后的工具执行或下一轮请求。"""
+        """等在途更新落地后在后台渲染进度，不阻塞随后的工具执行或下一轮请求。
+        离上次显示更新太近就跳过：工具开始、出结果、换阶段常常挨在一起，群里连发会被限流；
+        还没出正文时 ticker 每个周期都会刷新，跳过的状态最迟下个周期显示出来。"""
+        if not self.has_text and time.monotonic() - self._last_render < self._edit_interval:
+            return
         await self.settle()
         self._start(self._render_progress(self._progress_body()))
 
@@ -190,19 +226,26 @@ class Bubble:
         await self.show_progress()
 
     async def _tick(self) -> None:
-        # 长时间等待时变化底部省略号，证明 bot 还活着
-        i = 0
+        # 还没出正文时定期刷新进度：计时在走，证明 bot 还活着
         while True:
-            await asyncio.sleep(TICK_SECONDS)
-            if self.has_text or self._busy():
-                continue  # 正文已开始流式输出（气泡由 on_text 接管），或上一次更新还在途
-            i += 1
+            await asyncio.sleep(self._tick_seconds)
+            if self.has_text or self._busy() or time.monotonic() - self._last_render < self._edit_interval:
+                continue  # 正文已接管气泡、上一次更新还在途，或刚因工具/阶段变化刷新过
             await self.settle()
-            self._start(self._render_progress(self._progress_body(_TICK_FRAMES[i % len(_TICK_FRAMES)])))
+            self._start(self._render_progress(self._progress_body()))
+
+    async def _keep_typing(self) -> None:
+        while True:
+            try:
+                await self.msg.reply_chat_action(ChatAction.TYPING)
+            except TelegramError:
+                pass
+            await asyncio.sleep(TYPING_SECONDS)
 
     def stop_ticker(self) -> None:
-        if self._ticker is not None:
-            self._ticker.cancel()
+        for task in (self._ticker, self._typing):
+            if task is not None:
+                task.cancel()
 
     async def stop(self) -> None:
         """生成结束：停掉 ticker 并等在途更新落地，此后由调用方独占气泡。"""

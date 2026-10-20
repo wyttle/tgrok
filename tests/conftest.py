@@ -37,6 +37,9 @@ os.environ.pop("SYSTEM_PROMPT", None)
 from tgrok import chat, config, conversations, llm, media, slang, tg_auth  # noqa: E402
 from tgrok.memory import consolidate, store  # noqa: E402
 
+# 假模型和假工具都是瞬间返回：私聊的显示限速按 0 算，否则工具行在下个刷新周期前就被终稿替换，测不到进度
+config.STREAM_EDIT_INTERVAL_PRIVATE = 0
+
 
 def _clear_state() -> None:
     store.db().executescript("DELETE FROM messages; DELETE FROM notes; DELETE FROM progress;")

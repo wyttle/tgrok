@@ -41,6 +41,7 @@ class FakeMsg:
     def __init__(self, uid=7):
         self.sent: list[FakeSent] = []
         self.log: list[str] = []
+        self.actions: list[str] = []
         self.chat_id = -100
         self.from_user = ns(id=uid)
 
@@ -51,6 +52,9 @@ class FakeMsg:
         self.sent.append(fs)
         self.log.append(text)
         return fs
+
+    async def reply_chat_action(self, action):
+        self.actions.append(action)
 
 
 def chunk_text(text):

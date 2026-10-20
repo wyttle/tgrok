@@ -6,7 +6,7 @@ import pytest
 from fakes import HIST, FakeMsg, FakeSent, chunk_text, chunk_tool, ns, openai_adapter, run, stream_of, use_model
 from telegram.error import BadRequest, TimedOut
 
-from tgrok import chat, config, llm, web
+from tgrok import bubble, chat, config, llm, web
 from tgrok.i18n import STRINGS, t
 from tgrok.llm.base import BaseAdapter, RoundResult
 
@@ -122,6 +122,50 @@ def test_progress_shows_tool_line_then_next_thinking_stage(monkeypatch):
     assert any("搜索: 世界杯" in x and "2 条结果" in x and stages[1] in x for x in msg.log)
 
 
+def test_slow_tool_shows_a_running_timer_and_typing_status(monkeypatch):
+    """等待期间计时在走（工具行带自己的计时），聊天里一直显示「正在输入」。"""
+    config.SEARCH_ENABLED = True
+    monkeypatch.setattr(bubble, "TICK_PRIVATE", 0.05)
+    monkeypatch.setattr(bubble, "SHOW_ELAPSED_AFTER", 0)
+    rounds = []
+
+    async def create(history, has_tools):
+        rounds.append(1)
+        if len(rounds) == 1:
+            return stream_of([chunk_tool(0, "web_search", {"query": "台风"})])
+        return stream_of([chunk_text("答案")])
+
+    async def slow_search(query):
+        await asyncio.sleep(0.4)
+        return "[1] a\nu\ns"
+
+    monkeypatch.setattr(web, "run_web_search", slow_search)
+    use_model(create)
+    msg = FakeMsg()
+    assert run(chat.stream_reply(msg, HIST))[1] == "答案"
+    assert any("搜索: 台风… 0 秒" in x for x in msg.log)
+    assert "typing" in msg.actions
+    assert bubble.elapsed_text(65) == "1 分 05 秒" and bubble.elapsed_text(7) == "7 秒"
+
+
+def test_group_progress_updates_are_paced_to_avoid_rate_limits():
+    """群里工具开始、出结果、换阶段挨在一起时不连发编辑，等下个刷新周期再显示。"""
+    rounds = []
+
+    async def create(history, has_tools):
+        rounds.append(1)
+        if len(rounds) == 1:
+            return stream_of([chunk_tool(0, "calculate", {"expression": "1+1"})])
+        return stream_of([chunk_text("等于 2")])
+
+    use_model(create)
+    msg = FakeMsg()
+    msg.chat = ns(type="supergroup")
+    assert run(chat.stream_reply(msg, HIST))[1] == "等于 2"
+    assert msg.log[0] == STRINGS["zh"]["thinking_stages"][0] + "…"
+    assert not any("计算" in x for x in msg.log)
+
+
 def test_long_output_is_split_without_losing_text():
     big = "\n".join("段%d %s" % (i, "内容" * 40) for i in range(100))
 
@@ -182,10 +226,38 @@ def test_network_error_on_intermediate_edit_does_not_truncate():
         # 每块之前停一下：让占位消息先落地，首个 delta 才会触发中间编辑
         return stream_of([chunk_text("前半段，"), chunk_text("后半段。")], delay=0.05)
 
+    config.STREAM_EDIT_INTERVAL_PRIVATE = 1.0  # 只有一次中间编辑，失败的正好是它
     use_model(create)
     msg = FlakyMsg()
     assert run(chat.stream_reply(msg, HIST))[1] == "前半段，后半段。"
     assert "flaky" in msg.log and msg.sent[0].text == "前半段，后半段。"
+
+
+def test_final_edit_timing_out_once_is_retried():
+    """定稿编辑超时不能让气泡停在带光标和取消按钮的中间版本上。"""
+    class OnceSent(FakeSent):
+        failed = False
+
+        async def edit_text(self, text, parse_mode=None, reply_markup=None):
+            if reply_markup is None and not OnceSent.failed:  # 定稿不带按钮
+                OnceSent.failed = True
+                raise TimedOut()
+            await super().edit_text(text, parse_mode, reply_markup)
+
+    class OnceMsg(FakeMsg):
+        async def reply_text(self, text, parse_mode=None, reply_markup=None):
+            fs = OnceSent(self.log)
+            fs.text, fs.message_id = text, 1
+            self.sent.append(fs)
+            return fs
+
+    async def create(history, has_tools):
+        return stream_of([chunk_text("完整回答")], delay=0.05)
+
+    use_model(create)
+    msg = OnceMsg()
+    assert run(chat.stream_reply(msg, HIST))[1] == "完整回答"
+    assert OnceSent.failed and msg.sent[0].text == "完整回答"
 
 
 class _ServerSearchModel(BaseAdapter):

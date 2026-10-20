@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 
 from .. import llm
@@ -94,6 +95,7 @@ def prompt_notes() -> list[str]:
 class ProgressLine:
     text: str
     result: str | None = None
+    started: float = field(default_factory=time.monotonic)  # 进度里给还在执行的工具计时
 
 
 @dataclass

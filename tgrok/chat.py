@@ -25,7 +25,7 @@ active_generations: dict[int, tuple[asyncio.Task, int]] = {}
 
 
 def _stage_line(round_idx: int) -> str:
-    """第 N 轮生成对应的阶段文案（思考中 → 深入思考中 → …），超出取最后一档。"""
+    """第 N 轮生成对应的阶段文案（首轮「思考中」，拿到工具结果后「根据结果继续思考」），超出取最后一档。"""
     stages = phrases("thinking_stages")
     return stages[min(round_idx, len(stages) - 1)]
 

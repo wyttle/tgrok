@@ -54,7 +54,7 @@ def _clip(text: str, limit: int = 60) -> str:
 
 
 def _observe(msg: Message) -> None:
-    """旁听群里没叫到 bot 的消息：只进记忆缓冲区，定期统一整理，不触发模型请求。"""
+    """旁听群里没叫到 bot 的消息：只存进原始记录，由后台定期整理，不触发模型请求。"""
     if not memory.is_observed(msg.chat_id):
         return
     text = msg.text or msg.caption
@@ -63,7 +63,7 @@ def _observe(msg: Message) -> None:
     elif not text and media.image_entry(msg):
         text = t("observed_image")
     if text:
-        memory.observe(msg.chat_id, prompt.person_label(msg.from_user), text)
+        memory.observe(msg.chat_id, msg.from_user.id, prompt.person_label(msg.from_user), text)
 
 
 async def _follow_up(msg: Message, bot, question: str, note: str | None) -> list[dict] | None:
@@ -75,13 +75,14 @@ async def _follow_up(msg: Message, bot, question: str, note: str | None) -> list
     text = prompt.asked_by(msg, question or note or t("look_image"))
     history = conversations.get(msg.chat_id, replied.message_id)
     if history is not None:
-        return history + [prompt.user_turn(text, images, msg.chat_id, question, with_memory=False)]
+        return history + [prompt.user_turn(text, images, msg.chat_id, question)]
     # 历史已过期（如 bot 重启）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
     # 不单独伪造 assistant 轮——以 assistant 开头的对话会被严格交替的接口拒绝
     quoted = replied.text or replied.caption or ""
     if quoted:
         text = t("prev_reply", content=quoted) + "\n\n" + text
-    return prompt.new_conversation(prompt.user_turn(text, images, msg.chat_id, question, with_memory=True))
+    return prompt.new_conversation(
+        prompt.user_turn(text, images, msg.chat_id, question, memory_for=[msg.from_user.id]))
 
 
 async def _new_question(msg: Message, bot, question: str, note: str | None) -> list[dict] | None:
@@ -99,8 +100,11 @@ async def _new_question(msg: Message, bot, question: str, note: str | None) -> l
     else:
         text = prompt.asked_by(msg, text)
     quoted_text = (replied.text or replied.caption or "") if replied else ""
+    # 档案附上提问者，以及被引用消息的作者（不是 bot 自己时）
+    people = [msg.from_user.id] + ([replied.from_user.id] if quoted and replied.from_user
+                                   and not replied.from_user.is_bot else [])
     return prompt.new_conversation(
-        prompt.user_turn(text, images, msg.chat_id, f"{question}\n{quoted_text}", with_memory=True))
+        prompt.user_turn(text, images, msg.chat_id, f"{question}\n{quoted_text}", memory_for=people))
 
 
 def _memory_topic(msg: Message, question: str, note: str | None, is_reply_to_bot: bool) -> str:
@@ -151,5 +155,5 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     full = history + [{"role": "assistant", "content": answer}]
     for message_id in answer_ids:
         conversations.remember(msg.chat_id, message_id, full)
-    memory.record(msg.chat_id, prompt.person_label(msg.from_user),
-                  _memory_topic(msg, question, note, is_reply_to_bot), answer)
+    memory.record_exchange(msg.chat_id, msg.from_user.id, prompt.person_label(msg.from_user),
+                           _memory_topic(msg, question, note, is_reply_to_bot), answer)

@@ -26,12 +26,18 @@ tgrok/
 |   |-- __init__.py    Tool 基类、REGISTRY、schemas()/prompt_notes()、plan_round() 进度与并发执行
 |   |-- calculate.py   calculate
 |   |-- remember_slang.py  remember_slang
+|   |-- remember.py    memory：增改删本聊天的群笔记和个人档案
+|   |-- recall.py      recall：按关键词、说话人、时间查本聊天的原始记录
 |   |-- web.py         web_search（grounding 模式下同轮合并）、open_url
 |   |-- research.py    research：同一任务并发交给 RESEARCH_MODELS 里的每个 omp 研究员，报告一起交回
 |   `-- research_hook.ts  研究员进程加载的 omp hook：read 只准读公网 http(s) 网页
 |-- calc.py            calculate 的求值器：白名单 AST 的算术、比较与日期推算
 |-- web.py             多搜索源聚合、Gemini grounding、网页抓取和 Jina 兜底；失败抛 WebError
-|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、静默旁听缓冲、后台摘要整理
+|-- memory/          按聊天保存的长期记忆
+|   |-- __init__.py    记问答和旁听、注入块、/forget /forgetme、后台维护、旧 memory.json 迁移
+|   |-- store.py       SQLite：原始记录（FTS5 trigram 全文索引）、精选条目、整理进度
+|   |-- notes.py       条目的增改删校验、字数上限、到期和渲染
+|   `-- consolidate.py 后台整理：读新记录，让模型提出增改删逐条执行
 |-- slang.py           梗词典：按词保存多种带语境的用法、按消息命中注入参考
 `-- llm/
     |-- __init__.py    按配置装配主模型和备用模型的 adapter
@@ -96,14 +102,14 @@ Telegram update
            零输出就出错：配了备用模型就整条换成备用模型（去掉厂商扩展字段；两边工具能力不同时
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
-           -> calculate、remember_slang、web_search（grounding 模式同轮合并）、open_url
+           -> calculate、remember_slang、memory、recall、web_search（grounding 模式同轮合并）、open_url
            -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
               超时或回复被取消时整组结束；报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
         -> Gemini 原生返回的引用附到正文末尾
      -> Bubble.finish 定稿（MarkdownV2，失败回退纯文本）；终轮空手时回用最后一版草稿
   -> conversations.remember 按回复的每一段消息 id 保存追问用的历史
-  -> memory.record 记下这一轮问答；攒到 6 条时后台让模型把较早的并进摘要
+  -> memory.record_exchange 把这一轮问答原样存进原始记录；后台整理再从里面挑出值得记的条目
 ```
 
 ## 关键设计决策
@@ -130,9 +136,11 @@ Telegram update
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
 - `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
 - `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。
-- `memory._store`：每个聊天的记忆摘要、最近问答和旁听缓冲，写入 `MEMORY_FILE`。注入块不超过 `MEMORY_MAX_CHARS`，摘要最多占一半；最近问答只注入「谁问了什么」，不带旧回答。压缩期间被 `/forget` 清空时不写回结果。
-- 记忆淡化：`memory.RECENT_TTL`（3 天）以外的提问不再注入。压缩时模型拿到今天和每条问答的完整日期，摘要每行末尾标最近一次提到的日期，长期有效的行首标 `[长期]`；注入时把日期换成「距今多久」，一时话题超过 `MEMORY_FRESH_DAYS` 天不注入。
-- 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只进缓冲区；`app.post_init` 启动的 `memory._observe_loop` 每分钟检查，满 `MEMORY_OBSERVE_INTERVAL` 分钟且攒够 5 条才整理。问答压缩和旁听整理共用 `_compressing` 互斥；整理失败保留缓冲区等下个周期。
+- `memory.store`：`MEMORY_DB` 里的三张表。`messages`（+ `messages_fts`）是原始记录，三个字以上的检索词走 trigram 全文索引，更短的退回 LIKE；`notes` 是精选条目，`user_id` 为空是群笔记，否则是这个人在这个聊天的档案，可带到期时间；`progress` 记每个聊天整理到哪条记录。所有读写都很小，直接在事件循环线程里同步执行。
+- 注入：`memory.memory_block` 只拼进一段对话的首条 user 消息：群笔记、提问者和被引用者的档案（`MEMORY_GROUP_CHARS` / `MEMORY_PROFILE_CHARS` 限制总量），加上 3 天内最近 5 条提问；每条都标距今多久，过期条目不显示。
+- 写入：`memory` 工具和后台整理都走 `notes.apply`，超出字数上限时整批拒绝并把现有条目交还模型去合并或删除，不会悄悄淘汰。整理只执行模型提出的操作，没提到的条目原样保留。
+- 后台维护：`app.post_init` 调用 `memory.start_maintenance`，先迁移旧的 `MEMORY_FILE`，再每分钟跑一次 `consolidate.tick`：每个聊天最多每 `MEMORY_CONSOLIDATE_INTERVAL` 分钟整理一次，攒够 `MEMORY_CONSOLIDATE_MIN` 条新记录（或最早一条放了一天）才整理；同时清掉过期条目和超过 `MEMORY_ARCHIVE_DAYS` 天的记录。`consolidate._running` 防止同一聊天并发整理。
+- 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只存进原始记录，不逐条请求模型，由后台整理处理。
 - `slang._entries`：梗词典，按「作用域|词」存，每个词最多 3 种用法，新的在前；本群用法排在通用用法前。只把这条消息和被引用内容里出现了的词附上（最多 5 个，单字词只在 12 字以内的短句里算命中）。写入 `SLANG_FILE`，超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
 - 只回一段：`REPLY_SINGLE_PARAGRAPH` 开启时系统提示词追加要求，`render.shape` 在每次显示前把正文压成一段（代码块保留），存进对话历史的也是这一段。
 

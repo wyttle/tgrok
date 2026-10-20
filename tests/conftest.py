@@ -27,17 +27,19 @@ os.environ.update({
     "WHITELIST_FILE": str(_TMP / "allowed_users.json"),
     "MEMORY_ENABLED": "true",
     "MEMORY_FILE": str(_TMP / "memory.json"),
+    "MEMORY_DB": str(_TMP / "memory.db"),
     "SLANG_ENABLED": "true",
     "SLANG_FILE": str(_TMP / "slang.json"),
 })
 os.environ.pop("SYSTEM_PROMPT", None)
 
-from tgrok import chat, config, conversations, llm, media, memory, slang, tg_auth  # noqa: E402
+from tgrok import chat, config, conversations, llm, media, slang, tg_auth  # noqa: E402
+from tgrok.memory import consolidate, store  # noqa: E402
 
 
 def _clear_state() -> None:
-    memory._store.clear()
-    memory._compressing.clear()
+    store.db().executescript("DELETE FROM messages; DELETE FROM notes; DELETE FROM progress;")
+    consolidate._running.clear()
     slang._entries.clear()
     conversations._cache.clear()
     conversations._sizes.clear()

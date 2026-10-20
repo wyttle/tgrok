@@ -23,8 +23,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
-    """启动静默旁听，并向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊另外可见管理命令。"""
-    memory.start_observer()
+    """启动记忆的后台维护，并向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊另外可见管理命令。"""
+    memory.start_maintenance()
     base = [BotCommand(c.names[0], t(c.menu)) for c in COMMANDS if not c.admin_menu_only]
     admin = base + [BotCommand(c.names[0], t(c.menu)) for c in COMMANDS if c.admin_menu_only]
     await app.bot.set_my_commands(base)

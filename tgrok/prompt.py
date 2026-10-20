@@ -74,15 +74,17 @@ def quoted_context(replied: Message) -> str | None:
     return t("quoted_msg", author=author, content=content)
 
 
-def user_turn(text: str, images: list[str], chat_id: int, slang_scan: str, with_memory: bool) -> dict:
+def user_turn(text: str, images: list[str], chat_id: int, slang_scan: str,
+              memory_for: list[int] | None = None) -> dict:
     """一条 user 消息：[记忆附注] [梗词典附注] 正文 [当前时间]，有图时是多模态数组。
 
-    记忆只在一段对话的第一条 user 消息里注入一次：之后的追问沿用同一份历史，前缀字节不变，
-    上游 prompt 缓存仍能命中。梗词典只附上 slang_scan 里真正出现了的词。
+    memory_for 给出要附上档案的人（提问者、被引用者），None 表示不附记忆。记忆只在一段对话的
+    第一条 user 消息里注入一次：之后的追问沿用同一份历史，前缀字节不变，上游 prompt 缓存仍能命中。
+    梗词典只附上 slang_scan 里真正出现了的词。
     """
     notes = [slang.slang_block(slang_scan, chat_id)]
-    if with_memory:
-        notes.insert(0, memory.memory_block(chat_id))
+    if memory_for is not None:
+        notes.insert(0, memory.memory_block(chat_id, memory_for))
     content = "\n\n".join([n for n in notes if n] + [text])
     return {"role": "user", "content": with_time(media.build_content(content, images))}
 

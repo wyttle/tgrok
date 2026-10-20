@@ -62,10 +62,11 @@ def test_progress_lines_report_each_outcome(monkeypatch):
 
 
 def test_tools_offered_follow_config():
-    config.SEARCH_ENABLED, config.SLANG_ENABLED = False, False
+    config.SEARCH_ENABLED, config.SLANG_ENABLED, config.MEMORY_ENABLED = False, False, False
     assert [s["function"]["name"] for s in tools.schemas()] == ["calculate"]
-    config.SEARCH_ENABLED, config.SLANG_ENABLED = True, True
-    assert [s["function"]["name"] for s in tools.schemas()] == ["calculate", "remember_slang", "web_search", "open_url"]
+    config.SEARCH_ENABLED, config.SLANG_ENABLED, config.MEMORY_ENABLED = True, True, True
+    assert [s["function"]["name"] for s in tools.schemas()] == [
+        "calculate", "remember_slang", "memory", "recall", "web_search", "open_url"]
 
 
 def test_calculate_tool_loop_end_to_end_via_responses():

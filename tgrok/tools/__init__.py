@@ -64,10 +64,13 @@ class Tool:
 
 def _registry() -> dict[str, Tool]:
     from .calculate import CalculateTool
+    from .recall import RecallTool
+    from .remember import RememberTool
     from .remember_slang import RememberSlangTool
     from .research import ResearchTool
     from .web import OpenUrlTool, WebSearchTool
-    tools = [CalculateTool(), RememberSlangTool(), WebSearchTool(), OpenUrlTool(), ResearchTool()]
+    tools = [CalculateTool(), RememberSlangTool(), RememberTool(), RecallTool(), WebSearchTool(), OpenUrlTool(),
+             ResearchTool()]
     return {tool.name: tool for tool in tools}
 
 

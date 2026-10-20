@@ -221,15 +221,20 @@ STREAM_CURSOR = " |"
 
 # ---- 持久化 ----
 WHITELIST_FILE = Path(_str("WHITELIST_FILE") or Path(__file__).with_name("allowed_users.json"))
-# 长期记忆：每个群/私聊一份「摘要 + 最近几轮问答」，新对话开头作为背景注入
+# 长期记忆（按聊天分开）：
+#   原始记录：bot 见到的问答和旁听群的消息存进 SQLite 全文索引，模型用 recall 工具查原话，保留 MEMORY_ARCHIVE_DAYS 天
+#   精选条目：群笔记 + 每个人的档案，一条一条存；模型在聊天中用 memory 工具增改删，后台定期按新记录整理
+#   新对话开头注入群笔记、提问者和被引用者的档案
 MEMORY_ENABLED = _bool("MEMORY_ENABLED", True)
-MEMORY_MAX_CHARS = _int("MEMORY_MAX_CHARS", 800)  # 注入内容总字数上限，摘要最多占一半
-MEMORY_FILE = Path(_str("MEMORY_FILE") or WHITELIST_FILE.with_name("memory.json"))
-MEMORY_FRESH_DAYS = _int("MEMORY_FRESH_DAYS", 14)  # 一时的话题多少天没再提起就不再注入
-# 静默旁听：这些群里不回复的消息也会攒起来，定期交给模型整理进记忆（需关闭 BotFather 隐私模式）
+MEMORY_DB = Path(_str("MEMORY_DB") or WHITELIST_FILE.with_name("memory.db"))
+MEMORY_FILE = Path(_str("MEMORY_FILE") or WHITELIST_FILE.with_name("memory.json"))  # 旧版记忆，首次启动时迁移
+MEMORY_GROUP_CHARS = _int("MEMORY_GROUP_CHARS", 1500)  # 每个聊天的群笔记总字数上限
+MEMORY_PROFILE_CHARS = _int("MEMORY_PROFILE_CHARS", 500)  # 每个人在每个聊天的档案总字数上限
+MEMORY_ARCHIVE_DAYS = _int("MEMORY_ARCHIVE_DAYS", 90)  # 原始记录保留天数
+MEMORY_CONSOLIDATE_INTERVAL = _int("MEMORY_CONSOLIDATE_INTERVAL", 60)  # 每个聊天最多多少分钟整理一次
+MEMORY_CONSOLIDATE_MIN = _int("MEMORY_CONSOLIDATE_MIN", 10)  # 攒够这么多条新记录才整理（隔天的零星记录也会整理）
+# 静默旁听：这些群里没叫到 bot 的消息也存进原始记录、参与整理（需关闭 BotFather 隐私模式）
 MEMORY_OBSERVE_CHATS = _id_set("MEMORY_OBSERVE_CHATS")
-MEMORY_OBSERVE_INTERVAL = _int("MEMORY_OBSERVE_INTERVAL", 60)  # 每个群最多多少分钟整理一次
-MEMORY_OBSERVE_MAX_CHARS = _int("MEMORY_OBSERVE_MAX_CHARS", 12000)  # 待整理消息字数上限，超出丢最旧的
 # 梗和黑话词典：模型弄明白一个说法后记下来，以后消息里出现就附上释义
 SLANG_ENABLED = _bool("SLANG_ENABLED", True)
 SLANG_FILE = Path(_str("SLANG_FILE") or WHITELIST_FILE.with_name("slang.json"))

@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from . import config, memory, slang
+from .memory import notes, store
 from .i18n import t
 from .prompt import person_label
 from .tg_auth import allowed_users, is_admin, is_authorized, save_allowed_users
@@ -43,18 +44,31 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _reply(update, t("memory_disabled"))
         return
     chat_id = update.effective_chat.id
-    block = memory.memory_block(chat_id)
-    lines = [t("memory_show", block=block) if block else t("memory_empty")]
-    pending = memory.pending_observed(chat_id)
-    if pending:
-        lines.append(t("memory_pending", n=pending))
-    lines.append(t("memory_chat_id", chat_id=chat_id))
-    await _reply(update, "\n\n".join(lines))
+    block = notes.render_all(chat_id)
+    lines = [t("memory_show", block=block) if block else t("memory_empty"),
+             t("memory_archive", n=store.count_messages(chat_id), days=config.MEMORY_ARCHIVE_DAYS),
+             t("memory_chat_id", chat_id=chat_id)]
+    await _reply(update, "\n\n".join(lines)[:4000])
 
 
 async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cleared = memory.clear(update.effective_chat.id)
-    await _reply(update, t("memory_cleared") if cleared else t("memory_empty"))
+    """/forget 清空本聊天的记忆和聊天记录；/forget 12 15 只删这几条（编号见 /memory）。"""
+    chat_id = update.effective_chat.id
+    ids = [a.lstrip("#") for a in context.args or []]
+    if not ids:
+        await _reply(update, t("memory_cleared") if memory.clear(chat_id) else t("memory_empty"))
+        return
+    try:
+        notes.apply(chat_id, [{"action": "remove", "id": i} for i in ids], "command")
+    except notes.NoteError as e:
+        await _reply(update, str(e))
+        return
+    await _reply(update, t("memory_removed", ids=", ".join(f"#{i}" for i in ids)))
+
+
+async def cmd_forgetme(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    removed = memory.forget_user(update.effective_user.id)
+    await _reply(update, t("forgetme_done", n=removed) if removed else t("forgetme_none"))
 
 
 async def cmd_slang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -160,6 +174,7 @@ class Command:
 COMMANDS = [
     Command(("help", "start"), cmd_start, _authorized, "cmd_help", False),
     Command(("learn",), cmd_learn, _authorized, "cmd_learn", False),
+    Command(("forgetme",), cmd_forgetme, _authorized, "cmd_forgetme", False),
     Command(("adduser",), cmd_adduser, _admin, "cmd_adduser", True),
     Command(("deluser",), cmd_deluser, _admin, "cmd_deluser", True),
     Command(("listusers",), cmd_listusers, _admin, "cmd_listusers", True),

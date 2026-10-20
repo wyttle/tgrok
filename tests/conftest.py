@@ -31,6 +31,7 @@ os.environ.update({
     "MEMORY_DB": str(_TMP / "memory.db"),
     "SLANG_ENABLED": "true",
     "SLANG_FILE": str(_TMP / "slang.json"),
+    "RESEARCH_WARM": "false",  # 常驻 omp 绑定事件循环；要测它的用例自己开、自己收尾
 })
 os.environ.pop("SYSTEM_PROMPT", None)
 

@@ -114,9 +114,9 @@ Telegram update
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
            -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
-           -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
-              超时或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
-              每个研究员的主→备先后跑）；超时（包括 omp 自己的 --max-time 中止）不换备选；失败原因取 omp 事件流里
+           -> research：每个研究员交给一个常驻的 omp --mode rpc 进程（只开 web_search 和 read，加载 hook，空的临时目录），
+              超过 RESEARCH_TIMEOUT 或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
+              每个研究员的主→备先后跑）；超时不换备选；失败原因取 omp 事件流里
               接口报的错误（网关 HTML 错误页只取标题）；omp 的输出边跑边逐行读：每次开始搜索或读网页，
               研究员那一行的进度明细（ProgressLine.detail，经 tools.show_detail）就更新成「在做什么、第几步」；
               报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。系统提示词要求问出处、辨真假、
@@ -155,6 +155,7 @@ Telegram update
 - `llm.adapter`、`llm.fallback_adapter`、`llm.helper_adapter`：主模型、备用模型和 Gemini 帮手模型（`GEMINI_HELPER_MODEL`，留空沿用 `GEMINI_MEDIA_MODEL`；记忆整理用）的适配器，各自记着自己的降级状态。`config.fallback_endpoint()` 里留空的协议、地址和 key 沿用主模型，额外参数不继承。
 - `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
 - `tools.research._slots`：限制同时进行的调研任务数（`RESEARCH_CONCURRENCY`）的信号量，换事件循环时重建。
+- `tools.research._idle`：常驻的 omp（`--mode rpc`），每个研究员模型最多一个空闲的。`app.post_init` 调 `warm_up` 先启动好；任务来了取走（还在启动就等它），用 `new_session` 开新会话接任务，读事件到 `prompt_result`；用完放回，接满 `RECYCLE_AFTER` 次换新进程。超时、出错或回复被取消时整组进程杀掉，再补一个新的预热。`RESEARCH_WARM=false` 时每个任务现启动、用完就关。`app.post_shutdown` 关掉全部。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
 - `tools.send_image.outbox`：contextvar，`chat.stream_reply` 为每次回复放一个空列表，send_image 把图片攒进去；回复成功定稿后才发，被取消或失败时不发。发出去的图在返回的回复文本末尾记一句，追问时模型知道自己发过什么。
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。

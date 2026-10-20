@@ -120,6 +120,7 @@ python bot.py
 | `RESEARCH_TIMEOUT` | 单个研究员最多跑多少秒 | `150` |
 | `RESEARCH_THINKING` | 研究员的思考强度（`omp --thinking`） | `low` |
 | `RESEARCH_CONCURRENCY` | 同时最多几个调研任务 | `2` |
+| `RESEARCH_WARM` | 每个研究员模型常驻一个 omp 进程（每个约 200MB 内存），接到任务立刻开工，省掉每次 10 到 15 秒的冷启动 | `true` |
 | `OMP_BIN` | omp 可执行文件 | `omp` |
 | `ADMIN_USER_IDS` | 超级管理员 ID（逗号分隔），可用命令管理白名单 | （空） |
 | `ALLOWED_USER_IDS` | 白名单初始值，仅首次启动生效 | （空） |

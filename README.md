@@ -123,6 +123,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `RESEARCH_TIMEOUT` | seconds each researcher may run | `150` |
 | `RESEARCH_THINKING` | researcher thinking level (`omp --thinking`) | `low` |
 | `RESEARCH_CONCURRENCY` | research tasks running at the same time | `2` |
+| `RESEARCH_WARM` | keep one omp process per research model running (about 200 MB each) so a task starts at once instead of after a 10–15 s cold start | `true` |
 | `OMP_BIN` | omp executable | `omp` |
 | `ADMIN_USER_IDS` | super admin IDs (comma-separated) | (empty) |
 | `ALLOWED_USER_IDS` | initial whitelist, first start only | (empty) |

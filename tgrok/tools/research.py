@@ -14,6 +14,7 @@ import shutil
 import signal
 import tempfile
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 HOOK = Path(__file__).with_name("research_hook.ts")
 REPORT_CHARS = 6000  # 单份报告回灌给主模型的字数上限
-KILL_GRACE = 20  # omp 自己的 --max-time 之外再等多少秒才强杀
+READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
+RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
 
 SYSTEM_PROMPT = (
     "You are a fact-finding researcher. Research the task with web_search and read (read only public web pages). "
@@ -52,13 +54,13 @@ class Report:
         return sum(self.usage.get(k, 0) for k in ("input", "cacheRead", "cacheWrite"))
 
 
-def _command(model: str, task: str) -> list[str]:
+def _command(model: str) -> list[str]:
+    """常驻的 omp：--mode rpc 从 stdin 一行一个命令接任务，stdout 一行一个事件。"""
     return [
         *shlex.split(config.OMP_BIN, posix=os.name != "nt"),
-        "-p", "--mode", "json", "--no-session", "--no-title", "--no-skills", "--no-rules", "--no-extensions",
+        "--mode", "rpc", "--no-ui", "--no-session", "--no-title", "--no-skills", "--no-rules", "--no-extensions",
         "--no-lsp", "--tools", "web_search,read", "--hook", str(HOOK), "--model", model,
-        "--thinking", config.RESEARCH_THINKING, "--max-time", str(config.RESEARCH_TIMEOUT),
-        "--system-prompt", SYSTEM_PROMPT, "--", task,
+        "--thinking", config.RESEARCH_THINKING, "--system-prompt", SYSTEM_PROMPT,
     ]
 
 
@@ -75,9 +77,8 @@ def _error_text(raw: str) -> str:
 
 
 def parse_events(stdout: str) -> tuple[str, dict, str]:
-    """omp --mode json 的事件流 → (最后一条回答的正文, 累计 token 用量, 失败原因)。
-    失败原因取最后一条回答的结束原因：aborted 是 omp 自己的 --max-time 到点，记成 timed out；
-    error 取接口报的错误；正常结束为空串。"""
+    """omp 的事件流 → (最后一条回答的正文, 累计 token 用量, 失败原因)。
+    失败原因取最后一条回答的结束原因：aborted 记成 timed out；error 取接口报的错误；正常结束为空串。"""
     text, usage, failure = "", {}, ""
     for line in stdout.splitlines():
         try:
@@ -141,30 +142,80 @@ def _doing(event: dict) -> str | None:
     return str(event.get("toolName") or "?")
 
 
-async def run_researcher(model: str, task: str, on_step: Step | None = None) -> Report:
-    """跑一个研究员。永不抛异常（取消除外）：失败时 Report.error 说明原因。
-    omp 边跑边一行一个事件地输出；每开始一次搜索或读网页，on_step 收到（在做什么, 第几步）。"""
-    workdir = tempfile.mkdtemp(prefix="tgrok-research-")
-    t0 = time.monotonic()
-    report = Report(model)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *_command(model, task), cwd=workdir, stdin=asyncio.subprocess.DEVNULL,
+class _Omp:
+    """一个常驻的 omp 进程。冷启动要十几秒（加载模型目录、建会话），所以先启动好放着：
+    接到任务立刻开工，下一个任务开一个新会话接着用；超时、出错或被取消时整个进程丢掉。"""
+
+    def __init__(self, model: str):
+        self.model = model
+        self.proc: asyncio.subprocess.Process | None = None
+        self.workdir = tempfile.mkdtemp(prefix="tgrok-research-")
+        self.stderr: deque[str] = deque(maxlen=20)
+        self.uses = 0
+        self._stderr_task: asyncio.Task | None = None
+        self.ready = asyncio.create_task(self._start())
+
+    async def _start(self) -> None:
+        self.proc = await asyncio.create_subprocess_exec(
+            *_command(self.model), cwd=self.workdir, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=os.name == "posix",
             limit=_STREAM_LIMIT)
-    except OSError as e:
-        report.error = f"cannot start omp ({type(e).__name__})"
-        shutil.rmtree(workdir, ignore_errors=True)
-        return report
-    out_lines: list[str] = []
-    steps = 0
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+        async with asyncio.timeout(READY_TIMEOUT):
+            while not _is_frame(await self._line(), "ready"):
+                pass
 
-    async def read_events() -> None:
-        nonlocal steps
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", "replace")
-            out_lines.append(line)
-            if on_step is None or not any(k in line[:80] for k in _PROGRESS_TYPES):
+    async def _drain_stderr(self) -> None:
+        async for raw in self.proc.stderr:
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                self.stderr.append(line)
+
+    async def _line(self) -> str:
+        raw = await self.proc.stdout.readline()
+        if not raw:
+            await self.proc.wait()
+            if self._stderr_task is not None:
+                await self._stderr_task
+            raise RuntimeError((self.stderr[-1][:200] if self.stderr else "")
+                               or f"omp exited (code {self.proc.returncode})")
+        return raw.decode("utf-8", "replace")
+
+    async def _send(self, command: dict) -> None:
+        self.proc.stdin.write((json.dumps(command, ensure_ascii=False) + "\n").encode())
+        await self.proc.stdin.drain()
+
+    @property
+    def alive(self) -> bool:
+        return self.ready.done() and not self.ready.cancelled() and self.ready.exception() is None \
+            and self.proc.returncode is None
+
+    async def run(self, task: str, on_step: Step | None) -> tuple[str, dict, str, int]:
+        """交一个任务，读事件直到它结束。返回（正文, 用量, 失败原因, 步数）。"""
+        self.uses += 1
+        if self.uses > 1:
+            await self._send({"id": "fresh", "type": "new_session"})  # 上一个任务的上下文不带过来
+        rid = f"task-{self.uses}"
+        await self._send({"id": rid, "type": "prompt", "message": task})
+        lines: list[str] = []
+        steps, error = 0, ""
+        while True:
+            line = await self._line()
+            head = line[:120]
+            if _is_frame(line, "response"):
+                frame = json.loads(line)
+                if frame.get("success") is False:
+                    raise RuntimeError(str(frame.get("error") or "omp rejected the task")[:200])
+                continue
+            if _is_frame(line, "prompt_result"):
+                frame = json.loads(line)
+                if frame.get("id") != rid:
+                    continue
+                if frame.get("status") == "error":
+                    error = _error_text(str((frame.get("error") or {}).get("message") or "provider error"))
+                break
+            lines.append(line)
+            if on_step is None or not any(k in head for k in _PROGRESS_TYPES):
                 continue
             try:
                 event = json.loads(line)
@@ -174,29 +225,134 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
             if doing is not None:
                 steps += event.get("type") == "tool_execution_start"
                 on_step(doing, steps)
+        text, spent, failure = parse_events("".join(lines))
+        return text, spent, failure or error, steps
 
+    async def close(self) -> None:
+        """结束进程（连同它起的子进程），等它真正退出再删工作目录。"""
+        self.ready.cancel()
+        await asyncio.wait([self.ready])  # 等启动真正停下（不抛它的异常），免得进程刚起来没人管
+        if not self.ready.cancelled():
+            self.ready.exception()  # 标记已取走，免得事件循环报「异常没人取」
+        if self.proc is not None:
+            _kill(self.proc)
+            await self.proc.wait()
+            # 管道都读到头，子进程的传输层才会自己关掉（否则事件循环关闭后会报「管道没关」）
+            self.proc.stdin.close()
+            await self.proc.stdout.read()
+            if self._stderr_task is not None:
+                await asyncio.wait([self._stderr_task])
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+def _is_frame(line: str, kind: str) -> bool:
+    if f'"{kind}"' not in line[:120]:
+        return False
     try:
-        _, err, _ = await asyncio.wait_for(asyncio.gather(read_events(), proc.stderr.read(), proc.wait()),
-                                           config.RESEARCH_TIMEOUT + KILL_GRACE)
-    except asyncio.TimeoutError:
-        _kill(proc)
-        await proc.wait()
-        report.error = "timed out"
-        err = b""
+        return json.loads(line).get("type") == kind
+    except (ValueError, AttributeError):
+        return False
+
+
+# 空闲的常驻 omp：每个研究员模型最多一个（可能还在启动）。绑定事件循环，换了循环（如测试）就把旧的进程杀掉丢掉
+_idle: dict[str, _Omp] = {}
+_idle_loop: asyncio.AbstractEventLoop | None = None
+_background: set[asyncio.Task] = set()
+
+
+def _pool() -> dict[str, _Omp]:
+    global _idle_loop
+    loop = asyncio.get_running_loop()
+    if _idle_loop is not loop:
+        for omp in _idle.values():
+            if omp.proc is not None:
+                _kill(omp.proc)
+            shutil.rmtree(omp.workdir, ignore_errors=True)
+        _idle.clear()
+        _idle_loop = loop
+    return _idle
+
+
+def warm_up() -> None:
+    """给每个研究员模型启动一个常驻 omp（RESEARCH_WARM 关闭时不做），启动时和每次用掉一个之后调用。"""
+    if not config.RESEARCH_WARM:
+        return
+    pool = _pool()
+    for model in config.RESEARCH_MODELS:
+        if model not in pool:
+            pool[model] = _Omp(model)
+            task = asyncio.create_task(_watch_start(pool[model]))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
+
+
+async def _watch_start(omp: _Omp) -> None:
+    """预热失败（比如 key 配错）时丢掉这个进程，等真有任务时再冷启动、把错误报给主模型。"""
+    try:
+        await omp.ready
+    except Exception as e:
+        logger.warning("预热 omp %s 失败：%s", omp.model, e)
+        if _pool().get(omp.model) is omp:
+            del _idle[omp.model]
+        await omp.close()
+
+
+async def close_pool() -> None:
+    """结束所有空闲的常驻 omp（应用退出、测试收尾时用）。"""
+    pool = _pool()
+    idle = list(pool.values())
+    pool.clear()
+    for omp in idle:
+        await omp.close()
+
+
+async def _acquire(model: str) -> _Omp:
+    """取一个这个模型的 omp：有预热好（或正在预热）的就用它，没有就当场冷启动。"""
+    omp = _pool().pop(model, None)
+    if omp is None or (omp.ready.done() and not omp.alive):
+        if omp is not None:
+            await omp.close()
+        omp = _Omp(model)
+    try:
+        await omp.ready
     except BaseException:
-        # 回复被取消：不留下还在花钱的进程；等它真正退出再删工作目录、关管道
-        _kill(proc)
-        await asyncio.shield(proc.wait())
+        await asyncio.shield(omp.close())
         raise
+    return omp
+
+
+async def _release(omp: _Omp, reusable: bool) -> None:
+    pool = _pool()
+    if reusable and config.RESEARCH_WARM and omp.alive and omp.uses < RECYCLE_AFTER \
+            and omp.model in config.RESEARCH_MODELS and omp.model not in pool:
+        pool[omp.model] = omp
+        return
+    await omp.close()
+    warm_up()  # 补一个新的，下一个任务不用等冷启动
+
+
+async def run_researcher(model: str, task: str, on_step: Step | None = None) -> Report:
+    """跑一个研究员。永不抛异常（取消除外）：失败时 Report.error 说明原因。
+    omp 边跑边一行一个事件地输出；每开始一次搜索或读网页，on_step 收到（在做什么, 第几步）。"""
+    t0 = time.monotonic()
+    report = Report(model)
+    steps, failure, omp, reusable = 0, "", None, False
+    try:
+        omp = await _acquire(model)
+        async with asyncio.timeout(config.RESEARCH_TIMEOUT):
+            report.text, report.usage, failure, steps = await omp.run(task, on_step)
+        reusable = True
+    except TimeoutError:
+        report.error = "timed out"
+    except (OSError, RuntimeError) as e:
+        report.error = (str(e) or type(e).__name__)[:200]
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        # 回复被取消、超时或出错：进程整个丢掉，不留下还在花钱的任务
+        if omp is not None:
+            await asyncio.shield(_release(omp, reusable))
     report.secs = time.monotonic() - t0
-    report.text, report.usage, failure = parse_events("".join(out_lines))
     if not report.text and not report.error:
-        tail = err.decode("utf-8", "replace").strip().splitlines()
-        report.error = failure or (tail[-1][:200] if tail else "") or f"no answer (exit code {proc.returncode})"
-    if not report.text and report.secs >= config.RESEARCH_TIMEOUT:
-        report.error = "timed out"  # 时间已经用完，不管 omp 报的是什么：再换备选只会让大家再等一轮
+        report.error = failure or "no answer"
     logger.info("研究员 %s %s：%.0fs，%d 步，%d 字，token 输入 %s / 输出 %s", model,
                 "完成" if report.text else f"失败（{report.error}）", report.secs, steps, len(report.text),
                 logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))

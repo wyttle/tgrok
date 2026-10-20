@@ -210,6 +210,8 @@ OMP_BIN = _str("OMP_BIN", "omp")  # omp 可执行文件（可带参数，按 she
 RESEARCH_TIMEOUT = _int("RESEARCH_TIMEOUT", 150)  # 单个研究员最多跑多少秒，超时强制结束
 RESEARCH_THINKING = _str("RESEARCH_THINKING", "low")  # 研究员的思考强度（omp --thinking）
 RESEARCH_CONCURRENCY = _int("RESEARCH_CONCURRENCY", 2)  # 同时最多几个调研任务（每个任务按模型数起进程）
+# 每个研究员模型常驻一个 omp（每个约 200MB 内存），接到任务立刻开工，省掉每次十几秒的冷启动；关掉则每次现启动
+RESEARCH_WARM = _bool("RESEARCH_WARM", True)
 
 
 def _provider_ready(p: str) -> bool:

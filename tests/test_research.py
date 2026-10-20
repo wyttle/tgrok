@@ -1,4 +1,4 @@
-"""深入调研：多个 omp 研究员并发，报告一起交回；失败、超时和取消时不留下进程。"""
+"""深入调研：多个常驻 omp 研究员并发，报告一起交回；失败、超时和取消时不留下进程。"""
 
 import asyncio
 import os
@@ -51,8 +51,46 @@ def test_all_reports_come_back_labelled():
 def test_researcher_reports_each_step_as_it_happens():
     steps = []
     report = run(research.run_researcher("cpa/ok-opus", "哈基米是什么梗", lambda doing, n: steps.append((doing, n))))
-    assert report.text == "cpa/ok-opus 的报告：哈基米是什么梗"  # 20 万字的一行事件也读得下
+    assert report.text == "cpa/ok-opus 的报告：哈基米是什么梗（第 1 个任务）"  # 20 万字的一行事件也读得下
     assert steps == [("思考中", 0), ("搜「哈基米是什么梗」", 1), ("思考中", 1), ("读 example.com/a", 2), ("思考中", 2)]
+
+
+def test_warm_researcher_is_reused_with_a_fresh_session(tmp_path, monkeypatch):
+    starts = tmp_path / "starts"
+    monkeypatch.setenv("STARTS", str(starts))
+    config.RESEARCH_WARM = True
+    config.RESEARCH_MODELS = ["cpa/ok-opus"]
+
+    async def scenario():
+        research.warm_up()
+        first = await research.run_researcher("cpa/ok-opus", "第一题")
+        second = await research.run_researcher("cpa/ok-opus", "第二题")
+        await research.close_pool()
+        return first, second
+
+    first, second = run(scenario())
+    assert first.text.endswith("第一题（第 1 个任务）") and second.text.endswith("第二题（第 2 个任务）")
+    assert starts.read_text().split() == ["cpa/ok-opus"]  # 只冷启动了一次
+
+
+def test_timed_out_warm_researcher_is_replaced(tmp_path, monkeypatch, fake_omp):
+    starts = tmp_path / "starts"
+    monkeypatch.setenv("STARTS", str(starts))
+    config.RESEARCH_WARM = True
+    config.RESEARCH_MODELS = ["slow"]
+    config.RESEARCH_TIMEOUT = 1
+
+    async def scenario():
+        research.warm_up()
+        report = await research.run_researcher("slow", "x")
+        replacement = research._pool()["slow"]
+        await replacement.ready
+        await research.close_pool()
+        return report
+
+    assert run(scenario()).error == "timed out"
+    assert _stays_still(fake_omp)  # 卡住的那个进程被杀掉了
+    assert starts.read_text().split() == ["slow", "slow"]  # 换了一个新的预热好
 
 
 def test_progress_line_shows_each_researcher_and_backup_outcome():
@@ -99,12 +137,13 @@ def test_gateway_error_page_is_reported_by_its_title_and_backup_runs():
     assert "blocked: 403 网站防火墙; fail-backup: boom: no credentials" in outcome.content
 
 
-def test_researcher_stopped_by_its_own_time_limit_is_not_rerun_on_backup():
-    # omp 自己的 --max-time 到点：再跑备选只会让群友再等一整轮
-    config.RESEARCH_MODELS = ["aborted"]
+def test_timed_out_researcher_is_not_rerun_on_backup():
+    # 时间已经用完：再跑备选只会让群友再等一整轮
+    config.RESEARCH_MODELS = ["slow"]
     config.RESEARCH_FALLBACK_MODELS = ["cpa/ok-opus"]
+    config.RESEARCH_TIMEOUT = 1
     outcome = _research()
-    assert not outcome.ok and "aborted: timed out" in outcome.content and "ok-opus" not in outcome.content
+    assert not outcome.ok and "slow: timed out" in outcome.content and "ok-opus" not in outcome.content
 
 
 def test_missing_omp_binary_is_a_failure_not_a_crash():
@@ -113,10 +152,9 @@ def test_missing_omp_binary_is_a_failure_not_a_crash():
     assert not _research().ok
 
 
-def test_timed_out_researcher_is_killed(monkeypatch, fake_omp):
+def test_timed_out_researcher_is_killed(fake_omp):
     config.RESEARCH_MODELS = ["cpa/ok-opus", "slow"]
     config.RESEARCH_TIMEOUT = 1
-    monkeypatch.setattr(research, "KILL_GRACE", 0)
     started = time.monotonic()
     outcome = _research()
     assert time.monotonic() - started < 10

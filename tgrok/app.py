@@ -14,6 +14,7 @@ from .chat import on_cancel_button
 from .commands import COMMANDS
 from .handlers import MESSAGE_FILTER, handle_message
 from .i18n import t
+from .tools import research
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,9 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
-    """启动记忆的后台维护，并向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊另外可见管理命令。"""
+    """启动记忆的后台维护和常驻研究员，并向 Telegram 注册命令菜单：所有人可见基础命令，管理员私聊另外可见管理命令。"""
     memory.start_maintenance()
+    research.warm_up()
     base = [BotCommand(c.names[0], t(c.menu)) for c in COMMANDS if not c.admin_menu_only]
     admin = base + [BotCommand(c.names[0], t(c.menu)) for c in COMMANDS if c.admin_menu_only]
     await app.bot.set_my_commands(base)
@@ -36,9 +38,14 @@ async def post_init(app: Application) -> None:
             logger.warning("为管理员 %s 注册命令菜单失败：%s", admin_id, e)
 
 
+async def post_shutdown(app: Application) -> None:
+    await research.close_pool()
+
+
 def build_application() -> Application:
     # 并发处理 update：生成回复期间取消按钮的回调才不会被堵住
-    app = Application.builder().token(config.BOT_TOKEN).concurrent_updates(True).post_init(post_init).build()
+    app = (Application.builder().token(config.BOT_TOKEN).concurrent_updates(True)
+           .post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_error_handler(on_error)
     for command in COMMANDS:
         app.add_handler(CommandHandler(list(command.names), command))
@@ -74,8 +81,9 @@ def _log_startup() -> None:
         logger.warning("搜索源 %s 配置不完整或名称不识别（tavily 需 TAVILY_API_KEY，searxng 需 SEARXNG_BASE_URL），已跳过",
                        ",".join(skipped))
     if config.RESEARCH_MODELS:
-        logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒）%s",
+        logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒%s）%s",
                     ",".join(config.RESEARCH_MODELS), config.RESEARCH_TIMEOUT,
+                    "，每个模型常驻一个进程" if config.RESEARCH_WARM else "",
                     f"，失败时改用 {','.join(config.RESEARCH_FALLBACK_MODELS)}" if config.RESEARCH_FALLBACK_MODELS else "")
         omp = shlex.split(config.OMP_BIN, posix=os.name != "nt")[:1]
         if not omp or shutil.which(omp[0]) is None:

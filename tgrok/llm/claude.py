@@ -1,13 +1,12 @@
-"""Claude 原生协议适配器。"""
+"""Claude 原生协议（Anthropic Messages API）适配器。"""
 
-import asyncio
 import logging
 import re
 
 import anthropic
 
 from .. import config
-from .base import BaseAdapter, RoundResult, error_text, rejected_param, sampling_kwargs, tool_args
+from .base import BaseAdapter, RequestOptions, RoundResult, error_text, tool_args, watch_idle
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
@@ -15,77 +14,48 @@ _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
 
 class ClaudeAdapter(BaseAdapter):
     name = "claude"
+    bad_request = (anthropic.BadRequestError,)
 
     def __init__(self, client=None, endpoint=None):
-        self.endpoint = endpoint or config.primary_endpoint()
-        self.model = self.endpoint.model
+        super().__init__(endpoint)
         self.client = client if client is not None else anthropic.AsyncAnthropic(
             base_url=self.endpoint.base_url or None,
             api_key=self.endpoint.api_key,
             default_headers={"User-Agent": config.LLM_USER_AGENT} if config.LLM_USER_AGENT else None,
-            # 与 OpenAI 客户端一致：禁用 SDK 内建重试，重试语义由 chat.stream_reply 统一控制
-            max_retries=0,
+            max_retries=0,  # 与 OpenAI 客户端一致：重试语义由 chat 统一控制
         )
-        self.tools_supported = True
-        self.sampling_supported = True
-        self.extra_body_supported = True
-        self.max_tokens_limit: int | None = None
+        self.max_tokens_limit: int | None = None  # 后端报出的输出上限，比 MAX_TOKENS 小时用它
 
-    async def run_round(self, history, tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history, tools)
+    def _max_tokens(self) -> int:
+        return min(config.MAX_TOKENS, self.max_tokens_limit) if self.max_tokens_limit else config.MAX_TOKENS
+
+    async def _open(self, history: list[dict], opts: RequestOptions):
+        system_text, messages = to_anthropic_messages(history)
+        kwargs = {"model": self.model, "messages": messages, "stream": True,
+                  "max_tokens": self._max_tokens(), **opts.sampling}
+        if system_text:
+            kwargs["system"] = system_text
+        if opts.extra_body:
+            kwargs["extra_body"] = opts.extra_body
+        if opts.tools:
+            kwargs["tools"] = anthropic_tools(opts.tools)
+        return await self.client.messages.create(**kwargs)
+
+    def _degrade(self, e, kind, opts) -> bool:
+        # max_tokens 超过模型输出上限：从报错文案里解析更小的上限并记住
+        if kind == "max_tokens_limit":
+            current = self._max_tokens()
+            smaller = [n for n in map(int, re.findall(r"\d+", error_text(e))) if 0 < n < current]
+            if not smaller:
+                return False
+            self.max_tokens_limit = max(smaller)
+            logger.warning("后端拒绝 max_tokens=%d，降为 %d 重试：%s", current, self.max_tokens_limit, e)
+            return True
+        return super()._degrade(e, kind, opts)
+
+    async def _drain(self, stream, on_text) -> RoundResult:
         calls, content = await drain_stream(stream, on_text)
         return RoundResult(calls=calls, content=content)
-
-    async def _create_stream(self, history: list[dict], tools: list[dict] | None):
-        """建立 Anthropic 原生流。降级链与 OpenAI 兼容路径同一套路。"""
-        system_text, messages = to_anthropic_messages(history)
-        include_tools = bool(tools) and self.tools_supported
-        sampling = sampling_kwargs() if self.sampling_supported else {}
-        extra_body = self.endpoint.extra_body if self.extra_body_supported else None
-        max_tokens = min(config.MAX_TOKENS, self.max_tokens_limit) if self.max_tokens_limit else config.MAX_TOKENS
-        while True:
-            kwargs = {"model": self.model, "messages": messages, "stream": True,
-                      "max_tokens": max_tokens, **sampling}
-            if system_text:
-                kwargs["system"] = system_text
-            if extra_body:
-                kwargs["extra_body"] = extra_body
-            if include_tools:
-                kwargs["tools"] = anthropic_tools(tools)
-            try:
-                return await self.client.messages.create(**kwargs)
-            except anthropic.BadRequestError as e:
-                kind = rejected_param(e, extra_keys=extra_body or ())
-                # Opus 4.7+ 已移除采样参数（400），去掉重试并粘性禁用
-                if kind == "sampling" and sampling:
-                    logger.warning("后端拒绝采样参数，已改用默认值（重启进程后会再次尝试）：%s", e)
-                    self.sampling_supported = False
-                    sampling = {}
-                    continue
-                # thinking 等额外参数被拒（如 4.7+ 已移除 budget_tokens）：去掉重试
-                if kind == "extra" and extra_body:
-                    logger.warning("后端拒绝额外参数 %s，本进程内不再携带（重启后会再次尝试）：%s",
-                                   list(extra_body), e)
-                    self.extra_body_supported = False
-                    extra_body = None
-                    continue
-                # max_tokens 超过模型输出上限：从报错文案里解析更小上限并粘性记住
-                if kind == "max_tokens_limit":
-                    nums = [int(n) for n in re.findall(r"\d+", error_text(e))]
-                    smaller = [n for n in nums if 0 < n < max_tokens]
-                    if not smaller:
-                        raise
-                    new = max(smaller)
-                    logger.warning("后端拒绝 max_tokens=%d，降为 %d 重试：%s", max_tokens, new, e)
-                    self.max_tokens_limit = new
-                    max_tokens = new
-                    continue
-                if kind == "tools" and include_tools:
-                    logger.warning("后端拒绝 tools 参数，联网搜索已禁用（重启进程后会再次尝试）：%s", e)
-                    self.tools_supported = False
-                    include_tools = False
-                    continue
-                raise
 
 
 def anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -159,31 +129,12 @@ def to_anthropic_messages(history: list[dict]) -> tuple[str, list[dict]]:
 async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
     """消费 Anthropic 原生流：text_delta 交给 on_text，tool_use 块按 index 聚合，
     thinking 块（含签名）原样收集、挂到首个调用的扩展字段上以便续传时回传。
-    与 OpenAI 流消费相同的空闲看门狗语义。
     """
     calls: dict[int, dict] = {}
     content = ""
     thinking_blocks: list[dict] = []
     cur_think: dict | None = None
-    it = stream.__aiter__()
-    while True:
-        try:
-            if content and not calls and config.STREAM_IDLE_TIMEOUT > 0:
-                event = await asyncio.wait_for(anext(it), config.STREAM_IDLE_TIMEOUT)
-            else:
-                event = await anext(it)
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Claude 流已有正文但 %.0fs 无新数据，视为完成（正文 %d 字）",
-                config.STREAM_IDLE_TIMEOUT, len(content),
-            )
-            try:
-                await stream.close()
-            except Exception:
-                pass
-            break
+    async for event in watch_idle(stream, lambda: bool(content) and not calls, "Claude"):
         etype = getattr(event, "type", "")
         if etype == "content_block_start":
             block = event.content_block

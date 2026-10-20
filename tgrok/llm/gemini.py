@@ -1,14 +1,14 @@
-"""Gemini 原生协议适配器与 grounding 客户端。"""
+"""Gemini 原生协议适配器与 grounding 客户端。
 
-import asyncio
+google_search 和 url_context 由 Google 服务端执行，所以不走 bot 的工具循环（supports_tool_loop=False）。
+"""
+
 import base64
-import logging
 import re
 
 from .. import config
-from .base import BaseAdapter, RoundResult
+from .base import BaseAdapter, RequestOptions, RoundResult, watch_idle
 
-logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
 
 _genai = None
@@ -35,16 +35,10 @@ class GeminiAdapter(BaseAdapter):
     supports_tool_loop = False
 
     def __init__(self, client=None, endpoint=None):
-        self.endpoint = endpoint or config.primary_endpoint()
-        self.model = self.endpoint.model
+        super().__init__(endpoint)
         self.client = client if client is not None else make_client(self.endpoint.api_key, self.endpoint.base_url)
 
-    async def run_round(self, history, tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history)
-        citations, content = await drain_stream(stream, on_text)
-        return RoundResult(content=content, citations=citations)
-
-    async def _create_stream(self, history: list[dict]):
+    async def _open(self, history: list[dict], opts: RequestOptions):
         system_text, contents = to_gemini_contents(history)
         tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
         try:
@@ -55,13 +49,17 @@ class GeminiAdapter(BaseAdapter):
             system_instruction=system_text or None,
             max_output_tokens=config.MAX_TOKENS,
             # None 即未设置，SDK 序列化时会剔除
-            temperature=config.LLM_TEMPERATURE,
-            top_p=config.LLM_TOP_P,
+            temperature=opts.sampling.get("temperature"),
+            top_p=opts.sampling.get("top_p"),
             tools=tools,
         )
         return await self.client.aio.models.generate_content_stream(
             model=self.model, contents=contents, config=gen_config
         )
+
+    async def _drain(self, stream, on_text) -> RoundResult:
+        citations, content = await drain_stream(stream, on_text)
+        return RoundResult(content=content, citations=citations)
 
 
 def to_gemini_contents(history: list[dict]):
@@ -95,26 +93,9 @@ def to_gemini_contents(history: list[dict]):
 
 
 async def drain_stream(stream, on_text) -> tuple[list[dict], str]:
-    """消费 Gemini 原生流：正文交给 on_text，聚合 grounding 引用（去重）。
-
-    与 OpenAI 流消费相同的空闲看门狗语义。返回（引用列表, 正文）。
-    """
+    """消费 Gemini 原生流：正文交给 on_text，聚合 grounding 引用（去重）。返回（引用列表, 正文）。"""
     content, citations, seen = "", [], set()
-    it = stream.__aiter__()
-    while True:
-        try:
-            if content and config.STREAM_IDLE_TIMEOUT > 0:
-                chunk = await asyncio.wait_for(anext(it), config.STREAM_IDLE_TIMEOUT)
-            else:
-                chunk = await anext(it)
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Gemini 流已有正文但 %.0fs 无新数据，视为完成（正文 %d 字）",
-                config.STREAM_IDLE_TIMEOUT, len(content),
-            )
-            break
+    async for chunk in watch_idle(stream, lambda: bool(content), "Gemini"):
         text = getattr(chunk, "text", None)
         if text:
             content += text

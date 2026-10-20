@@ -7,85 +7,59 @@ GPT-6.1 Sol 等新模型在 Chat Completions 上不支持工具调用，工具�
 工具结果回传，不依赖服务端保存会话；后端不认这两个参数时去掉重试，并不再回传推理条目。
 """
 
-import asyncio
 import logging
 
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from .base import BaseAdapter, RoundResult, error_param, error_text, rejected_param, sampling_kwargs
+from .base import BaseAdapter, RequestOptions, RoundResult, error_param, error_text, watch_idle
 
 logger = logging.getLogger(__name__)
 
 
 class ResponsesAdapter(BaseAdapter):
     name = "responses"
+    bad_request = (BadRequestError,)
 
     def __init__(self, client=None, endpoint=None):
-        self.endpoint = endpoint or config.primary_endpoint()
-        self.model = self.endpoint.model
+        super().__init__(endpoint)
         self.client = client if client is not None else AsyncOpenAI(
             base_url=self.endpoint.base_url,
             api_key=self.endpoint.api_key,
             default_headers={"User-Agent": config.LLM_USER_AGENT} if config.LLM_USER_AGENT else None,
-            # 与其它适配器一致：禁用 SDK 内建重试，重试语义由 chat.stream_reply 统一控制
-            max_retries=0,
+            max_retries=0,  # 与其它适配器一致：重试语义由 chat 统一控制
         )
-        self.tools_supported = True
-        self.sampling_supported = True
-        self.extra_body_supported = True
         self.stateless_supported = True
 
-    async def run_round(self, history, tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history, tools)
+    async def _open(self, history: list[dict], opts: RequestOptions):
+        stateless = self.stateless_supported
+        instructions, items = to_responses_input(history, keep_reasoning=stateless)
+        kwargs = {"model": self.model, "input": items, "stream": True,
+                  "max_output_tokens": config.MAX_TOKENS, **opts.sampling}
+        if instructions:
+            kwargs["instructions"] = instructions
+        if stateless:
+            kwargs["store"] = False
+            kwargs["include"] = ["reasoning.encrypted_content"]
+        if opts.extra_body:
+            kwargs["extra_body"] = opts.extra_body
+        if opts.tools:
+            kwargs["tools"] = responses_tools(opts.tools)
+            kwargs["tool_choice"] = "auto"
+        return await self.client.responses.create(**kwargs)
+
+    def _degrade(self, e, kind, opts) -> bool:
+        if super()._degrade(e, kind, opts):
+            return True
+        if self.stateless_supported and _rejects_stateless(e):
+            logger.warning("后端不支持 store/include 参数，改为不回传推理内容（重启后会再次尝试）：%s", e)
+            self.stateless_supported = False
+            return True
+        return False
+
+    async def _drain(self, stream, on_text) -> RoundResult:
         calls, content = await drain_stream(stream, on_text)
         return RoundResult(calls=calls, content=content)
-
-    async def _create_stream(self, history: list[dict], tools: list[dict] | None):
-        include_tools = bool(tools) and self.tools_supported
-        sampling = sampling_kwargs() if self.sampling_supported else {}
-        extra_body = self.endpoint.extra_body if self.extra_body_supported else None
-        while True:
-            stateless = self.stateless_supported
-            instructions, items = to_responses_input(history, keep_reasoning=stateless)
-            kwargs = {"model": self.model, "input": items, "stream": True,
-                      "max_output_tokens": config.MAX_TOKENS, **sampling}
-            if instructions:
-                kwargs["instructions"] = instructions
-            if stateless:
-                kwargs["store"] = False
-                kwargs["include"] = ["reasoning.encrypted_content"]
-            if extra_body:
-                kwargs["extra_body"] = extra_body
-            if include_tools:
-                kwargs["tools"] = responses_tools(tools)
-                kwargs["tool_choice"] = "auto"
-            try:
-                return await self.client.responses.create(**kwargs)
-            except BadRequestError as e:
-                kind = rejected_param(e, extra_keys=extra_body or ())
-                # 推理模型不接受采样参数：去掉重试并粘性禁用
-                if kind == "sampling" and sampling:
-                    logger.warning("后端拒绝采样参数，已改用后端默认值（重启进程后会再次尝试）：%s", e)
-                    self.sampling_supported = False
-                    sampling = {}
-                    continue
-                if kind == "extra" and extra_body:
-                    logger.warning("后端拒绝额外参数 %s，本进程内不再携带（重启后会再次尝试）：%s",
-                                   list(extra_body), e)
-                    self.extra_body_supported = False
-                    extra_body = None
-                    continue
-                if kind == "tools" and include_tools:
-                    logger.warning("后端拒绝 tools 参数，工具调用已禁用（重启进程后会再次尝试）：%s", e)
-                    self.tools_supported = False
-                    include_tools = False
-                    continue
-                if stateless and _rejects_stateless(e):
-                    logger.warning("后端不支持 store/include 参数，改为不回传推理内容（重启后会再次尝试）：%s", e)
-                    self.stateless_supported = False
-                    continue
-                raise
 
 
 def _rejects_stateless(e: BaseException) -> bool:
@@ -172,30 +146,11 @@ def _reasoning_input(item) -> dict | None:
 async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
     """消费 Responses 事件流：正文增量交给 on_text，function_call 按 output_index 聚合，
     推理条目收集后挂到首个调用的扩展字段，续传时由 to_responses_input 取回。
-    与其它协议相同的空闲看门狗语义。
     """
     calls: dict[int, dict] = {}
     content = ""
     reasoning: list[dict] = []
-    it = stream.__aiter__()
-    while True:
-        try:
-            if content and not calls and config.STREAM_IDLE_TIMEOUT > 0:
-                event = await asyncio.wait_for(anext(it), config.STREAM_IDLE_TIMEOUT)
-            else:
-                event = await anext(it)
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Responses 流已有正文但 %.0fs 无新数据，视为完成（正文 %d 字）",
-                config.STREAM_IDLE_TIMEOUT, len(content),
-            )
-            try:
-                await stream.close()
-            except Exception:
-                pass
-            break
+    async for event in watch_idle(stream, lambda: bool(content) and not calls, "Responses"):
         etype = getattr(event, "type", "")
         if etype in ("response.output_text.delta", "response.refusal.delta"):
             text = getattr(event, "delta", "") or ""

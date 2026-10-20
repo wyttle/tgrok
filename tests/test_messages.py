@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from fakes import BOT_USER, CTX, NOW, capture_replies, group, mention, ns, run, update_of, user
-from telegram import Message, PhotoSize, Sticker, Update
+from telegram import Message, MessageEntity, MessageOriginUser, PhotoSize, Sticker, Update
 
 from tgrok import app, config, conversations, handlers, media, prompt, tg_auth
 from tgrok.i18n import t
@@ -95,3 +95,44 @@ def test_follow_up_after_cache_expired_quotes_previous_bot_reply(monkeypatch):
     history = captured[-1]
     assert [m["role"] for m in history] == ["system", "user"]  # 不伪造 assistant 轮
     assert "上次的回答" in history[1]["content"] and "然后呢" in history[1]["content"]
+
+
+def test_recent_group_chat_is_attached_with_who_said_what(monkeypatch):
+    """群友就刚才的聊天直接问 bot：附上最近群聊，每行写明谁说的、回复谁；追问只附上次回答之后的新消息。"""
+    asked = []
+
+    async def fake_reply(msg, history):
+        asked.append(history)
+        return [60], "他俩在争火锅还是烧烤"
+
+    monkeypatch.setattr(handlers, "stream_reply", fake_reply)
+    tg_auth.allowed_users.add(5)
+    chat, li, wang, qiang = group(), user(6, "小李"), user(7, "老王"), user(5, "阿强")
+    first = Message(50, NOW, chat, from_user=li, text="今晚吃火锅")
+    for m in (first, Message(51, NOW, chat, from_user=wang, text="烧烤更好", reply_to_message=first)):
+        run(handlers.handle_message(update_of(m), CTX))
+    run(handlers.handle_message(update_of(mention(52, chat, qiang, "他俩在吵啥")), CTX))
+    content = asked[-1][-1]["content"]
+    assert "小李（id 6）：今晚吃火锅" in content and "老王（id 7） 回复 小李（id 6）：烧烤更好" in content
+    assert content.index("今晚吃火锅") < content.index("烧烤更好") < content.index("他俩在吵啥")
+    assert content.count("他俩在吵啥") == 1  # 提问本身不算进最近群聊
+
+    later = datetime.now()
+    run(handlers.handle_message(update_of(Message(61, later, chat, from_user=li, text="那就烧烤吧")), CTX))
+    bot_reply = Message(60, later, chat, from_user=BOT_USER, text="他俩在争火锅还是烧烤")
+    follow = Message(62, later, chat, from_user=qiang, text="最后定了啥", reply_to_message=bot_reply)
+    run(handlers.handle_message(update_of(follow), CTX))
+    turn = asked[-1][-1]["content"]
+    assert "小李（id 6）：那就烧烤吧" in turn and "今晚吃火锅" not in turn
+
+
+def test_forwarded_message_is_credited_to_its_original_author(monkeypatch):
+    captured = capture_replies(monkeypatch)
+    tg_auth.allowed_users.add(5)
+    chat, li, wang, qiang = group(), user(6, "小李"), user(7, "老王"), user(5, "阿强")
+    fwd = Message(70, NOW, chat, from_user=li, text="我中了五百万", forward_origin=MessageOriginUser(NOW, wang))
+    ask = Message(71, NOW, chat, from_user=qiang, text="@bot 真的假的", reply_to_message=fwd,
+                  entities=[MessageEntity(MessageEntity.MENTION, 0, 4)])
+    run(handlers.handle_message(update_of(ask), CTX))
+    content = captured[-1][-1]["content"]
+    assert "原作者是 老王（id 7），小李（id 6） 只是转发了它" in content and "发送者：小李（id 6）（不是提问者）" in content

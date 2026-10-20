@@ -7,7 +7,7 @@ from collections import OrderedDict
 
 from telegram import Message
 
-from . import config, llm
+from . import config, llm, viewer
 from .i18n import phrases, t
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,8 @@ album_cache: "OrderedDict[tuple[int, str], list[dict]]" = OrderedDict()
 watch_cache: "OrderedDict[tuple[int, int], dict]" = OrderedDict()
 WATCH_CACHE_SIZE = 300
 MAX_MEDIA_BYTES = 20 * 1024 * 1024  # 官方 Bot API 只能下载 20MB 以内的文件
+PREFETCH_MAX_SECONDS = 600  # 更长的媒体不预读，有人问到再看
+INLINE_CHARS = 3000  # 直接附在提问里的转述上限；更长的部分可以用 watch_media 再问
 
 
 def is_image_document(m: Message) -> bool:
@@ -51,7 +53,8 @@ def media_entry(m: Message) -> dict | None:
     else:
         return None
     # to_dict 取时长：直接读 .duration 会触发 PTB 的弃用警告（以后改成 timedelta）
-    return {"kind": kind, "file_id": obj.file_id, "mime": getattr(obj, "mime_type", None) or mime,
+    return {"kind": kind, "file_id": obj.file_id, "uid": obj.file_unique_id,
+            "mime": getattr(obj, "mime_type", None) or mime,
             "seconds": obj.to_dict().get("duration"), "size": obj.file_size, "message_id": m.message_id}
 
 
@@ -70,20 +73,41 @@ def _too_large(entry: dict) -> bool:
     return bool(entry["size"]) and entry["size"] > MAX_MEDIA_BYTES
 
 
+def transcript(m: Message) -> str | None:
+    """这条消息里的媒体已经预读好的转述；没有返回 None。"""
+    entry = media_entry(m)
+    return viewer.ready(entry["uid"]) if entry else None
+
+
 def media_note(m: Message) -> str | None:
-    """媒体消息给模型的说明：视频、语音等交给 Gemini 看时给出 media_id，看不了就明说看不到；
-    贴纸带上它的 emoji（看不到图时也能猜出情绪）。开启视觉的普通图片返回 None（图片本身会发给模型）。"""
+    """媒体消息给模型的说明：预读好了就直接附上转述；否则能交给 Gemini 看时给出 media_id，
+    看不了就明说看不到。贴纸带上它的 emoji（看不到图时也能猜出情绪）。
+    开启视觉的普通图片返回 None（图片本身会发给模型）。"""
     entry = media_entry(m)
     if entry:
         what = describe(entry)
         if _too_large(entry):
             return t("media_too_large", what=what)
+        heard = viewer.ready(entry["uid"])
+        if heard:
+            viewer.mark_used(entry["uid"])
+            more = t("media_heard_more", id=entry["message_id"]) if can_watch() else ""
+            return t("media_heard", what=what, text=heard[:INLINE_CHARS], more=more)
         if can_watch():
             return t("media_watchable", what=what, id=entry["message_id"])
         return t("media_unseen", what=what)
     if m.sticker:
         return t("sticker_note", emoji=f" {m.sticker.emoji}" if m.sticker.emoji else "")
     return None
+
+
+def prefetch(bot, m: Message | None) -> asyncio.Task | None:
+    """配了 GEMINI_MEDIA_MODEL 时，消息里的视频、语音等在后台先完整转述一遍（同一个文件只做一次）。"""
+    entry = media_entry(m) if m is not None and config.GEMINI_MEDIA_MODEL and config.MEDIA_PREFETCH else None
+    if entry is None or _too_large(entry) or (entry["seconds"] or 0) > PREFETCH_MAX_SECONDS:
+        return None
+    ref = {**entry, "bot": bot}
+    return viewer.start(entry["uid"], lambda: download(ref), describe(entry))
 
 
 def offer_to_watch(bot, *messages: Message | None) -> None:

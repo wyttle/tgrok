@@ -39,20 +39,27 @@ def is_observed(chat_id: int) -> bool:
     return config.MEMORY_ENABLED and chat_id in config.MEMORY_OBSERVE_CHATS
 
 
-def record_exchange(chat_id: int, user_id: int, who: str, question: str, answer: str) -> None:
-    """记下一轮问答。bot 的回答记在提问者名下：/forgetme 时一起删。"""
+def record_exchange(chat_id: int, user_id: int, who: str, question: str, answer: str,
+                    quoted: dict | None = None, msg_id: int | None = None) -> None:
+    """记下一轮问答。bot 的回答记在提问者名下：/forgetme 时一起删。
+    quoted 是被引用的那条消息（user_id/who/text/msg_id/ts）：按它真正的作者单独记一条，
+    提问里只写「回复了谁」，不把别人的话混进提问者的提问里。"""
     if not config.MEMORY_ENABLED or not answer.strip():
         return
     now = time.time()
-    store.add_message(chat_id, user_id, who, "ask", _clip(question, ASK_CHARS), now)
+    if quoted and quoted.get("text"):
+        store.add_message(chat_id, quoted.get("user_id"), quoted["who"], "chat", _clip(quoted["text"], ASK_CHARS),
+                          quoted.get("ts") or now, quoted.get("msg_id"))
+    store.add_message(chat_id, user_id, who, "ask", _clip(question, ASK_CHARS), now, msg_id)
     store.add_message(chat_id, user_id, "", "reply", _clip(answer, REPLY_CHARS), now)
 
 
-def observe(chat_id: int, user_id: int, who: str, text: str) -> None:
+def observe(chat_id: int, user_id: int | None, who: str, text: str, msg_id: int | None = None,
+            ts: float | None = None) -> None:
     """旁听群里一条没叫到 bot 的消息：只存进原始记录，不请求模型。"""
     text = _clip(text, ASK_CHARS)
     if text and is_observed(chat_id):
-        store.add_message(chat_id, user_id, who, "chat", text)
+        store.add_message(chat_id, user_id, who, "chat", text, ts, msg_id)
 
 
 def memory_block(chat_id: int, user_ids: list[int]) -> str:

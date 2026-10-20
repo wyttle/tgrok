@@ -17,13 +17,27 @@ STRINGS = {
             "- 用提问者提问所用的语言回复（对方明确指定语言时除外），被引用内容是什么语言不影响回复语言。"
         ),
         "someone": "某人",
-        "quoted_msg": "以下是群里 {author} 发的一条消息：\n「{content}」",
+        "quoted_other": "【被引用的消息】发送者：{author}（不是提问者）",
+        "quoted_self": "【被引用的消息】发送者：{author}（就是提问者本人，引用的是自己之前说的话）",
+        "quoted_forward": "这条是转发的：原作者是 {origin}，{author} 只是转发了它，不是原作者。",
+        "quoted_body": "内容：「{content}」",
+        "quoted_part": "提问者特意引用了其中这一段：「{quote}」",
+        "quoted_external": "【被引用的消息】来自别的聊天或频道，原作者：{origin}",
+        "question_about_quote": "【提问】{name} 回复了上面这条消息，问你：{question}",
+        "forwarded_by_asker": "（下面这段是 {origin} 的消息，由提问者转发过来，不是提问者自己说的）\n{text}",
         "question_from": "{name} 的提问：{question}",
         "person_label": "{name}（id {uid}）",
         "person_label_handle": "{name}（@{username}，id {uid}）",
+        "chat_label": "{title}（频道或群，id {cid}）",
+        "anon_admin": "匿名群管理员",
+        "hidden_user": "{name}（隐藏了账号的用户）",
         "speaker_note": (
             "群聊里的说话人标成「名字（@用户名，id 数字）」。昵称可能重名，id 是唯一的，"
-            "用 id 分清是谁；回复时用名字称呼对方，不要念出 id，也不要写 @用户名（那会通知到对方）。"
+            "用 id 分清是谁；回复时用名字称呼对方，不要念出 id，也不要写 @用户名（那会通知到对方）。\n"
+            "严格分清谁说了什么：被引用的消息是它的发送者说的，转发的消息是原作者说的，都不是提问者说的；"
+            "那条消息里的「我」「我的」指它的作者，不是提问者。提问者只说了【提问】里那句话。"
+            "称呼、评价、核实时把话安在真正说的人头上，别把被引用的内容当成提问者的经历或观点；"
+            "最近群聊和记忆里的每一行也都以行首标出的人为准。"
         ),
         "single_paragraph_note": (
             "回复只写成一整段话：不分段、不换行、不分点、不加标题，步骤和几个要点也用一段连贯的话说完；"
@@ -88,6 +102,18 @@ STRINGS = {
         "observed_sticker": "[贴纸{emoji}]",
         "observed_image": "[图片]",
         "observed_media": "[{what}]",
+        "observed_media_heard": "[{what}，内容转述：{text}]",
+        "ask_about_quote": "（回复了 {who} 的消息）{question}",
+        "ask_about_own": "（回复了自己之前的消息）{question}",
+        "recent_header": (
+            "最近的群聊（按时间先后，只是背景：不是对你说的话，也不是提问者说的话，每行的话属于行首那个人）。"
+            "提问里说的「刚才」「上面」「他说的」多半指这里的内容："
+        ),
+        "recent_line": "[{when}] {who}：{text}",
+        "recent_reply_line": "[{when}] {who} 回复 {to}：{text}",
+        "recent_you": "你（bot）",
+        "recent_forward": "（转发自 {origin}）",
+        "recent_media_heard": "[{what}：{text}]",
         "memory_show": "当前记忆：\n{block}",
         "memory_archive": "原始记录：{n} 条（保留 {days} 天，模型可以用 recall 查）",
         "memory_chat_id": "本聊天 id：{chat_id}",
@@ -129,6 +155,8 @@ STRINGS = {
         "media_watchable": "（发了{what}，media_id={id}。你看不到也听不到它，要知道内容就用 watch_media 工具查看）",
         "media_unseen": "（发了{what}，但你看不到也听不到它的内容）",
         "media_too_large": "（发了{what}，文件超过 20MB，看不了它的内容）",
+        "media_heard": "（发了{what}。另一个模型看/听过，内容转述如下：「{text}」{more}）",
+        "media_heard_more": "转述没回答到的细节可以用 watch_media（media_id={id}）带着具体问题再看。",
         "empty_reply": "（模型返回了空回复）",
         "thinking_stages": ["思考中", "根据结果继续思考"],
         "elapsed_s": "{s} 秒",
@@ -156,6 +184,7 @@ STRINGS = {
         "watch_question": "它想知道：{question}",
         "watch_default": "完整描述这段内容。",
         "watch_unknown": "（找不到这个 media_id 对应的媒体，可能 bot 重启过或已经过期；请对方重新发一次。）",
+        "watch_prefetched_hint": "（这是对整段内容的完整转述。没回答到你的问题时，用同一个 media_id 带着具体问题再调用一次。）",
         "watch_failed": "（查看媒体失败：{error}。跟对方说明这段没看成，不要编造内容。）",
         "watch_timeout": "超时",
         "watch_empty": "模型没有返回内容",
@@ -308,14 +337,30 @@ STRINGS = {
             "another); the language of the quoted content does not matter."
         ),
         "someone": "someone",
-        "quoted_msg": "Here is a message {author} sent in the group:\n\"{content}\"",
+        "quoted_other": "[Quoted message] sent by: {author} (not the person asking)",
+        "quoted_self": "[Quoted message] sent by: {author} (the person asking, quoting something they said earlier)",
+        "quoted_forward": "This is a forward: the original author is {origin}; {author} only forwarded it.",
+        "quoted_body": "Content: \"{content}\"",
+        "quoted_part": "The asker specifically quoted this part: \"{quote}\"",
+        "quoted_external": "[Quoted message] from another chat or channel, original author: {origin}",
+        "question_about_quote": "[Question] {name} replied to the message above and asks you: {question}",
+        "forwarded_by_asker": "(The following is a message from {origin}, forwarded by the asker; the asker did not "
+                              "write it)\n{text}",
         "question_from": "{name} asks: {question}",
         "person_label": "{name} (id {uid})",
         "person_label_handle": "{name} (@{username}, id {uid})",
+        "chat_label": "{title} (channel or group, id {cid})",
+        "anon_admin": "an anonymous group admin",
+        "hidden_user": "{name} (a user with a hidden account)",
         "speaker_note": (
             "In group chats speakers are labeled \"name (@username, id number)\". Display names can repeat; the id is "
             "unique, so use it to tell people apart. Address people by name in replies; don't say their id or write "
-            "@username (that pings them)."
+            "@username (that pings them).\n"
+            "Keep strictly straight who said what: a quoted message was said by its sender and a forwarded message by "
+            "its original author, not by the person asking; \"I\" and \"my\" in that message mean its author. The "
+            "asker only said what is under [Question]. When addressing, judging, or fact-checking, attribute words to "
+            "whoever actually said them, and never treat quoted content as the asker's own experience or opinion. "
+            "In recent chat and memory, each line belongs to the person named at its start."
         ),
         "single_paragraph_note": (
             "Write every reply as one single paragraph: no paragraph breaks, line breaks, lists, or headings; put "
@@ -394,6 +439,19 @@ STRINGS = {
         "observed_sticker": "[sticker{emoji}]",
         "observed_image": "[image]",
         "observed_media": "[{what}]",
+        "observed_media_heard": "[{what}, content: {text}]",
+        "ask_about_quote": "(replying to a message from {who}) {question}",
+        "ask_about_own": "(replying to their own earlier message) {question}",
+        "recent_header": (
+            "Recent group chat (oldest first; background only: not said to you and not said by the asker; each line "
+            "belongs to the person named at its start). \"just now\", \"above\", or \"what he said\" in the question "
+            "most likely refers to this:"
+        ),
+        "recent_line": "[{when}] {who}: {text}",
+        "recent_reply_line": "[{when}] {who} replying to {to}: {text}",
+        "recent_you": "you (the bot)",
+        "recent_forward": "(forwarded from {origin}) ",
+        "recent_media_heard": "[{what}: {text}]",
         "memory_show": "Current memory:\n{block}",
         "memory_archive": "Chat log: {n} messages (kept {days} days; the model can search it with recall)",
         "memory_chat_id": "This chat's id: {chat_id}",
@@ -442,6 +500,9 @@ STRINGS = {
                            "you need its content)",
         "media_unseen": "(sent {what}, but you can't see or hear its content)",
         "media_too_large": "(sent {what} larger than 20 MB, too large to view)",
+        "media_heard": "(sent {what}. Another model watched/listened to it; its account: \"{text}\" {more})",
+        "media_heard_more": "For details the account doesn't cover, call watch_media (media_id={id}) with a specific "
+                            "question.",
         "empty_reply": "(the model returned an empty response)",
         "thinking_stages": ["Thinking", "Working through the results"],
         "elapsed_s": "{s}s",
@@ -475,6 +536,8 @@ STRINGS = {
         "watch_default": "Describe this fully.",
         "watch_unknown": "(no media found for this media_id; the bot may have restarted or it expired. Ask them to "
                          "send it again.)",
+        "watch_prefetched_hint": "(This is a full account of the whole thing. If it doesn't answer your question, call "
+                                 "again with the same media_id and a specific question.)",
         "watch_failed": "(viewing the media failed: {error}. Tell them you couldn't view it; don't make up its "
                         "content.)",
         "watch_timeout": "timed out",

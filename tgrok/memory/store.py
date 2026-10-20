@@ -65,6 +65,11 @@ def db() -> sqlite3.Connection:
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.executescript(_SCHEMA)
+        # 旧库没有 msg_id 列：补上。同一条 Telegram 消息（比如既旁听到、又被人引用）只记一次
+        if "msg_id" not in {r[1] for r in _conn.execute("PRAGMA table_info(messages)")}:
+            _conn.execute("ALTER TABLE messages ADD COLUMN msg_id INTEGER")
+        _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_msg ON messages(chat_id, msg_id) "
+                      "WHERE msg_id IS NOT NULL")
     return _conn
 
 
@@ -86,15 +91,19 @@ class Message:
     who: str
     kind: str
     text: str
+    msg_id: int | None = None
 
 
 def _messages(rows) -> list[Message]:
     return [Message(**dict(r)) for r in rows]
 
 
-def add_message(chat_id: int, user_id: int | None, who: str, kind: str, text: str, ts: float | None = None) -> None:
-    db().execute("INSERT INTO messages(chat_id, ts, user_id, who, kind, text) VALUES (?, ?, ?, ?, ?, ?)",
-                 (chat_id, time.time() if ts is None else ts, user_id, who, kind, text))
+def add_message(chat_id: int, user_id: int | None, who: str, kind: str, text: str, ts: float | None = None,
+                msg_id: int | None = None) -> None:
+    """msg_id 是 Telegram 的消息 id：给了就按（聊天, 消息 id）去重。"""
+    db().execute("INSERT OR IGNORE INTO messages(chat_id, ts, user_id, who, kind, text, msg_id) "
+                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (chat_id, time.time() if ts is None else ts, user_id, who, kind, text, msg_id))
 
 
 _TERM_RE = re.compile(r"\S+")

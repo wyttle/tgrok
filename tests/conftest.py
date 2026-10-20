@@ -18,6 +18,7 @@ os.environ.update({
     "RESEARCH_MODELS": "",
     "GEMINI_SEARCH_MODEL": "",
     "GEMINI_MEDIA_MODEL": "",
+    "GEMINI_HELPER_MODEL": "",
     "SEARCH_PROVIDER": "",
     "ADMIN_USER_IDS": "999",
     "ALLOWED_USER_IDS": "",
@@ -34,7 +35,7 @@ os.environ.update({
 })
 os.environ.pop("SYSTEM_PROMPT", None)
 
-from tgrok import chat, config, conversations, llm, media, slang, tg_auth  # noqa: E402
+from tgrok import chat, config, conversations, llm, media, recent, slang, tg_auth, viewer  # noqa: E402
 from tgrok.memory import consolidate, store  # noqa: E402
 
 # 假模型和假工具都是瞬间返回：私聊的显示限速按 0 算，否则工具行在下个刷新周期前就被终稿替换，测不到进度
@@ -50,19 +51,21 @@ def _clear_state() -> None:
     conversations._total = 0
     media.album_cache.clear()
     media.watch_cache.clear()
+    recent.clear()
+    viewer.clear()
     chat.active_generations.clear()
 
 
 @pytest.fixture(autouse=True)
 def isolate():
     saved_config = {k: v for k, v in vars(config).items() if k.isupper()}
-    saved_adapters = (llm.adapter, llm.fallback_adapter)
+    saved_adapters = (llm.adapter, llm.fallback_adapter, llm.helper_adapter)
     saved_users = set(tg_auth.allowed_users)
     _clear_state()
     yield
     for k, v in saved_config.items():
         setattr(config, k, v)
-    llm.adapter, llm.fallback_adapter = saved_adapters
+    llm.adapter, llm.fallback_adapter, llm.helper_adapter = saved_adapters
     tg_auth.allowed_users.clear()
     tg_auth.allowed_users.update(saved_users)
     _clear_state()

@@ -114,20 +114,27 @@ def _replying(monkeypatch, answer="好的"):
     return histories
 
 
-def test_question_injects_asker_and_quoted_author_and_archives_exchange(monkeypatch):
+def test_quoted_message_is_attributed_to_its_author_not_the_asker(monkeypatch):
+    """阿强回复小李的消息并 @bot：模型看到的、记进原始记录的，都要把那句话算在小李头上。"""
     histories = _replying(monkeypatch, "火锅")
     tg_auth.allowed_users.update({5, 6})
     _add("爱吃辣", "user", 5, chat_id=-7)
     _add("刚毕业", "user", 6, chat_id=-7)
     chat_obj, qiang, li = group(-7), user(5, "阿强"), user(6, "小李")
-    quoted = Message(40, NOW, chat_obj, from_user=li, text="今晚吃啥")
-    ask = Message(41, NOW, chat_obj, from_user=qiang, text="@bot 你看呢", reply_to_message=quoted,
+    quoted = Message(40, NOW, chat_obj, from_user=li, text="我昨天捡到一只猫")
+    ask = Message(41, NOW, chat_obj, from_user=qiang, text="@bot 这是真的吗", reply_to_message=quoted,
                   entities=[MessageEntity(MessageEntity.MENTION, 0, 4)])
     run(handlers.handle_message(update_of(ask), CTX))
     first = histories[-1][1]["content"]
     assert "爱吃辣" in first and "刚毕业" in first
-    found = store.search_messages(-7, "")
-    assert [(m.kind, m.user_id) for m in found] == [("ask", 5), ("reply", 5)] and found[1].text == "火锅"
+    assert "发送者：小李（id 6）（不是提问者）" in first and "【提问】阿强（id 5） 回复了上面这条消息，问你：这是真的吗" in first
+    log = [(m.kind, m.user_id, m.text) for m in store.search_messages(-7, "")]
+    assert log == [("chat", 6, "我昨天捡到一只猫"), ("ask", 5, "（回复了 小李（id 6） 的消息）这是真的吗"),
+                   ("reply", 5, "火锅")]
+    # 被引用的消息同时也被旁听到过：按 Telegram 消息 id 去重，不会记两遍
+    memory.record_exchange(-7, 5, "阿强（id 5）", "再问一次", "好", quoted={
+        "user_id": 6, "who": "小李（id 6）", "text": "我昨天捡到一只猫", "msg_id": 40})
+    assert [m.text for m in store.search_messages(-7, "捡到一只猫")] == ["我昨天捡到一只猫"]
 
 
 def test_overheard_messages_are_archived_without_model_calls(monkeypatch):

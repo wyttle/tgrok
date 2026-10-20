@@ -5,7 +5,7 @@ from fakes import BOT_USER, CTX, NOW, FakeMsg, capture_replies, chunk_text, chun
     update_of, use_model, user
 from telegram import Message, MessageEntity, Update, Video, Voice
 
-from tgrok import chat, config, handlers, media, tg_auth, tools
+from tgrok import chat, config, handlers, media, tg_auth, tools, viewer
 from tgrok.i18n import t
 from tgrok.llm import gemini as llm_gemini
 from tgrok.memory import store
@@ -32,36 +32,65 @@ def gemini(monkeypatch):
     return calls, replies
 
 
-def test_voice_reply_is_heard_by_gemini_and_retold_to_main_model(monkeypatch, gemini):
+def test_fresh_voice_is_prefetched_and_the_tool_reuses_it(monkeypatch, gemini):
+    """语音一到就在后台转述；主模型调 watch_media 时等这一份，不重复请求；再问具体问题才另看一次。"""
     calls, replies = gemini
-    replies.append("她说：明天八点集合。")
+    replies.extend(["她说：明天八点集合。", "语气很急。"])
     captured = capture_replies(monkeypatch)
     chat_obj = group(CHAT)
     bot_msg = Message(10, NOW, chat_obj, from_user=BOT_USER, text="几点集合？")
     voice = Message(11, NOW, chat_obj, from_user=user(999, "Alice"), reply_to_message=bot_msg,
                     voice=Voice("vfid", "vuid", 8, mime_type="audio/ogg"))
     assert handlers.MESSAGE_FILTER.check_update(Update(1, message=voice))
-    run(handlers.handle_message(update_of(voice), CTX))
-    history = captured[-1]
-    assert t("media_watchable", what="语音（8 秒）", id=11) in history[-1]["content"]
-
     rounds = []
 
     async def create(working, has_tools):
-        rounds.append(working)
+        rounds.append(list(working))
         if len(rounds) == 1:
             return stream_of([chunk_tool(0, "watch_media", {"media_id": 11, "question": "说了啥"})])
-        return stream_of([chunk_text("明天八点。")])
+        if len(rounds) == 2:
+            return stream_of([chunk_tool(0, "watch_media", {"media_id": 11, "question": "语气怎样"})])
+        return stream_of([chunk_text("明天八点，挺急的。")])
 
-    use_model(create)
-    msg = FakeMsg()
-    assert run(chat.stream_reply(msg, history))[1] == "明天八点。"
-    (call,) = calls
-    data, mime = call["contents"][0]
-    assert call["model"] == "gemini-x" and mime == "audio/ogg" and data.startswith(b"RIFF")
-    assert "说了啥" in call["contents"][1] and "语音（8 秒）" in call["config"]["system_instruction"]
-    assert rounds[1][-1]["content"] == "她说：明天八点集合。"
+    async def scenario():
+        await handlers.handle_message(update_of(voice), CTX)
+        history = captured[-1]
+        assert t("media_watchable", what="语音（8 秒）", id=11) in history[-1]["content"]  # 刚发来，转述还没好
+        use_model(create)
+        msg = FakeMsg()
+        return msg, await chat.stream_reply(msg, history)
+
+    msg, (_, answer) = run(scenario())
+    assert answer == "明天八点，挺急的。"
+    assert [c["contents"][1] for c in calls] == ["它想知道：完整描述这段内容。", "它想知道：语气怎样"]
+    data, mime = calls[0]["contents"][0]
+    assert calls[0]["model"] == "gemini-x" and mime == "audio/ogg" and data.startswith(b"RIFF")
+    assert rounds[1][-1]["content"].startswith("她说：明天八点集合。")
+    assert rounds[2][-1]["content"] == "语气很急。"
     assert any("查看媒体: 说了啥" in x for x in msg.log)
+
+
+def test_quoting_an_already_heard_voice_puts_the_transcript_in_the_question(monkeypatch, gemini):
+    """旁听时已经转述好的语音，被人引用提问时直接带上转述，主模型不用再调工具；话算在发语音的人头上。"""
+    calls, replies = gemini
+    replies.append("老王说：周五晚上八点开黑。")
+    captured = capture_replies(monkeypatch)
+    tg_auth.allowed_users.add(5)
+    chat_obj = group(CHAT)
+    voice = Message(50, NOW, chat_obj, from_user=user(7, "老王"), voice=Voice("v", "vu", 6))
+    ask = Message(51, NOW, chat_obj, from_user=user(5, "阿强"), text="@bot 他说几点", reply_to_message=voice,
+                  entities=[MessageEntity(MessageEntity.MENTION, 0, 4)])
+
+    async def scenario():
+        await handlers.handle_message(update_of(voice), CTX)  # 没叫 bot：只预读
+        await viewer.job("vu")
+        await handlers.handle_message(update_of(ask), CTX)
+
+    run(scenario())
+    content = captured[-1][-1]["content"]
+    assert "发送者：老王（id 7）（不是提问者）" in content and "老王说：周五晚上八点开黑。" in content
+    assert "最近的群聊" not in content  # 被引用的那条不在最近群聊里重复出现
+    assert len(calls) == 1
 
 
 def test_without_media_model_caption_is_kept_and_video_marked_unseen(monkeypatch):

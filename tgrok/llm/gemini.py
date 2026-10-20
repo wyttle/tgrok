@@ -25,7 +25,7 @@ def make_client(api_key: str, base_url: str):
     return _genai.Client(api_key=api_key, http_options={"base_url": base_url} if base_url else None)
 
 
-# grounding 搜索和 watch_media 共用的客户端；主模型走 Gemini 原生时适配器另建自己的客户端
+# grounding 搜索、watch_media 和媒体预读共用的客户端；主模型走 Gemini 原生时适配器另建自己的客户端
 gemini_client = (make_client(config.GEMINI_API_KEY, config.GEMINI_BASE_URL)
                  if config.LLM_PROTOCOL == "gemini" or config.GEMINI_SEARCH_MODEL or config.GEMINI_MEDIA_MODEL
                  else None)

@@ -169,6 +169,26 @@ def fallback_endpoint() -> LLMEndpoint | None:
     )
 
 
+# ---- 提速：Gemini 帮手模型（额度宽裕时可以放开用）----
+# 后台杂活（记忆整理）和抢答用的 Gemini 模型，走 GEMINI_BASE_URL / GEMINI_API_KEY；留空沿用 GEMINI_MEDIA_MODEL，
+# 两个都空就不启用（记忆整理用主模型，不抢答）
+GEMINI_HELPER_MODEL = _str("GEMINI_HELPER_MODEL") or GEMINI_MEDIA_MODEL
+# 抢答：主模型这么多秒还没出字、也没开始调工具，就同时让帮手模型（Gemini 原生，自带 Google 搜索）作答，
+# 谁先出字用谁，另一个取消。0 = 关闭
+HEDGE_AFTER = _float("HEDGE_AFTER", 12)
+# 媒体预读：群里一出现视频、语音等，就先让 GEMINI_MEDIA_MODEL 在后台完整转述，有人问到时直接用
+MEDIA_PREFETCH = _bool("MEDIA_PREFETCH", True)
+# 最近群聊：bot 收到的群消息在内存里每群留一小段，提问时把这段时间内最近几条附上作背景。0 = 关闭
+RECENT_CHAT_COUNT = _int("RECENT_CHAT_COUNT", 15)
+RECENT_CHAT_MINUTES = _int("RECENT_CHAT_MINUTES", 60)
+
+
+def helper_endpoint() -> LLMEndpoint | None:
+    if not GEMINI_HELPER_MODEL:
+        return None
+    return LLMEndpoint("gemini", GEMINI_HELPER_MODEL, GEMINI_BASE_URL, GEMINI_API_KEY, None)
+
+
 # ---- 工具与联网 ----
 SEARCH_MAX_ROUNDS = _int("SEARCH_MAX_ROUNDS", 3)  # 单次回答最多几轮工具调用（所有工具共用）
 # 搜索源：tavily / serper / searxng / duckduckgo，逗号分隔可配多个，并发聚合

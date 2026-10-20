@@ -49,8 +49,9 @@ def _parse(text: str) -> list | None:
 
 
 async def _ask(history: list[dict]) -> tuple[str, list] | None:
-    """主模型失败时用备用模型；返回（原文, 操作列表），都失败返回 None。"""
-    for adapter in (llm.adapter, llm.fallback_adapter):
+    """先用 Gemini 帮手模型（不占主模型的并发和额度），失败再用主模型、备用模型；
+    返回（原文, 操作列表），都失败返回 None。"""
+    for adapter in (llm.helper_adapter, llm.adapter, llm.fallback_adapter):
         if adapter is None:
             continue
         try:

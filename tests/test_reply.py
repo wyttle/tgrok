@@ -166,6 +166,37 @@ def test_group_progress_updates_are_paced_to_avoid_rate_limits():
     assert not any("计算" in x for x in msg.log)
 
 
+def test_slow_telegram_edit_does_not_hold_up_the_next_model_round():
+    """Telegram 编辑很慢（或被限流在等）时，模型轮次和工具照常往下走，不等那次显示落地。"""
+    marks = {}
+
+    class SlowSent(FakeSent):
+        async def edit_text(self, text, parse_mode=None, reply_markup=None):
+            if reply_markup is not None:  # 过程中的编辑（定稿不带按钮）
+                await asyncio.sleep(1.0)
+            await super().edit_text(text, parse_mode, reply_markup)
+
+    class SlowMsg(FakeMsg):
+        async def reply_text(self, text, parse_mode=None, reply_markup=None):
+            fs = SlowSent(self.log)
+            fs.text, fs.message_id = text, 1
+            self.sent.append(fs)
+            return fs
+
+    async def create(history, has_tools):
+        loop = asyncio.get_running_loop()
+        if "r0" not in marks:
+            marks["r0"] = loop.time()
+            return stream_of([chunk_tool(0, "calculate", {"expression": "1+1"})])
+        marks["r1"] = loop.time()
+        return stream_of([chunk_text("2")])
+
+    use_model(create)
+    assert run(chat.stream_reply(SlowMsg(), HIST))[1] == "2"
+    assert marks["r1"] - marks["r0"] < 0.5
+
+
+
 def test_long_output_is_split_without_losing_text():
     big = "\n".join("段%d %s" % (i, "内容" * 40) for i in range(100))
 
@@ -306,19 +337,20 @@ def fallback_calls():
 
     async def ok(history, has_tools):
         seen.append(history)
-        return stream_of([chunk_text("备用模型的回答")])
+        return stream_of([chunk_text("备用模型的回答")], delay=0.3)
 
     llm.fallback_adapter = openai_adapter(ok, model="fb-model")
     return seen
 
 
-def test_primary_error_before_output_switches_to_fallback_and_notes_it(fallback_calls):
+def test_primary_error_before_output_switches_to_fallback_and_notes_it(fallback_calls, monkeypatch):
+    monkeypatch.setattr(bubble, "TICK_PRIVATE", 0.05)
     use_model(_dead)
     msg = FakeMsg()
     _, answer = run(chat.stream_reply(msg, HIST))
     assert answer == "备用模型的回答"  # 提示只在显示里，不进对话历史
     assert msg.sent[0].text.startswith("备用模型的回答") and "fb-model" in msg.sent[0].text.replace("\\", "")
-    assert any("备用" in x for x in msg.log[1:-1])  # 切换时进度行有提示
+    assert any("备用" in x for x in msg.log[1:-1])  # 等备用模型期间进度行有提示
 
 
 def test_primary_cut_after_text_does_not_switch(fallback_calls):

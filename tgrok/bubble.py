@@ -95,13 +95,22 @@ class Bubble:
         return self._task is not None and not self._task.done()
 
     async def _send_placeholder(self, text: str) -> None:
-        try:
-            self.sent = await self.msg.reply_text(text, reply_markup=self.markup)
-        except TelegramError:
-            logger.exception("发送占位消息失败，放弃本次生成")
-            self.placeholder_failed = True
-            if self._live:
-                self._abort()
+        for attempt in range(2):
+            try:
+                self.sent = await self.msg.reply_text(text, reply_markup=self.markup)
+                return
+            except RetryAfter as e:
+                # 群里被限流：等一下再发，不能因此放弃整条回复（模型这时已经在生成了）
+                if attempt:
+                    break
+                logger.warning("发送占位消息被限流，%.0f 秒后重试", float(e.retry_after))
+                await asyncio.sleep(float(e.retry_after) + 0.5)
+            except TelegramError:
+                break
+        logger.exception("发送占位消息失败，放弃本次生成")
+        self.placeholder_failed = True
+        if self._live:
+            self._abort()
 
     async def push(self, text: str, final: bool) -> None:
         """渲染一版正文：定稿不带光标和按钮，过程中带光标和取消按钮。
@@ -213,10 +222,10 @@ class Bubble:
         self._last_edit = 0.0  # 让下一次正文编辑立即生效
 
     async def show_progress(self) -> None:
-        """等在途更新落地后在后台渲染进度，不阻塞随后的工具执行或下一轮请求。
-        离上次显示更新太近就跳过：工具开始、出结果、换阶段常常挨在一起，群里连发会被限流；
-        还没出正文时 ticker 每个周期都会刷新，跳过的状态最迟下个周期显示出来。"""
-        if not self.has_text and time.monotonic() - self._last_render < self._edit_interval:
+        """在后台渲染进度，从不阻塞随后的工具执行或下一轮请求。
+        上一次更新还在途（慢网络、被限流后在等）或离上次显示太近就跳过：工具开始、出结果、换阶段常常挨在一起，
+        群里连发会被限流；还没出正文时 ticker 每个周期都会刷新，跳过的状态最迟下个周期显示出来。"""
+        if self._busy() or (not self.has_text and time.monotonic() - self._last_render < self._edit_interval):
             return
         await self.settle()
         self._start(self._render_progress(self._progress_body()))

@@ -250,6 +250,19 @@ def test_consolidation_applies_operations_and_advances():
     run(consolidate.tick(now=time.time() + 3600 * 3))  # 没有新记录：不再调用模型
     assert len(curator.inputs) == 1
 
+def test_consolidation_runs_on_the_gemini_helper_and_falls_back_to_the_main_model():
+    _log(config.MEMORY_CONSOLIDATE_MIN)
+    helper, main = _Curator('{"operations": [{"action": "add", "target": "group", "text": "群里在聊找工作"}]}'), \
+        _Curator('{"operations": []}')
+    llm.helper_adapter, llm.adapter, llm.fallback_adapter = helper, main, None
+    run(consolidate.tick())
+    assert len(helper.inputs) == 1 and not main.inputs  # 不占主模型
+    _log(config.MEMORY_CONSOLIDATE_MIN)
+    helper.answers.append(RuntimeError("503"))
+    run(consolidate.tick(now=time.time() + config.MEMORY_CONSOLIDATE_INTERVAL * 60 + 1))
+    assert len(main.inputs) == 1  # 帮手模型失败时主模型兜底
+
+
 
 def test_consolidation_waits_for_enough_messages_or_a_day():
     _log(2)

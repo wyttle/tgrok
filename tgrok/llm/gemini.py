@@ -6,7 +6,6 @@ import logging
 import re
 
 from .. import config
-from ..config import GEMINI_API_KEY, GEMINI_BASE_URL, GEMINI_NATIVE_SEARCH, GEMINI_SEARCH_MODEL, MAX_TOKENS
 from .base import BaseAdapter, RoundResult
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,8 @@ def make_client(api_key: str, base_url: str):
 
 
 # grounding 搜索共用的客户端（web.py 使用）；主模型走 Gemini 原生时适配器另建自己的客户端
-gemini_client = make_client(GEMINI_API_KEY, GEMINI_BASE_URL) if GEMINI_NATIVE_SEARCH or GEMINI_SEARCH_MODEL else None
+gemini_client = (make_client(config.GEMINI_API_KEY, config.GEMINI_BASE_URL)
+                 if config.LLM_PROTOCOL == "gemini" or config.GEMINI_SEARCH_MODEL else None)
 
 
 class GeminiAdapter(BaseAdapter):
@@ -53,7 +53,7 @@ class GeminiAdapter(BaseAdapter):
             pass
         gen_config = gtypes.GenerateContentConfig(
             system_instruction=system_text or None,
-            max_output_tokens=MAX_TOKENS,
+            max_output_tokens=config.MAX_TOKENS,
             # None 即未设置，SDK 序列化时会剔除
             temperature=config.LLM_TEMPERATURE,
             top_p=config.LLM_TOP_P,

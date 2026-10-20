@@ -10,8 +10,8 @@ import math
 import operator
 from datetime import date, datetime, timedelta
 
-from .config import BOT_LANG, BOT_TZ
-from .i18n import STRINGS, t
+from . import config
+from .i18n import phrases, t
 
 MAX_EXPRESSION_CHARS = 500
 _MAX_INT_BITS = 10_000  # 约 3000 位十进制
@@ -63,7 +63,7 @@ def _log(x, base=None):
 
 
 def _weekday(x) -> str:
-    return STRINGS[BOT_LANG]["weekday"][_to_date(x).weekday()]
+    return phrases("weekday")[_to_date(x).weekday()]
 
 
 _FUNCS = {
@@ -76,7 +76,7 @@ _FUNCS = {
     "floor": math.floor, "ceil": math.ceil, "factorial": _factorial,
     "gcd": math.gcd, "lcm": math.lcm,
     "date": _to_date, "days": lambda n: timedelta(days=_number(n)), "weekday": _weekday,
-    "today": lambda: datetime.now(BOT_TZ).date(),
+    "today": lambda: datetime.now(config.BOT_TZ).date(),
 }
 # 只有这些函数接受字符串参数（日期字面量）
 _STR_ARG_FUNCS = {"date", "weekday"}

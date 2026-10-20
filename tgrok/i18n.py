@@ -1,6 +1,6 @@
 """界面与提示词文案（中/英）。"""
 
-from .config import BOT_LANG
+from . import config
 
 STRINGS = {
     "zh": {
@@ -435,5 +435,10 @@ STRINGS = {
 }
 
 
+def phrases(key: str):
+    """当前语言下的原始文案（列表类文案用，如星期、思考阶段）。"""
+    return STRINGS[config.BOT_LANG][key]
+
+
 def t(key: str, **kwargs) -> str:
-    return STRINGS[BOT_LANG][key].format(**kwargs)
+    return phrases(key).format(**kwargs)

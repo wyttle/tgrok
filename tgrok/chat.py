@@ -13,9 +13,7 @@ from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from . import calc, config, llm, slang, web
-from .config import STREAM_CURSOR, STREAM_EDIT_INTERVAL, STREAM_SEGMENT_LIMIT
-from .i18n import STRINGS, t
-from .config import BOT_LANG
+from .i18n import phrases, t
 from .tg_auth import is_admin
 
 logger = logging.getLogger(__name__)
@@ -43,7 +41,7 @@ def to_telegram_markdown(text: str) -> str:
 
 _MD_SPECIAL_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 # 流式光标的 MarkdownV2 转义形式：中间编辑也走 MarkdownV2，光标字符必须转义
-_MD_CURSOR = _MD_SPECIAL_RE.sub(r"\\\1", STREAM_CURSOR)
+_MD_CURSOR = _MD_SPECIAL_RE.sub(r"\\\1", config.STREAM_CURSOR)
 
 
 def _streaming_markdown(text: str) -> str:
@@ -105,7 +103,7 @@ _RESULT_ROW_RE = re.compile(r"^\[\d+\]", re.M)
 
 def _stage_line(round_idx: int) -> str:
     """第 N 轮生成对应的阶段文案（思考中 → 深入思考中 → …），超出取最后一档。"""
-    stages = STRINGS[BOT_LANG]["thinking_stages"]
+    stages = phrases("thinking_stages")
     return stages[min(round_idx, len(stages) - 1)]
 
 
@@ -343,7 +341,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         if final:
             md, plain, kb = to_telegram_markdown(text), text, None
         else:
-            md, plain, kb = _streaming_markdown(text), text + STREAM_CURSOR, markup
+            md, plain, kb = _streaming_markdown(text), text + config.STREAM_CURSOR, markup
 
         async def deliver(body: str, mode: str | None) -> None:
             nonlocal sent
@@ -373,13 +371,14 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         segment += delta
         # while 而非 if：网关可能把很长的正文压在一个 delta 里发来，
         # 必须能一次切成多条消息，否则超过 4096 的编辑会被 Telegram 拒绝、尾部丢失
-        while len(segment) >= STREAM_SEGMENT_LIMIT:
+        limit = config.STREAM_SEGMENT_LIMIT
+        while len(segment) >= limit:
             # 优先在换行处断开，其次空格，实在没有就硬切
-            cut = segment.rfind("\n", STREAM_SEGMENT_LIMIT // 2, STREAM_SEGMENT_LIMIT)
+            cut = segment.rfind("\n", limit // 2, limit)
             if cut == -1:
-                cut = segment.rfind(" ", STREAM_SEGMENT_LIMIT // 2, STREAM_SEGMENT_LIMIT)
+                cut = segment.rfind(" ", limit // 2, limit)
             if cut == -1:
-                cut = STREAM_SEGMENT_LIMIT
+                cut = limit
             part, segment = _shape(segment[:cut]), segment[cut:].lstrip("\n")
             await settle()
             await push(part, final=True)
@@ -389,7 +388,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
             sent, last_edit = None, 0.0
         now = time.monotonic()
         # 上一次更新还在途（慢网络或限流退避中）就跳过本次，等它落地后的下一个 delta 再刷新
-        if (segment.strip() and now - last_edit >= STREAM_EDIT_INTERVAL
+        if (segment.strip() and now - last_edit >= config.STREAM_EDIT_INTERVAL
                 and (bubble_task is None or bubble_task.done())):
             await settle()
             start_update(push(_shape(segment), final=False))

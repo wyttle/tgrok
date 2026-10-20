@@ -3,8 +3,7 @@
 from datetime import datetime
 
 from . import config
-from .config import BOT_TZ, BOT_TZ_NAME, SEARCH_ENABLED, GEMINI_SEARCH_MODEL, BOT_LANG
-from .i18n import STRINGS, t
+from .i18n import phrases, t
 
 SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
                  if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
@@ -17,10 +16,10 @@ if config.LLM_PROTOCOL != "gemini":
     SYSTEM_PROMPT += "\n\n" + t("calc_system_prompt")
     if config.SLANG_ENABLED:
         SYSTEM_PROMPT += "\n\n" + t("slang_system_prompt")
-if SEARCH_ENABLED:
+if config.SEARCH_ENABLED:
     # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
     SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")
-    if GEMINI_SEARCH_MODEL:
+    if config.GEMINI_SEARCH_MODEL:
         SYSTEM_PROMPT += t("search_agent_note")
     SYSTEM_PROMPT += "\n\n" + t("slang_search_prompt")
 
@@ -31,10 +30,10 @@ def current_time_line() -> str:
     附加到「当前这条用户消息」末尾，而非系统提示：系统提示与历史轮次保持字节
     不变，才能命中上游的 prompt 缓存；时间只挂在本来就是新内容的最新一轮上。
     """
-    now = datetime.now(BOT_TZ)
-    weekday = STRINGS[BOT_LANG]["weekday"][now.weekday()]
+    now = datetime.now(config.BOT_TZ)
+    weekday = phrases("weekday")[now.weekday()]
     stamp = f"{now:%Y-%m-%d %H:%M} {weekday}"
-    return t("current_time", time=stamp, tz=BOT_TZ_NAME)
+    return t("current_time", time=stamp, tz=config.BOT_TZ_NAME)
 
 
 def with_time(content):

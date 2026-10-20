@@ -6,7 +6,6 @@ import logging
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from ..config import LLM_USER_AGENT, MAX_TOKENS
 from .base import BaseAdapter, RoundResult, active_tools, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
@@ -21,7 +20,7 @@ class OpenAIAdapter(BaseAdapter):
         self.client = client if client is not None else AsyncOpenAI(
             base_url=self.endpoint.base_url,
             api_key=self.endpoint.api_key,
-            default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
+            default_headers={"User-Agent": config.LLM_USER_AGENT} if config.LLM_USER_AGENT else None,
             # 禁用 SDK 内建重试：它会按服务端 Retry-After 静默睡 60s+，期间用户只能干等。
             # 重试语义由 chat.stream_reply 统一控制（零输出重试一次、429 不重试）
             max_retries=0,
@@ -43,7 +42,7 @@ class OpenAIAdapter(BaseAdapter):
         while True:
             kwargs = {
                 "model": self.model, "messages": history, "stream": True,
-                self.token_param: MAX_TOKENS, **sampling,
+                self.token_param: config.MAX_TOKENS, **sampling,
             }
             if extra_body:
                 kwargs["extra_body"] = extra_body

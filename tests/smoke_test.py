@@ -20,6 +20,7 @@ os.environ["SLANG_FILE"] = str(_TMP / "slang.json")
 os.environ["SLANG_ENABLED"] = "true"
 
 from tgrok import chat, config, llm, prompt, tg, web  # noqa: E402
+from tgrok.i18n import STRINGS  # noqa: E402
 from tgrok.llm import claude, gemini, openai  # noqa: E402
 from tgrok.llm.claude import ClaudeAdapter  # noqa: E402
 from tgrok.llm.openai import OpenAIAdapter  # noqa: E402
@@ -68,7 +69,6 @@ def stream_of(parts, tail="stop"):
 
 HIST=[{"role":"system","content":"s"},{"role":"user","content":"u"}]
 config.STREAM_IDLE_TIMEOUT = 0
-config.GEMINI_NATIVE_SEARCH = False
 orig_adapter = llm.adapter
 
 class FakeCompletions:
@@ -157,7 +157,7 @@ set_create(cs6)
 async def fake_search(q): return "[1] a\nu\ns\n\n[2] b\nu\ns"
 web.run_web_search=fake_search
 m=FakeMsg(); _, ans = run(chat.stream_reply(m, HIST))
-zh=chat.STRINGS["zh"]["thinking_stages"]
+zh=STRINGS["zh"]["thinking_stages"]
 assert ans=="最终答案" and m.log[0]==zh[0]+"…"
 assert any("搜索: 世界杯" in x and zh[1] in x for x in m.log)
 ok("TUI 进度序列")
@@ -360,8 +360,8 @@ ok("Claude 流消费/思考块回传")
 # 20. Claude 降级链：max_tokens 超限解析上限回退 + thinking 被拒粘性禁用
 import anthropic as _an
 config.LLM_EXTRA_BODY = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
-_orig_max = claude.MAX_TOKENS
-claude.MAX_TOKENS = 200000
+_orig_max = config.MAX_TOKENS
+config.MAX_TOKENS = 200000
 seen = []
 class _CC:
     async def create(s, **kw):
@@ -383,7 +383,7 @@ assert seen[0]["extra_body"]["thinking"]["budget_tokens"] == 1024
 assert seen[1]["max_tokens"] == 128000
 assert "extra_body" not in seen[2] and seen[2]["max_tokens"] == 128000
 assert a20.max_tokens_limit == 128000 and a20.extra_body_supported is False
-claude.MAX_TOKENS = _orig_max
+config.MAX_TOKENS = _orig_max
 config.LLM_EXTRA_BODY = None
 ok("Claude 降级链")
 
@@ -425,12 +425,12 @@ ok("Gemini 流消费/引用去重")
 _saved_conversations = tg.conversations.copy()
 _saved_conv_sizes = tg._conv_sizes.copy()
 _saved_conv_total = tg._conv_total
-_saved_conv_budget = tg.CONVERSATION_CONTENT_BUDGET
+_saved_conv_budget = config.CONVERSATION_CONTENT_BUDGET
 try:
     tg.conversations.clear()
     tg._conv_sizes.clear()
     tg._conv_total = 0
-    tg.CONVERSATION_CONTENT_BUDGET = 10
+    config.CONVERSATION_CONTENT_BUDGET = 10
     tg.remember(1, 1, [{"role": "user", "content": "aaaa"}])
     tg.remember(1, 2, [{"role": "user", "content": "bbbb"}])
     tg.remember(1, 1, [{"role": "user", "content": "ccccc"}])
@@ -451,7 +451,7 @@ finally:
     tg._conv_sizes.clear()
     tg._conv_sizes.update(_saved_conv_sizes)
     tg._conv_total = _saved_conv_total
-    tg.CONVERSATION_CONTENT_BUDGET = _saved_conv_budget
+    config.CONVERSATION_CONTENT_BUDGET = _saved_conv_budget
 ok("对话缓存内容预算/覆盖会计")
 
 # 28. 工具轮草稿不并入终稿：请求了工具的轮次正文被丢弃；终轮空手时回用草稿兜底
@@ -507,10 +507,10 @@ ok("中间编辑网络错误不截断正文")
 
 # 30. 历史截断后第一条对话必须是 user（严格交替的接口/模板拒绝 assistant 开头）
 long_hist = [{"role": "system", "content": "s"}] + [
-    {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(2 * tg.MAX_HISTORY + 1)]
+    {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(2 * config.MAX_HISTORY + 1)]
 trimmed = tg.trim_history(long_hist)
 assert trimmed[0]["role"] == "system" and trimmed[1]["role"] == "user"
-assert trimmed[-1] is long_hist[-1] and len(trimmed) <= tg.MAX_HISTORY + 1
+assert trimmed[-1] is long_hist[-1] and len(trimmed) <= config.MAX_HISTORY + 1
 ok("历史截断从 user 开始")
 
 # 31. 配置向导读写多行值：不能截断提示词；写出的单行值 python-dotenv 读回逐字一致
@@ -707,9 +707,9 @@ ok("备用模型切换与提示")
 # 38. 备用模型配置：地址和 key 留空沿用主模型；claude 地址剥掉 /v1；未配置模型名时不启用
 _saved38 = {k: getattr(config, k) for k in (
     "LLM_FALLBACK_MODEL", "LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL", "LLM_FALLBACK_API_KEY",
-    "LLM_PROTOCOL", "_llm_base_raw", "LLM_API_KEY")}
+    "LLM_PROTOCOL", "LLM_BASE_URL", "LLM_API_KEY")}
 try:
-    config.LLM_PROTOCOL, config._llm_base_raw, config.LLM_API_KEY = "responses", "https://relay.example/v1", "sk-main"
+    config.LLM_PROTOCOL, config.LLM_BASE_URL, config.LLM_API_KEY = "responses", "https://relay.example/v1", "sk-main"
     config.LLM_FALLBACK_MODEL, config.LLM_FALLBACK_PROTOCOL = "", ""
     assert config.fallback_endpoint() is None
     config.LLM_FALLBACK_MODEL = "gpt-4.1"
@@ -843,18 +843,18 @@ class _File40:
     async def download_as_bytearray(s): return bytearray(b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 8)
 async def _get_file40(fid): return _File40()
 _ctx40 = types.SimpleNamespace(bot=types.SimpleNamespace(id=42, username="bot", get_file=_get_file40))
-_orig_reply, _orig_vision = tg.stream_reply, tg.ENABLE_VISION
+_orig_reply, _orig_vision = tg.stream_reply, config.ENABLE_VISION
 tg.stream_reply = _fake_reply40
 try:
-    tg.ENABLE_VISION = True
+    config.ENABLE_VISION = True
     run(tg.handle_message(types.SimpleNamespace(effective_message=_sticker_msg), _ctx40))
     content40 = _captured40[-1][-1]["content"]
     assert "🤬" in content40[0]["text"] and content40[1]["image_url"]["url"].startswith("data:image/webp;base64,")
-    tg.ENABLE_VISION = False
+    config.ENABLE_VISION = False
     run(tg.handle_message(types.SimpleNamespace(effective_message=_photo_msg), _ctx40))
     assert chat.t("image_unseen") in _captured40[-1][-1]["content"]
 finally:
-    tg.stream_reply, tg.ENABLE_VISION = _orig_reply, _orig_vision
+    tg.stream_reply, config.ENABLE_VISION = _orig_reply, _orig_vision
 ok("贴纸/无字图片回复")
 
 # 41. 两个同名的人：模型看到的说话人标识和记进记忆的都带各自的 id，不会混成一个人

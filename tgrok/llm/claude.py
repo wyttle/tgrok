@@ -7,7 +7,6 @@ import re
 import anthropic
 
 from .. import config
-from ..config import LLM_USER_AGENT, MAX_TOKENS
 from .base import BaseAdapter, RoundResult, active_tools, error_text, rejected_param, sampling_kwargs, tool_args
 
 logger = logging.getLogger(__name__)
@@ -23,7 +22,7 @@ class ClaudeAdapter(BaseAdapter):
         self.client = client if client is not None else anthropic.AsyncAnthropic(
             base_url=self.endpoint.base_url or None,
             api_key=self.endpoint.api_key,
-            default_headers={"User-Agent": LLM_USER_AGENT} if LLM_USER_AGENT else None,
+            default_headers={"User-Agent": config.LLM_USER_AGENT} if config.LLM_USER_AGENT else None,
             # 与 OpenAI 客户端一致：禁用 SDK 内建重试，重试语义由 chat.stream_reply 统一控制
             max_retries=0,
         )
@@ -43,7 +42,7 @@ class ClaudeAdapter(BaseAdapter):
         include_tools = use_tools and self.tools_supported
         sampling = sampling_kwargs() if self.sampling_supported else {}
         extra_body = self.endpoint.extra_body if self.extra_body_supported else None
-        max_tokens = min(MAX_TOKENS, self.max_tokens_limit) if self.max_tokens_limit else MAX_TOKENS
+        max_tokens = min(config.MAX_TOKENS, self.max_tokens_limit) if self.max_tokens_limit else config.MAX_TOKENS
         while True:
             kwargs = {"model": self.model, "messages": messages, "stream": True,
                       "max_tokens": max_tokens, **sampling}

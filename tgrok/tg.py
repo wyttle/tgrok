@@ -18,11 +18,6 @@ from telegram.ext import (
 )
 
 from . import config, memory, slang
-from .config import (
-    ADMIN_USER_IDS, ALBUM_CACHE_SIZE, BOT_TOKEN, CONVERSATION_CACHE_SIZE,
-    CONVERSATION_CONTENT_BUDGET, ENABLE_VISION,
-    MAX_HISTORY, MAX_IMAGE_BYTES,
-)
 from .chat import on_cancel_button, stream_reply
 from .i18n import t
 from .prompt import SYSTEM_PROMPT, with_time
@@ -61,22 +56,22 @@ def remember(chat_id: int, message_id: int, history: list[dict]) -> None:
     _conv_total += size
     conversations.move_to_end(key)
     while len(conversations) > 1 and (
-        len(conversations) > CONVERSATION_CACHE_SIZE
-        or _conv_total > CONVERSATION_CONTENT_BUDGET
+        len(conversations) > config.CONVERSATION_CACHE_SIZE
+        or _conv_total > config.CONVERSATION_CONTENT_BUDGET
     ):
         oldest, _ = conversations.popitem(last=False)
         _conv_total -= _conv_sizes.pop(oldest)
 
 
 def trim_history(history: list[dict]) -> list[dict]:
-    """保留 system 消息 + 最近 MAX_HISTORY 条对话，且截断后第一条对话必须是 user。
+    """保留 system 消息 + 最近 config.MAX_HISTORY 条对话，且截断后第一条对话必须是 user。
 
     以 assistant 开头的历史会被 Claude 原生接口和多数本地模型的对话模板
     （要求 user/assistant 严格交替）拒绝，也会丢掉那条回答对应的问题。
     """
-    if len(history) <= MAX_HISTORY + 1:
+    if len(history) <= config.MAX_HISTORY + 1:
         return history
-    tail = history[-MAX_HISTORY:]
+    tail = history[-config.MAX_HISTORY:]
     start = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
     return [history[0]] + tail[start:]
 
@@ -124,7 +119,7 @@ def media_note(m: Message) -> str | None:
     图片在未开启视觉时说明看不到内容。开启视觉的普通图片返回 None（图片本身会发给模型）。"""
     if m.sticker:
         return t("sticker_note", emoji=f" {m.sticker.emoji}" if m.sticker.emoji else "")
-    if not ENABLE_VISION and (m.photo or (m.document and (m.document.mime_type or "").startswith("image/"))):
+    if not config.ENABLE_VISION and (m.photo or (m.document and (m.document.mime_type or "").startswith("image/"))):
         return t("image_unseen")
     return None
 
@@ -154,7 +149,7 @@ def _msg_image_entry(m: Message) -> dict | None:
     if m.photo:
         return {"file_id": m.photo[-1].file_id, "mime": "image/jpeg", "message_id": m.message_id}
     if m.document and (m.document.mime_type or "").startswith("image/"):
-        if m.document.file_size and m.document.file_size > MAX_IMAGE_BYTES:
+        if m.document.file_size and m.document.file_size > config.MAX_IMAGE_BYTES:
             return None
         return {"file_id": m.document.file_id, "mime": m.document.mime_type, "message_id": m.message_id}
     if m.sticker:
@@ -191,7 +186,7 @@ def remember_album(msg: Message) -> None:
     if all(e["message_id"] != entry["message_id"] for e in group):
         group.append(entry)
     album_cache.move_to_end(key)
-    while len(album_cache) > ALBUM_CACHE_SIZE:
+    while len(album_cache) > config.ALBUM_CACHE_SIZE:
         album_cache.popitem(last=False)
 
 
@@ -250,7 +245,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if msg is None or msg.from_user is None or msg.from_user.is_bot:
         return
 
-    if ENABLE_VISION:
+    if config.ENABLE_VISION:
         # 被动记录相册成员（在任何提前 return 之前），供之后回复相册时取整组图片
         remember_album(msg)
 
@@ -303,7 +298,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if is_reply_to_bot:
         # 追问（回复 bot 的消息，带不带 @ 都算）：接上之前的对话历史
-        images = await image_data_urls(bot, msg) if ENABLE_VISION else []
+        images = await image_data_urls(bot, msg) if config.ENABLE_VISION else []
         if not question and not images and not note:
             return
         user_content = speaker(question or note or t("look_image"))
@@ -321,7 +316,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         # 新对话：@提及（群聊）或私聊直接提问
         context_text = quoted_context(msg) if replied else None
-        images = await image_data_urls(bot, msg, replied) if ENABLE_VISION else []
+        images = await image_data_urls(bot, msg, replied) if config.ENABLE_VISION else []
         if not question and not context_text and not images and not note:
             await msg.reply_text(t("nudge"))
             return
@@ -508,11 +503,11 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     if user is None or not is_admin(user.id):
         return
-    lines = [t("admins", ids=", ".join(map(str, sorted(ADMIN_USER_IDS))) or t("not_configured"))]
+    lines = [t("admins", ids=", ".join(map(str, sorted(config.ADMIN_USER_IDS))) or t("not_configured"))]
     if allowed_users:
         lines.append(t("whitelist", n=len(allowed_users), ids="\n".join(map(str, sorted(allowed_users)))))
     else:
-        lines.append(t("whitelist_empty_controlled") if ADMIN_USER_IDS else t("whitelist_empty_open"))
+        lines.append(t("whitelist_empty_controlled") if config.ADMIN_USER_IDS else t("whitelist_empty_open"))
     await update.effective_message.reply_text("\n".join(lines))
 
 
@@ -536,7 +531,7 @@ async def post_init(app: Application) -> None:
         BotCommand("unlearn", t("cmd_unlearn")),
     ]
     await app.bot.set_my_commands(base)
-    for admin_id in ADMIN_USER_IDS:
+    for admin_id in config.ADMIN_USER_IDS:
         try:
             await app.bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramError as e:
@@ -547,7 +542,7 @@ async def post_init(app: Application) -> None:
 def build_application() -> Application:
     return (
         Application.builder()
-        .token(BOT_TOKEN)
+        .token(config.BOT_TOKEN)
         .concurrent_updates(True)
         .post_init(post_init)
         .build()
@@ -578,7 +573,7 @@ def main() -> None:
     fallback = config.fallback_endpoint()
     if fallback is not None:
         logger.info("备用模型已配置（主模型出错时切换）：%s", describe(fallback))
-    if config.GEMINI_NATIVE_SEARCH:
+    if config.LLM_PROTOCOL == "gemini":
         logger.info("Gemini 原生搜索模式：google_search + url_context 由 Google 服务端执行")
     elif config.GEMINI_SEARCH_MODEL:
         logger.info(

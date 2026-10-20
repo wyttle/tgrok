@@ -13,12 +13,6 @@ from urllib.parse import urlparse
 import httpx
 
 from . import config, llm
-from .config import (
-    ACTIVE_PROVIDERS, FETCH_CHAR_LIMIT, GEMINI_SEARCH_COOLDOWN, JINA_API_KEY,
-    JINA_FALLBACK, SEARCH_MAX_RESULTS, SEARCH_RESULT_CHAR_LIMIT,
-    SEARCH_SNIPPET_LIMIT, SEARCH_TIMEOUT, SEARXNG_BASE_URL, SERPER_API_KEY,
-    TAVILY_API_KEY,
-)
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -38,9 +32,9 @@ except ImportError:
 async def _search_tavily(query: str) -> list[dict]:
     resp = await _http.post(
         "https://api.tavily.com/search",
-        headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
-        json={"query": query, "max_results": SEARCH_MAX_RESULTS, "search_depth": "basic"},
-        timeout=SEARCH_TIMEOUT,
+        headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"},
+        json={"query": query, "max_results": config.SEARCH_MAX_RESULTS, "search_depth": "basic"},
+        timeout=config.SEARCH_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -52,14 +46,14 @@ async def _search_tavily(query: str) -> list[dict]:
 
 async def _search_searxng(query: str) -> list[dict]:
     resp = await _http.get(
-        f"{SEARXNG_BASE_URL}/search", params={"q": query, "format": "json"},
-        timeout=SEARCH_TIMEOUT,
+        f"{config.SEARXNG_BASE_URL}/search", params={"q": query, "format": "json"},
+        timeout=config.SEARCH_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
     return [
         {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
-        for r in data.get("results", [])[:SEARCH_MAX_RESULTS]
+        for r in data.get("results", [])[:config.SEARCH_MAX_RESULTS]
     ]
 
 
@@ -67,8 +61,8 @@ async def _search_duckduckgo(query: str) -> list[dict]:
     from ddgs import DDGS  # 惰性导入：仅 duckduckgo 源需要安装 ddgs
 
     def _run() -> list[dict]:
-        with DDGS(timeout=SEARCH_TIMEOUT) as ddgs:
-            return list(ddgs.text(query, max_results=SEARCH_MAX_RESULTS))
+        with DDGS(timeout=config.SEARCH_TIMEOUT) as ddgs:
+            return list(ddgs.text(query, max_results=config.SEARCH_MAX_RESULTS))
 
     rows = await asyncio.to_thread(_run)
     return [
@@ -84,9 +78,9 @@ async def _search_duckduckgo(query: str) -> list[dict]:
 def format_search_results(query: str, rows: list[dict]) -> str:
     blocks, total = [], 0
     for i, r in enumerate(rows, 1):
-        snippet = (r.get("snippet") or "").strip()[:SEARCH_SNIPPET_LIMIT]
+        snippet = (r.get("snippet") or "").strip()[:config.SEARCH_SNIPPET_LIMIT]
         block = f"[{i}] {r.get('title', '')}\n{r.get('url', '')}\n{snippet}"
-        if total + len(block) > SEARCH_RESULT_CHAR_LIMIT:
+        if total + len(block) > config.SEARCH_RESULT_CHAR_LIMIT:
             break
         blocks.append(block)
         total += len(block)
@@ -99,9 +93,9 @@ async def _search_serper(query: str) -> list[dict]:
     """Serper.dev：真实 Google 搜索结果（含答案框）。"""
     resp = await _http.post(
         "https://google.serper.dev/search",
-        headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-        json={"q": query, "num": SEARCH_MAX_RESULTS},
-        timeout=SEARCH_TIMEOUT,
+        headers={"X-API-KEY": config.SERPER_API_KEY, "Content-Type": "application/json"},
+        json={"q": query, "num": config.SEARCH_MAX_RESULTS},
+        timeout=config.SEARCH_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -115,7 +109,7 @@ async def _search_serper(query: str) -> list[dict]:
         })
     rows += [
         {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
-        for r in (data.get("organic") or [])[:SEARCH_MAX_RESULTS]
+        for r in (data.get("organic") or [])[:config.SEARCH_MAX_RESULTS]
     ]
     return rows
 
@@ -160,10 +154,10 @@ async def _search_gemini_grounded(query: str) -> str | None:
         )
     except Exception as e:
         if llm.is_quota_error(e):
-            _grounding_cooldown_until = time.monotonic() + GEMINI_SEARCH_COOLDOWN
+            _grounding_cooldown_until = time.monotonic() + config.GEMINI_SEARCH_COOLDOWN
             logger.warning(
                 "Gemini grounding 配额超限（429），%.0f 分钟内回退自带搜索源",
-                GEMINI_SEARCH_COOLDOWN / 60,
+                config.GEMINI_SEARCH_COOLDOWN / 60,
             )
         else:
             logger.warning("Gemini grounding 检索失败：%s: %s", type(e).__name__, str(e)[:200])
@@ -182,7 +176,7 @@ async def _search_gemini_grounded(query: str) -> str | None:
                 links.append(f"[{getattr(web, 'title', '') or uri}]({uri})")
     if links:
         text += "\n\n" + t("sources") + "\n" + "\n".join(links[:5])
-    return text[: SEARCH_RESULT_CHAR_LIMIT + 800]
+    return text[: config.SEARCH_RESULT_CHAR_LIMIT + 800]
 
 
 async def run_web_search(query: str) -> str:
@@ -198,12 +192,13 @@ async def run_web_search(query: str) -> str:
         grounded = await _search_gemini_grounded(query)
         if grounded is not None:
             return grounded
-    logger.info("联网搜索 (%s): %s", "+".join(ACTIVE_PROVIDERS), query)
+    providers = config.ACTIVE_PROVIDERS
+    logger.info("联网搜索 (%s): %s", "+".join(providers), query)
     outcomes = await asyncio.gather(
-        *(_PROVIDER_SEARCH[p](query) for p in ACTIVE_PROVIDERS), return_exceptions=True
+        *(_PROVIDER_SEARCH[p](query) for p in providers), return_exceptions=True
     )
     grouped, first_error = [], None
-    for provider, outcome in zip(ACTIVE_PROVIDERS, outcomes):
+    for provider, outcome in zip(providers, outcomes):
         if isinstance(outcome, BaseException):
             first_error = first_error or outcome
             logger.warning("搜索源 %s 失败：%s: %s", provider, type(outcome).__name__, outcome)
@@ -302,7 +297,7 @@ def _extract_worker(page: str, conn) -> None:
         title, text = _extract_html_text(page)
         # 必须在子进程内截断：管道缓冲区只有 64KB，发大文本会写阻塞，
         # 而父进程在等子进程退出后才读 → 互等死锁（multiprocessing 经典陷阱）
-        conn.send((title[:500], text[: FETCH_CHAR_LIMIT + 200]))
+        conn.send((title[:500], text[: config.FETCH_CHAR_LIMIT + 200]))
     except Exception:
         try:
             conn.send(("", ""))
@@ -350,9 +345,9 @@ async def _fetch_local(url: str) -> tuple[str | None, str]:
         # wait_for 提供总时长上界：httpx 的 read 超时只管字节间隔，
         # 滴漏式慢服务器可以把单次抓取拖到分钟级
         resp = await asyncio.wait_for(
-            _http.get(url, timeout=SEARCH_TIMEOUT,
+            _http.get(url, timeout=config.SEARCH_TIMEOUT,
                       headers={"User-Agent": "Mozilla/5.0 (compatible; tgrok-bot/1.0)"}),
-            SEARCH_TIMEOUT + 3,
+            config.SEARCH_TIMEOUT + 3,
         )
         resp.raise_for_status()
     except Exception as e:
@@ -377,7 +372,7 @@ async def _fetch_local(url: str) -> tuple[str | None, str]:
         # 正文过少：多半是 JS 渲染的空壳页，交给 Jina Reader 兜底
         return None, t("fetch_empty")
     header = f"{title}\n{resp.url}" if title else str(resp.url)
-    return f"{header}\n\n{text}"[:FETCH_CHAR_LIMIT], ""
+    return f"{header}\n\n{text}"[:config.FETCH_CHAR_LIMIT], ""
 
 
 _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
@@ -386,12 +381,12 @@ _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 async def _fetch_jina(url: str) -> str | None:
     """通过 Jina Reader（r.jina.ai）抓取：其服务端渲染 JS 并输出 LLM 友好的 markdown。"""
     headers = {"X-Return-Format": "markdown", "X-Retain-Images": "none"}
-    if JINA_API_KEY:
-        headers["Authorization"] = f"Bearer {JINA_API_KEY}"
+    if config.JINA_API_KEY:
+        headers["Authorization"] = f"Bearer {config.JINA_API_KEY}"
     try:
         resp = await asyncio.wait_for(
-            _http.get(f"https://r.jina.ai/{url}", headers=headers, timeout=SEARCH_TIMEOUT * 2),
-            SEARCH_TIMEOUT * 2 + 6,
+            _http.get(f"https://r.jina.ai/{url}", headers=headers, timeout=config.SEARCH_TIMEOUT * 2),
+            config.SEARCH_TIMEOUT * 2 + 6,
         )
         resp.raise_for_status()
     except Exception as e:
@@ -399,7 +394,7 @@ async def _fetch_jina(url: str) -> str | None:
         return None
     # 内联链接压成纯文字，URL 不占正文字数配额（页面来源 URL 已在开头单独给出）
     text = _MD_LINK_RE.sub(r"\1", resp.text).strip()
-    return text[:FETCH_CHAR_LIMIT] if text else None
+    return text[:config.FETCH_CHAR_LIMIT] if text else None
 
 
 async def run_fetch_url(url: str) -> str:
@@ -413,7 +408,7 @@ async def run_fetch_url(url: str) -> str:
     if text is not None:
         logger.info("读取网页完成（直取 %.1fs，%d 字）: %s", time.monotonic() - t0, len(text), url)
         return text
-    if JINA_FALLBACK:
+    if config.JINA_FALLBACK:
         logger.info("直取失败，改走 Jina Reader: %s", url)
         jina_text = await _fetch_jina(url)
         if jina_text:

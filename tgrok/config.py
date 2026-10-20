@@ -169,16 +169,13 @@ def fallback_endpoint() -> LLMEndpoint | None:
     )
 
 
-# ---- 提速：Gemini 帮手模型（额度宽裕时可以放开用）----
-# 后台杂活（记忆整理）和抢答用的 Gemini 模型，走 GEMINI_BASE_URL / GEMINI_API_KEY；留空沿用 GEMINI_MEDIA_MODEL，
-# 两个都空就不启用（记忆整理用主模型，不抢答）。抢答要的是快，适合填 flash 这类首字快的模型
+# ---- Gemini 帮手模型 ----
+# 后台杂活（记忆整理）用的 Gemini 模型，走 GEMINI_BASE_URL / GEMINI_API_KEY；留空沿用 GEMINI_MEDIA_MODEL，
+# 两个都空就不启用（记忆整理用主模型）
 GEMINI_HELPER_MODEL = _str("GEMINI_HELPER_MODEL") or GEMINI_MEDIA_MODEL
-# 抢答：主模型这么多秒还没出字、也没开始调工具，就同时让帮手模型（Gemini 原生，自带 Google 搜索）作答，
-# 谁先出字用谁，另一个取消。0 = 关闭
-HEDGE_AFTER = _float("HEDGE_AFTER", 8)
 # 媒体预读：群里一出现视频、语音等，就先让 GEMINI_MEDIA_MODEL 在后台完整转述，有人问到时直接用
 MEDIA_PREFETCH = _bool("MEDIA_PREFETCH", True)
-# 最近群聊：bot 收到的群消息在内存里每群留一小段，提问时把这段时间内最近几条附上作背景。0 = 关闭
+# 最近群聊：bot 收到的群消息存进数据库（只留 RECENT_CHAT_MINUTES 分钟以内的），提问时把这段时间内最近几条附上作背景。0 = 关闭
 RECENT_CHAT_COUNT = _int("RECENT_CHAT_COUNT", 15)
 RECENT_CHAT_MINUTES = _int("RECENT_CHAT_MINUTES", 60)
 
@@ -232,7 +229,8 @@ ALBUM_CACHE_SIZE = 300  # 缓存的相册（media group）数量上限
 
 # ---- 对话与回复 ----
 MAX_HISTORY = _int("MAX_HISTORY", 20)  # 追问时保留的对话条数（不含 system）
-CONVERSATION_CACHE_SIZE = 500
+CONVERSATION_CACHE_SIZE = 500  # 内存里留多少段（带图片原样）；数据库里的纯文本版本另按天数保留
+CONVERSATION_KEEP_DAYS = _int("CONVERSATION_KEEP_DAYS", 7)  # 回复 bot 多少天以内的消息还能接上上下文
 # 所有缓存历史的 content 近似字符量上限，不是进程内存硬上限
 CONVERSATION_CONTENT_BUDGET = 64_000_000
 # 流式空闲看门狗：已有正文后连续这么多秒没有新数据就视为生成完成。0 = 关闭
@@ -250,7 +248,11 @@ WHITELIST_FILE = Path(_str("WHITELIST_FILE") or Path(__file__).with_name("allowe
 #   精选条目：群笔记 + 每个人的档案，一条一条存；模型在聊天中用 memory 工具增改删，后台定期按新记录整理
 #   新对话开头注入群笔记、提问者和被引用者的档案
 MEMORY_ENABLED = _bool("MEMORY_ENABLED", True)
+# bot 的 SQLite 数据库：长期记忆，以及（不管记忆开没开）追问用的对话历史、最近群聊和用量统计
 MEMORY_DB = Path(_str("MEMORY_DB") or WHITELIST_FILE.with_name("memory.db"))
+# 日志文件：每天一个，留 LOG_KEEP_DAYS 天；0 = 只输出到控制台
+LOG_DIR = Path(_str("LOG_DIR") or WHITELIST_FILE.with_name("logs"))
+LOG_KEEP_DAYS = _int("LOG_KEEP_DAYS", 14)
 MEMORY_FILE = Path(_str("MEMORY_FILE") or WHITELIST_FILE.with_name("memory.json"))  # 旧版记忆，首次启动时迁移
 MEMORY_GROUP_CHARS = _int("MEMORY_GROUP_CHARS", 1500)  # 每个聊天的群笔记总字数上限
 MEMORY_PROFILE_CHARS = _int("MEMORY_PROFILE_CHARS", 500)  # 每个人在每个聊天的档案总字数上限

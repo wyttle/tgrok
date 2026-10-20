@@ -5,13 +5,16 @@ Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主
 ## 模块划分
 
 ```text
-bot.py                 入口（python bot.py）：配置日志，然后运行 tgrok.app.main
+bot.py                 入口（python bot.py）：配置控制台日志，然后运行 tgrok.app.main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
 tests/                 pytest 用例（无需网络与真实 Telegram），conftest.py 固定环境变量并在每个测试后还原状态
 tgrok/
 |-- config.py          环境变量解析和常量；其它模块一律在用到时读 config.X
 |-- i18n.py            全部界面和提示词文案，t() 与 phrases()
 |-- jsonstore.py       JSON 文件读写：读取失败回退初始值，写入原子替换（白名单、记忆、梗词典共用）
+|-- db.py              MEMORY_DB 的 SQLite 连接；各模块用 schema() 登记自己的表（记忆、对话历史、最近群聊、用量）
+|-- logs.py            日志格式、按天滚动的日志文件、请求编号（contextvar）和请求内的累计（轮次、工具、token）
+|-- usage.py           模型用量：每次调用一行（功能、模型、token、耗时、成败），/stats 按今天和近 7 天汇总
 |-- tg_auth.py         白名单和管理员判定
 |-- app.py             组装 python-telegram-bot 应用、注册处理函数和命令菜单、启动日志
 |-- handlers.py        普通消息：要不要回、拼出对话、生成回复、记进缓存、最近群聊和记忆；静默旁听；媒体预读
@@ -19,8 +22,8 @@ tgrok/
 |-- prompt.py          系统提示词，以及每条 user 消息的拼装（说话人、引用/转发的真正作者、记忆、梗、最近群聊、时间、图片）
 |-- media.py           图片、贴纸、相册和视频语音：data URL、媒体说明（转述、media_id 或看不到）、相册缓存、媒体登记和预读
 |-- viewer.py          让 GEMINI_MEDIA_MODEL 看/听媒体：watch_media 和后台预读共用，按 file_unique_id 缓存转述
-|-- recent.py          每个群最近的聊天（内存），提问时附上，每行写明谁说的、回复谁
-|-- conversations.py   追问用的对话缓存和历史截断
+|-- recent.py          每个群最近的聊天（存数据库，只留 RECENT_CHAT_MINUTES 分钟内的），提问时附上，每行写明谁说的、回复谁
+|-- conversations.py   追问用的对话历史（内存层带图原样，数据库层纯文本、跨重启）和历史截断
 |-- chat.py            一次回复的流程：模型轮次循环、重试、备用模型切换、工具轮、取消按钮
 |-- bubble.py          一条回复在 Telegram 上的显示：占位、流式编辑、分段、进度、取消、报错、定稿
 |-- render.py          模型输出 → 富文本 html：白名单标签和转义、配平、<p>/<br> 段落结构、长回复自动折叠、按段落拆分不切断标签
@@ -107,8 +110,6 @@ Telegram update
      Bubble.open 后台发占位消息和取消按钮（与首轮请求并发），注册 active_generations
      -> chat._generate：最多 SEARCH_MAX_ROUNDS + 1 轮，最后一轮不挂工具
         -> chat._call_model：adapter.run_round，正文增量交给 Bubble.on_text
-           首轮走 chat._race：主模型 HEDGE_AFTER 秒既没出字也没跑完，就同时让 llm.helper_adapter 作答，
-           两路都先攒着，先出字（或先跑完）的一路放出来、另一路取消；帮手胜出时整条换成帮手，末尾注明
            零输出就出错：配了备用模型就整条换成备用模型（去掉厂商扩展字段；两边工具能力不同时
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
@@ -135,7 +136,6 @@ Telegram update
 - `calculate` 只解释白名单 AST 节点，没有名字查找和属性访问；整数位数、幂指数、阶乘和表达式长度都有上限。
 - 网页正文提取运行在独立进程，避免 trafilatura 和 lxml 的 CPU 工作阻塞事件循环。
 - 气泡更新单飞且在后台执行，编辑的网络错误只丢该次显示、不打断生成；上一次更新还在途时进度刷新直接跳过，不让模型轮次和工具等 Telegram（群里被限流时一等就是几十秒）。定稿、取消和报错前先等在途编辑落地。占位消息被限流时等一下重发一次；还是发不出去（例如 bot 被踢出群）才取消本次生成。
-- 抢答（`chat._race`）只在首轮：帮手模型拿不到这次工具调用的结果，工具之后的轮次仍由主模型完成。两路都失败时抛出主模型的错误，照常走重试和备用模型；用户取消时两路一起取消。
 - 群聊里每条 user 消息、被引用消息的作者和记忆里的说话人都标成「名字（@用户名，id）」，同名的人靠 id 区分；频道和匿名管理员发的看 `sender_chat`，转发的看 `forward_origin`。系统提示词要求把话安在真正说的人头上。截断后的历史从 user 开始，满足严格交替的接口和本地模型模板。
 - 最近群聊和媒体转述都挂在最新一条 user 消息上，前面的历史字节不变，prompt cache 照样命中。
 - 只订阅 `message` 和 `callback_query` 更新：编辑旧消息不会触发重复回答。
@@ -145,17 +145,19 @@ Telegram update
 
 ## 运行时状态归属
 
-- `llm.adapter`、`llm.fallback_adapter`、`llm.helper_adapter`：主模型、备用模型和 Gemini 帮手模型（`GEMINI_HELPER_MODEL`，留空沿用 `GEMINI_MEDIA_MODEL`；抢答和记忆整理用）的适配器，各自记着自己的降级状态。`config.fallback_endpoint()` 里留空的协议、地址和 key 沿用主模型，额外参数不继承。
+- `llm.adapter`、`llm.fallback_adapter`、`llm.helper_adapter`：主模型、备用模型和 Gemini 帮手模型（`GEMINI_HELPER_MODEL`，留空沿用 `GEMINI_MEDIA_MODEL`；记忆整理用）的适配器，各自记着自己的降级状态。`config.fallback_endpoint()` 里留空的协议、地址和 key 沿用主模型，额外参数不继承。
 - `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
 - `tools.research._slots`：限制同时进行的调研任务数（`RESEARCH_CONCURRENCY`）的信号量，换事件循环时重建。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
 - `tools.send_image.outbox`：contextvar，`chat.stream_reply` 为每次回复放一个空列表，send_image 把图片攒进去；回复成功定稿后才发，被取消或失败时不发。发出去的图在返回的回复文本末尾记一句，追问时模型知道自己发过什么。
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
-- `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
+- `conversations._cache`、`_sizes`、`_owners`、`_total`：追问用的对话历史（带图片原样）、字符量计数和提问者。同时写进 `MEMORY_DB` 的 `conversations` 表：去掉系统提示词、图片换成「[图片]」，保留 `CONVERSATION_KEEP_DAYS` 天；内存里没有时从表里取，系统提示词换成当前的。`/forget` 和 `/forgetme` 一起删。
 - `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。
 - `media.watch_cache`：配了 `GEMINI_MEDIA_MODEL` 且主模型走工具循环时，bot 被叫到的那条消息和它引用的消息里的视频、语音等按（聊天, 消息 id）登记 file_id 和 bot，最多 300 条；`watch_media` 按 media_id 取出，有预读就等那一份，否则下载（官方 Bot API 上限 20MB）、整段内联发给 Gemini（`llm.gemini.gemini_client`，与 grounding 共用），转述回灌主模型。别的聊天的 media_id 取不到；重启后清空。有文字也有媒体时，文字和媒体说明都交给模型。
 - `viewer._jobs`：媒体预读任务，按 file_unique_id 存最近 500 份，最多同时 4 个（`viewer._slots`，换事件循环时重建）。转述好了就直接写进媒体说明；`viewer._used` 记着哪些转述已经交给过主模型，之后的 `watch_media` 按具体问题重新看。
-- `recent._chats`：每个群最近 80 条消息（最多 500 个群），只在内存里；注入时按 `RECENT_CHAT_MINUTES` 和 `RECENT_CHAT_COUNT` 截取，不含当前提问和被引用的那条。
+- `recent` 表（`MEMORY_DB`）：群消息和 bot 回复，每次写入时删掉超过 `RECENT_CHAT_MINUTES` 的；注入时按 `RECENT_CHAT_MINUTES` 和 `RECENT_CHAT_COUNT` 截取，不含当前提问和被引用的那条。记着发消息的人（bot 的回复记提问者），`/forget`、`/forgetme` 一起删。
+- `usage` 表（`MEMORY_DB`）：`chat._call_model`（回复，每轮一行，失败也记）、`tools.research`（每个研究员）、`web._search_gemini_grounded`（搜索）、`viewer._generate`（媒体）、`memory.consolidate`（记忆整理）各记一行，保留 90 天。token 来自各适配器流里的用量（`RoundResult.usage`；OpenAI 兼容接口请求 `stream_options.include_usage`，后端拒绝时去掉并记住）、Gemini 的 `usage_metadata`、omp 的事件流。
+- `logs._current`：当前请求（`handlers.handle_message` 决定要回复时 `logs.begin()`），日志行带 `#编号`；子任务继承它。请求内的模型轮次、工具名和 token 累计在上面，结束时打一行汇总。日志同时写入 `LOG_DIR/bot.log`，每天零点换文件，留 `LOG_KEEP_DAYS` 天；httpx、Google SDK 的逐请求 INFO 压到 WARNING。
 - `memory.store`：`MEMORY_DB` 里的三张表。`messages`（+ `messages_fts`）是原始记录，三个字以上的检索词走 trigram 全文索引，更短的退回 LIKE；`msg_id` 是 Telegram 消息 id，（聊天, msg_id）唯一，同一条消息既旁听到又被引用时只记一次；`notes` 是精选条目，`user_id` 为空是群笔记，否则是这个人在这个聊天的档案，可带到期时间；`progress` 记每个聊天整理到哪条记录。所有读写都很小，直接在事件循环线程里同步执行。
 - 注入：`memory.memory_block` 只拼进一段对话的首条 user 消息：群笔记、提问者和被引用者的档案（`MEMORY_GROUP_CHARS` / `MEMORY_PROFILE_CHARS` 限制总量），加上 3 天内最近 5 条提问；每条都标距今多久，过期条目不显示。
 - 写入：`memory` 工具和后台整理都走 `notes.apply`，超出字数上限时整批拒绝并把现有条目交还模型去合并或删除，不会悄悄淘汰。整理只执行模型提出的操作，没提到的条目原样保留。

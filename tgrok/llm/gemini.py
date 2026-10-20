@@ -7,7 +7,7 @@ import base64
 import re
 
 from .. import config
-from .base import BaseAdapter, RequestOptions, RoundResult, watch_idle
+from .base import BaseAdapter, RequestOptions, RoundResult, Usage, watch_idle
 
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
 
@@ -59,8 +59,9 @@ class GeminiAdapter(BaseAdapter):
         )
 
     async def _drain(self, stream, on_text) -> RoundResult:
-        citations, content = await drain_stream(stream, on_text)
-        return RoundResult(content=content, citations=citations)
+        usage = Usage()
+        citations, content = await drain_stream(stream, on_text, usage)
+        return RoundResult(content=content, citations=citations, usage=usage)
 
 
 def to_gemini_contents(history: list[dict]):
@@ -93,10 +94,23 @@ def to_gemini_contents(history: list[dict]):
     return system_text, contents
 
 
-async def drain_stream(stream, on_text) -> tuple[list[dict], str]:
-    """消费 Gemini 原生流：正文交给 on_text，聚合 grounding 引用（去重）。返回（引用列表, 正文）。"""
+def usage_of(resp) -> Usage:
+    """Gemini 响应（或流里的一块）报的 token 用量；输出算上思考 token。"""
+    meta = getattr(resp, "usage_metadata", None)
+    if meta is None:
+        return Usage()
+    return Usage(getattr(meta, "prompt_token_count", None) or 0,
+                 (getattr(meta, "candidates_token_count", None) or 0) + (getattr(meta, "thoughts_token_count", None) or 0))
+
+
+async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[list[dict], str]:
+    """消费 Gemini 原生流：正文交给 on_text，聚合 grounding 引用（去重），token 用量写进 usage。
+    返回（引用列表, 正文）。"""
     content, citations, seen = "", [], set()
     async for chunk in watch_idle(stream, lambda: bool(content), "Gemini"):
+        reported = usage_of(chunk)
+        if usage is not None and (reported.input or reported.output):
+            usage.input, usage.output = reported.input, reported.output  # 每块报的是累计值
         text = getattr(chunk, "text", None)
         if text:
             content += text

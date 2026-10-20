@@ -39,11 +39,23 @@ def test_conversation_cache_evicts_by_content_budget():
     conversations.remember(1, 3, [{"role": "user", "content": "ddd"}])
     assert list(conversations._cache) == [(1, 1), (1, 3)]
     assert conversations._total == sum(conversations._sizes.values()) == 8
-    conversations._cache.clear()
-    conversations._sizes.clear()
-    conversations._total = 0
+    conversations.clear()
     conversations.remember(2, 1, [{"role": "user", "content": "x" * 20}])  # 单条超预算也留着
     assert list(conversations._cache) == [(2, 1)]
+
+
+def test_follow_up_context_survives_restart():
+    image = [{"type": "text", "text": "这是什么"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]
+    history = [{"role": "system", "content": "旧的系统提示词"}, {"role": "user", "content": image},
+               {"role": "assistant", "content": "一只猫"}]
+    conversations.remember(-5, 77, history, user_id=6)
+    assert conversations.get(-5, 77) is history  # 重启前：内存里原样（带图）
+    for key in list(conversations._cache):  # 模拟重启：内存层清空，数据库还在
+        conversations._evict(key)
+    restored = conversations.get(-5, 77)
+    assert restored[0] == prompt.system_message()  # 系统提示词换成当前的
+    assert restored[1:] == [{"role": "user", "content": "这是什么\n[图片]"}, {"role": "assistant", "content": "一只猫"}]
+    assert conversations.forget_user(6) == 1 and conversations.get(-5, 77) is None
 
 
 def test_trimmed_history_starts_with_user():

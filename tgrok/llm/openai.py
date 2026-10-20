@@ -3,7 +3,7 @@
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from .base import BaseAdapter, RequestOptions, RoundResult, watch_idle
+from .base import BaseAdapter, RequestOptions, RoundResult, Usage, watch_idle
 
 
 class OpenAIAdapter(BaseAdapter):
@@ -21,10 +21,13 @@ class OpenAIAdapter(BaseAdapter):
             max_retries=0,
         )
         self.token_param = "max_tokens"
+        self.usage_supported = True  # stream_options.include_usage：流的最后一块带 token 用量
 
     async def _open(self, history: list[dict], opts: RequestOptions):
         kwargs = {"model": self.model, "messages": history, "stream": True,
                   self.token_param: config.MAX_TOKENS, **opts.sampling}
+        if self.usage_supported:
+            kwargs["stream_options"] = {"include_usage": True}
         if opts.extra_body:
             kwargs["extra_body"] = opts.extra_body
         if opts.tools:
@@ -37,19 +40,27 @@ class OpenAIAdapter(BaseAdapter):
         if kind == "token_param" and self.token_param == "max_tokens":
             self.token_param = "max_completion_tokens"
             return True
+        if kind == "stream_options" and self.usage_supported:
+            self.usage_supported = False
+            return True
         return super()._degrade(e, kind, opts)
 
     async def _drain(self, stream, on_text) -> RoundResult:
-        calls, content = await drain_stream(stream, on_text)
-        return RoundResult(calls=calls, content=content)
+        usage = Usage()
+        calls, content = await drain_stream(stream, on_text, usage)
+        return RoundResult(calls=calls, content=content, usage=usage)
 
 
-async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
-    """消费流式响应：正文片段逐个交给 on_text，tool_call 片段按 index 聚合。
+async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dict[int, dict], str]:
+    """消费流式响应：正文片段逐个交给 on_text，tool_call 片段按 index 聚合，后端报的 token 用量写进 usage。
     返回（聚合后的 tool_calls, 本轮完整正文）。"""
     calls: dict[int, dict] = {}
     content = ""
     async for chunk in watch_idle(stream, lambda: bool(content) and not calls, "LLM"):
+        reported = getattr(chunk, "usage", None)
+        if usage is not None and reported is not None:
+            usage.input = reported.prompt_tokens or 0
+            usage.output = reported.completion_tokens or 0
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta

@@ -89,6 +89,9 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_FALLBACK_PROTOCOL` / `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` | fallback protocol, endpoint, and key; empty = same as the primary model | (empty) |
 | `LLM_FALLBACK_EXTRA_BODY` | extra request params for the fallback model (not inherited from `LLM_EXTRA_BODY`) | (empty) |
 | `MAX_HISTORY` | messages kept per conversation | `20` |
+| `CONVERSATION_KEEP_DAYS` | replies to bot messages younger than this pick up their conversation, also after restarts | `7` |
+| `MEMORY_DB` | SQLite database for memory, follow-up history, recent group chat, and usage stats | `memory.db` next to the whitelist file |
+| `LOG_DIR` / `LOG_KEEP_DAYS` | daily log files and how many days to keep; `0` days = console only | `logs/` next to the whitelist file / `14` |
 | `MEMORY_ENABLED` | per-chat long-term memory: curated entries plus a searchable chat log | `true` |
 | `MEMORY_GROUP_CHARS` | character limit of a chat's group notes | `1500` |
 | `MEMORY_PROFILE_CHARS` | character limit of each person's profile in a chat | `500` |
@@ -101,8 +104,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `GEMINI_MEDIA_MODEL` | Gemini model that watches videos and listens to voice messages; also views images when vision is off. Uses `GEMINI_BASE_URL` / `GEMINI_API_KEY` | (empty) |
 | `MEDIA_PREFETCH` | transcribe videos and voice messages in the background as soon as they appear | `true` |
-| `GEMINI_HELPER_MODEL` | Gemini model for memory consolidation and racing; empty = reuse `GEMINI_MEDIA_MODEL` | (empty) |
-| `HEDGE_AFTER` | seconds without text or a tool call from the main model before the helper answers in parallel (first to produce text wins); `0` = off | `8` |
+| `GEMINI_HELPER_MODEL` | Gemini model for memory consolidation; empty = reuse `GEMINI_MEDIA_MODEL` | (empty) |
 | `RECENT_CHAT_COUNT` | recent group messages attached to a question; `0` = off | `15` |
 | `RECENT_CHAT_MINUTES` | only recent messages from this many minutes back | `60` |
 | `MAX_IMAGES` | images attached per request | `4` |
@@ -140,6 +142,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `/adduser 123456789` | add user(s) to the whitelist (space-separated IDs) |
 | `/deluser 123456789` | remove user(s) from the whitelist |
 | `/listusers` | show the current whitelist |
+| `/stats` | model calls and tokens for today and the last 7 days, by feature (replies, research, search, media, memory upkeep) and model |
 | `/memory` | show this chat's memory entries with their numbers (admins; anyone authorized in a private chat) |
 | `/forget [numbers]` | delete the listed entries, or with no numbers clear this chat's memory and log (same permissions) |
 | `/forgetme` | delete your profile and messages in every chat (authorized users) |
@@ -204,15 +207,11 @@ a cloud API, images leave your server.
 - media are sent to the Gemini service; after a bot restart, media in old messages must be sent again to be viewed
 - **Prefetch**: every video, voice message, etc. the bot receives (including group messages that don't mention it) is transcribed in the background right away, once per file and at most 4 at a time. When someone later quotes it or asks "what did he just say in that voice message", the transcript is already in the question and the main model needs no tool round; if it isn't ready yet, `watch_media` waits for that same job instead of asking again. Voice and video messages in observed groups are logged with their transcript
 
-**Recent group chat.** People often ask the bot about what was just said. Every group message the bot receives (all of them once privacy mode is off) is kept in memory per group, along with the bot's own replies; a question gets the latest `RECENT_CHAT_COUNT` messages from the last `RECENT_CHAT_MINUTES` minutes attached, each line as "time who replying to whom: text", with transcripts for voice and video. Follow-ups to the bot only get the messages since that reply. Memory-only; cleared on restart.
+**Recent group chat.** People often ask the bot about what was just said. Every group message the bot receives (all of them once privacy mode is off) is stored per group, along with the bot's own replies; a question gets the latest `RECENT_CHAT_COUNT` messages from the last `RECENT_CHAT_MINUTES` minutes attached, each line as "time who replying to whom: text", with transcripts for voice and video. Follow-ups to the bot only get the messages since that reply. Stored in `MEMORY_DB`, so a restart doesn't lose it; older lines are deleted as new ones arrive.
 
 **Keeping speakers straight.** When someone replies to another person's message and mentions the bot, the quoted message is labeled "[Quoted message] sent by: Li (not the person asking)" and the asker's words "[Question] Qiang replied to the message above and asks you: …"; the system prompt tells the model to attribute words to whoever actually said them ("I" in the quoted message means its author). Forwards name the original author (the forwarder only forwarded it), channel and anonymous-admin posts are labeled by the channel, a partial quote is shown, and quoting your own message is marked as such. In the chat log, the quoted words are stored as a separate line under their real author (deduplicated by Telegram message id) and the question only as "(replying to a message from Li) is this true", so later recall and memory consolidation don't pin someone else's words on the asker.
 
-**Speed.** With `GEMINI_HELPER_MODEL` (or just `GEMINI_MEDIA_MODEL`) set:
-
-- **Racing**: if the main model has produced neither text nor a tool call after `HEDGE_AFTER` seconds (reasoning models often think for 10+ seconds), the helper (native Gemini with built-in Google Search) answers in parallel; whichever produces text first is used, the other is cancelled, and the reply notes who answered. Only the first round races; rounds after tool results stay on the main model. Measured: gpt-6.1-sol (reasoning effort high) alone took 17.6 s; with `HEDGE_AFTER=5` and `gemini-3-flash` the answer came in 6.8 s. Pick a helper with a fast first token (`gemini-3-flash` 1.4 s vs `gemini-3.8-flash-high` 4.9 s on the same question)
-- **Memory consolidation** runs on the helper instead of the main model, falling back to the main model if it fails
-- Display updates never hold up generation: slow or rate-limited Telegram edits don't stall the model or tools, and a rate-limited placeholder is retried instead of dropping the reply
+**Speed.** With `GEMINI_HELPER_MODEL` (or just `GEMINI_MEDIA_MODEL`) set, memory consolidation runs on the helper instead of the main model, falling back to the main model if it fails. Display updates never hold up generation: slow or rate-limited Telegram edits don't stall the model or tools, and a rate-limited placeholder is retried instead of dropping the reply.
 
 ## Web search
 
@@ -291,11 +290,12 @@ needed — running it at home on the same machine as LM Studio works fine.
 ```bash
 cp .env.example .env   # fill in your settings (or run configure.py)
 docker compose up -d --build
-docker compose logs -f # watch logs
+docker compose logs -f # watch logs (also written to ./data/logs/bot.log, one file per day)
 ```
 
 - `restart: unless-stopped` brings it back after crashes and server reboots
-- the whitelist persists in `./data/allowed_users.json` across container rebuilds
+- the whitelist, memory database, and logs persist in `./data` across container rebuilds
+- every request gets a number (`#12`) on all of its log lines, and ends with one summary line: time, model rounds, tools used, tokens, reply length
 - to reach an LLM on the host from inside the container, use `http://host.docker.internal:port/v1`
   (`localhost` won't work inside Docker)
 
@@ -330,5 +330,5 @@ journalctl -u tgbot -f
 - **The model says it can't access the internet**: by default it really can't. Set
   `SEARCH_PROVIDER` to enable web search (see "Web search" above).
 - **"Failed to call the model"**: verify the model service is running and the selected protocol's address and model match it: `LLM_BASE_URL` for OpenAI/Claude, `GEMINI_BASE_URL` for native Gemini, plus `LLM_MODEL`.
-- **Conversations forgotten after restart**: history lives in memory and is lost on restart;
-  replying to the bot still works, with only its last answer as context.
+- **Conversations forgotten after restart**: follow-up history is stored in `MEMORY_DB` for `CONVERSATION_KEEP_DAYS`
+  days; older replies still work, with only the bot's answer as context. Images in stored history come back as "[image]".

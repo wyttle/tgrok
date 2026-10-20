@@ -1,12 +1,26 @@
+# 密钥和配置（都带 key 的明文）
 .env
-.env.bak-switch
-.venv/
-__pycache__/
+.env.bak*
+.env.safebak*
+*.key
+*key.txt
+profiles/
+omp/
+
+# 运行时数据：Docker 挂载的 data/，本地直接运行时写在 tgrok/ 旁边的文件
+data/
 allowed_users.json
 memory.json
 memory.json.tmp
+memory.json.migrated
+memory.db
+memory.db-*
 slang.json
 slang.json.tmp
-profiles/
+logs/
 
-omp/
+# 手工备份
+*.bak-*
+
+.venv/
+__pycache__/

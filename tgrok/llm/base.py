@@ -12,11 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Usage:
+    """一次调用的 token 用量。input 含缓存命中和缓存写入，output 含推理 token；后端没报时为 0。"""
+    input: int = 0
+    output: int = 0
+
+
+@dataclass
 class RoundResult:
     """一轮生成的产物。calls 是按序号聚合的工具调用槽位 {id, name, arguments, extra}。"""
     calls: dict[int, dict] = field(default_factory=dict)
     content: str = ""
     citations: list[dict] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
 
 
 @dataclass
@@ -204,6 +212,8 @@ def rejected_param(e: BaseException, extra_keys=()) -> str | None:
 
     if "max_completion_tokens" in text:
         return "token_param"
+    if _param_matches(param, "stream_options") or (not param and "stream_options" in text):
+        return "stream_options"
     if any(_param_matches(param, name) for name in ("temperature", "top_p")):
         return "sampling"
     if not param and rejected and any(name in text for name in ("temperature", "top_p")):

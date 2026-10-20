@@ -1,23 +1,38 @@
-"""每个群最近的聊天（只在内存里）：群友常常就刚才聊的内容直接 @bot，提问时附上这段背景。
+"""每个群最近的聊天：群友常常就刚才聊的内容直接 @bot，提问时附上这段背景。
 
 bot 收到的群消息都记（关闭隐私模式后是全部群消息，否则只有叫到 bot 的），也记 bot 自己的回复。
+存在数据库里，重启后接着用；超过 RECENT_CHAT_MINUTES 的随写随删。
 每行都写明谁说的、回复的是谁，模型才不会把话安错人。语音、视频等媒体在渲染时取预读好的转述。
 """
 
 import time
-from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime
 
 from telegram import Message
 
 from . import config, media, prompt, viewer
+from .db import db, schema
 from .i18n import t
 
-KEEP_PER_CHAT = 80
-KEEP_CHATS = 500
 LINE_CHARS = 300
 BOT_LINE_CHARS = 200
+
+schema("""
+CREATE TABLE IF NOT EXISTS recent (
+    chat_id INTEGER NOT NULL,
+    msg_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    user_id INTEGER,          -- 发消息的人；bot 的回复记提问者。/forgetme 时一起删
+    who TEXT NOT NULL,
+    text TEXT NOT NULL,
+    reply_to TEXT NOT NULL,   -- 回复的那条消息的发送者标识；不是回复时为空串
+    media_uid TEXT,
+    media_what TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chat_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS recent_ts ON recent(ts);
+""")
 
 
 @dataclass
@@ -26,12 +41,9 @@ class Entry:
     ts: float
     who: str
     text: str
-    reply_to: str  # 回复的那条消息的发送者标识；不是回复时为空串
+    reply_to: str
     media_uid: str | None = None
     media_what: str = ""
-
-
-_chats: "OrderedDict[int, deque[Entry]]" = OrderedDict()
 
 
 def _clip(text: str, limit: int) -> str:
@@ -39,14 +51,12 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _queue(chat_id: int) -> deque:
-    q = _chats.get(chat_id)
-    if q is None:
-        q = _chats[chat_id] = deque(maxlen=KEEP_PER_CHAT)
-        while len(_chats) > KEEP_CHATS:
-            _chats.popitem(last=False)
-    _chats.move_to_end(chat_id)
-    return q
+def _save(chat_id: int, user_id: int | None, e: Entry) -> None:
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO recent(chat_id, msg_id, ts, user_id, who, text, reply_to, media_uid, media_what) "
+                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (chat_id, e.msg_id, e.ts, user_id, e.who, e.text, e.reply_to, e.media_uid, e.media_what))
+    conn.execute("DELETE FROM recent WHERE ts < ?", (time.time() - config.RECENT_CHAT_MINUTES * 60,))
 
 
 def _reply_label(m: Message, bot_id: int) -> str:
@@ -73,16 +83,17 @@ def add(m: Message, bot_id: int) -> None:
     origin = getattr(m, "forward_origin", None)
     if origin is not None:
         text = t("recent_forward", origin=prompt.origin_label(origin)) + text
-    _queue(m.chat_id).append(Entry(
+    author = m.from_user.id if m.from_user is not None and m.sender_chat is None else None
+    _save(m.chat_id, author, Entry(
         m.message_id, m.date.timestamp() if m.date else time.time(), who, _clip(text, LINE_CHARS),
         _reply_label(m, bot_id), entry["uid"] if entry else None, media.describe(entry) if entry else ""))
 
 
-def add_bot(chat_id: int, msg_ids: list[int], text: str, asker: str) -> None:
-    """记下 bot 自己的一条回复（分段时记第一段的 id，其余段也算在内）。"""
-    if not config.RECENT_CHAT_COUNT or chat_id not in _chats or not msg_ids:
+def add_bot(chat_id: int, msg_ids: list[int], text: str, asker: str, asker_id: int) -> None:
+    """记下 bot 自己的一条回复（分段时记第一段的 id，其余段也算在内）。私聊（chat_id 为正）不记。"""
+    if not config.RECENT_CHAT_COUNT or chat_id > 0 or not msg_ids:
         return
-    _queue(chat_id).append(Entry(msg_ids[0], time.time(), t("recent_you"), _clip(text, BOT_LINE_CHARS), asker))
+    _save(chat_id, asker_id, Entry(msg_ids[0], time.time(), t("recent_you"), _clip(text, BOT_LINE_CHARS), asker))
 
 
 def _line(e: Entry) -> str:
@@ -100,16 +111,26 @@ def _line(e: Entry) -> str:
 
 def block(chat_id: int, before_id: int, since: float, skip: set[int] = frozenset()) -> str:
     """当前提问之前、since 之后的最近几条群聊（不含 skip 里的消息，比如被引用的那条）；没有返回空串。"""
-    q = _chats.get(chat_id)
-    if not q or not config.RECENT_CHAT_COUNT:
+    if not config.RECENT_CHAT_COUNT:
         return ""
     since = max(since, time.time() - config.RECENT_CHAT_MINUTES * 60)
-    picked = [e for e in q if e.ts >= since and e.msg_id < before_id and e.msg_id not in skip]
-    picked = picked[-config.RECENT_CHAT_COUNT:]
+    rows = db().execute(
+        "SELECT msg_id, ts, who, text, reply_to, media_uid, media_what FROM recent "
+        "WHERE chat_id = ? AND ts >= ? AND msg_id < ? ORDER BY msg_id DESC LIMIT ?",
+        (chat_id, since, before_id, config.RECENT_CHAT_COUNT + len(skip))).fetchall()
+    picked = [Entry(**dict(r)) for r in rows if r["msg_id"] not in skip][:config.RECENT_CHAT_COUNT]
     if not picked:
         return ""
-    return "[" + t("recent_header") + "\n" + "\n".join(_line(e) for e in picked) + "]"
+    return "[" + t("recent_header") + "\n" + "\n".join(_line(e) for e in reversed(picked)) + "]"
+
+
+def forget_chat(chat_id: int) -> int:
+    return db().execute("DELETE FROM recent WHERE chat_id = ?", (chat_id,)).rowcount
+
+
+def forget_user(user_id: int) -> int:
+    return db().execute("DELETE FROM recent WHERE user_id = ?", (user_id,)).rowcount
 
 
 def clear() -> None:
-    _chats.clear()
+    db().execute("DELETE FROM recent")

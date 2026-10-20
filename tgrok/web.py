@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from . import config, llm
+from . import config, llm, logs, usage
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,8 @@ async def _search_gemini_grounded(query: str) -> str | None:
         tools.append(llm_gemini.gtypes.Tool(url_context=llm_gemini.gtypes.UrlContext()))
     except AttributeError:
         pass
-    logger.info("Gemini grounding 检索 (%s): %s", config.GEMINI_SEARCH_MODEL, query)
+    logger.info("Gemini grounding 检索 (%s): %s", config.GEMINI_SEARCH_MODEL, logs.one_line(query, 120))
+    t0 = time.monotonic()
     try:
         resp = await llm_gemini.gemini_client.aio.models.generate_content(
             model=config.GEMINI_SEARCH_MODEL,
@@ -158,6 +159,7 @@ async def _search_gemini_grounded(query: str) -> str | None:
             ),
         )
     except Exception as e:
+        usage.record("search", config.GEMINI_SEARCH_MODEL, 0, 0, time.monotonic() - t0, ok=False)
         if llm.is_quota_error(e):
             _grounding_cooldown_until = time.monotonic() + config.GEMINI_SEARCH_COOLDOWN
             logger.warning(
@@ -167,6 +169,8 @@ async def _search_gemini_grounded(query: str) -> str | None:
         else:
             logger.warning("Gemini grounding 检索失败：%s: %s", type(e).__name__, str(e)[:200])
         return None
+    spent = llm_gemini.usage_of(resp)
+    usage.record("search", config.GEMINI_SEARCH_MODEL, spent.input, spent.output, time.monotonic() - t0)
     text = (getattr(resp, "text", None) or "").strip()
     if not text:
         return None

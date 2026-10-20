@@ -86,6 +86,9 @@ python bot.py
 | `LLM_FALLBACK_PROTOCOL` / `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` | 备用模型的协议、地址和 key；留空沿用主模型 | （空） |
 | `LLM_FALLBACK_EXTRA_BODY` | 备用模型的额外请求参数（不继承 `LLM_EXTRA_BODY`） | （空） |
 | `MAX_HISTORY` | 多轮对话保留的消息条数 | `20` |
+| `CONVERSATION_KEEP_DAYS` | 回复 bot 多少天以内的消息还能接上上下文（重启后也能） | `7` |
+| `MEMORY_DB` | SQLite 数据库：记忆、追问用的对话历史、最近群聊和用量统计 | 白名单文件旁的 `memory.db` |
+| `LOG_DIR` / `LOG_KEEP_DAYS` | 日志文件目录（每天一个文件）和保留天数；天数为 `0` 只输出到控制台 | 白名单文件旁的 `logs/` / `14` |
 | `MEMORY_ENABLED` | 按聊天保存的长期记忆：精选条目 + 可检索的原始记录 | `true` |
 | `MEMORY_GROUP_CHARS` | 每个聊天的群笔记字数上限 | `1500` |
 | `MEMORY_PROFILE_CHARS` | 每个人在每个聊天的档案字数上限 | `500` |
@@ -98,8 +101,7 @@ python bot.py
 | `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
 | `GEMINI_MEDIA_MODEL` | 看视频、听语音用的 Gemini 模型；没开视觉时图片也交给它看。走 `GEMINI_BASE_URL` / `GEMINI_API_KEY` | （空） |
 | `MEDIA_PREFETCH` | 视频语音一出现就让 Gemini 在后台转述，问到时直接带上 | `true` |
-| `GEMINI_HELPER_MODEL` | 记忆整理和抢答用的 Gemini 模型；留空沿用 `GEMINI_MEDIA_MODEL` | （空） |
-| `HEDGE_AFTER` | 主模型多少秒没出字也没调工具就同时让帮手模型作答，谁先出字用谁；`0` 关闭 | `8` |
+| `GEMINI_HELPER_MODEL` | 记忆整理用的 Gemini 模型；留空沿用 `GEMINI_MEDIA_MODEL` | （空） |
 | `RECENT_CHAT_COUNT` | 提问时附上的最近群聊条数；`0` 关闭 | `15` |
 | `RECENT_CHAT_MINUTES` | 最近群聊只取这么多分钟以内的 | `60` |
 | `MAX_IMAGES` | 单次请求最多附带的图片数 | `4` |
@@ -137,6 +139,7 @@ python bot.py
 | `/adduser 123456789` | 添加用户到白名单（可空格分隔多个 ID） |
 | `/deluser 123456789` | 从白名单移除用户 |
 | `/listusers` | 查看当前白名单 |
+| `/stats` | 今天和近 7 天的模型调用次数和 token，按功能（回复、调研、搜索、看视频/听语音、记忆整理）和模型分开 |
 | `/memory` | 查看本聊天的记忆条目和编号（管理员；私聊里白名单用户也可用） |
 | `/forget [编号]` | 删掉指定条目；不带编号则清空本聊天的记忆和聊天记录（权限同上） |
 | `/forgetme` | 删掉你在所有聊天里的档案和聊天记录（白名单用户可用） |
@@ -197,15 +200,11 @@ python bot.py
 - 媒体会发给 Gemini 服务；bot 重启后旧消息里的媒体要重新发一次才能看
 - **预读**：bot 收到的视频、语音等（包括没叫它的群消息）一出现就在后台让 Gemini 完整转述，同一个文件只做一次，最多同时 4 个。之后有人引用它提问，或者问「他刚才语音说啥」，转述直接写在提问里，主模型不用再调工具等一轮；转述还没好时 `watch_media` 等这一份，不重复请求。旁听群里的语音视频记进原始记录时也带上转述
 
-**最近群聊。** 群友常常就刚才聊的内容直接 @bot。bot 收到的每条群消息（关闭隐私模式后是全部群消息）都在内存里每群留一段，连同 bot 自己的回复；提问时附上 `RECENT_CHAT_MINUTES` 分钟内最近 `RECENT_CHAT_COUNT` 条，每行写明「几点 谁 回复 谁：说了什么」，语音视频带上转述。回复 bot 追问时只附上那条回答之后的新消息。只存在内存里，重启清空。
+**最近群聊。** 群友常常就刚才聊的内容直接 @bot。bot 收到的每条群消息（关闭隐私模式后是全部群消息）都按群存下来，连同 bot 自己的回复；提问时附上 `RECENT_CHAT_MINUTES` 分钟内最近 `RECENT_CHAT_COUNT` 条，每行写明「几点 谁 回复 谁：说了什么」，语音视频带上转述。回复 bot 追问时只附上那条回答之后的新消息。存在 `MEMORY_DB` 里，重启不丢，更早的随新消息写入时删掉。
 
 **分清谁说的。** 回复别人的消息并 @bot 时，被引用的消息单独标成「【被引用的消息】发送者：小李（不是提问者）」，提问者的话标成「【提问】阿强 回复了上面这条消息，问你：…」；系统提示词要求模型把话安在真正说的人头上，消息里的「我」指它的作者。转发的消息写明原作者（转发的人只是转发），频道和匿名管理员发的按频道名标注，提问者只引用了一段时也会写出那一段，引用自己的消息会标明是本人。记进原始记录时，被引用的原话按原作者单独记一条（按 Telegram 消息 id 去重），提问只记「（回复了 小李 的消息）这是真的吗」，以后查记录、整理记忆时不会把别人的话算到提问者头上。
 
-**提速。** 配了 `GEMINI_HELPER_MODEL`（或只配了 `GEMINI_MEDIA_MODEL`）后：
-
-- **抢答**：主模型 `HEDGE_AFTER` 秒既没出字也没开始调工具（推理型模型常常要想十几秒），就同时让帮手模型（Gemini 原生，自带 Google 搜索）回答，谁先出字用谁，另一个立即取消，回复末尾注明由谁抢答。只在第一轮抢，工具结果出来后的轮次仍由主模型完成。实测主模型 gpt-6.1-sol（推理强度 high）单独回答要 17.6 秒，`HEDGE_AFTER=5` + `gemini-3-flash` 抢答 6.8 秒出结果。帮手模型要选首字快的（同一题 `gemini-3-flash` 1.4 秒，`gemini-3.8-flash-high` 4.9 秒）
-- **记忆整理**改用帮手模型，不占主模型的并发和额度；帮手失败时再用主模型
-- 显示更新不再阻塞生成：Telegram 编辑慢或被群限流时，模型和工具照常往下跑；占位消息被限流时等一下重发，不会放弃这条回复
+**提速。** 配了 `GEMINI_HELPER_MODEL`（或只配了 `GEMINI_MEDIA_MODEL`）后，记忆整理改用帮手模型，不占主模型的并发和额度，帮手失败时再用主模型。显示更新不会阻塞生成：Telegram 编辑慢或被群限流时，模型和工具照常往下跑；占位消息被限流时等一下重发，不会放弃这条回复。
 
 ## 联网搜索
 
@@ -276,11 +275,12 @@ Bot 使用**轮询模式**（主动向 Telegram 拉取消息），不需要公�
 ```bash
 cp .env.example .env   # 编辑填好配置（或运行 configure.py）
 docker compose up -d --build
-docker compose logs -f # 查看日志
+docker compose logs -f # 查看日志（同时写在 ./data/logs/bot.log，每天一个文件）
 ```
 
 - `restart: unless-stopped` 保证崩溃或服务器重启后自动拉起
-- 白名单持久化在 `./data/allowed_users.json`，容器重建不丢失
+- 白名单、记忆数据库和日志都在 `./data`，容器重建不丢失
+- 每个请求有一个编号（`#12`），它的每行日志都带上；结束时一行汇总：耗时、模型轮次、用了哪些工具、token、回复字数
 - 容器内访问宿主机上的 LLM 服务要用 `http://host.docker.internal:端口/v1`（容器内 `localhost` 不通）
 
 ### systemd（Linux 裸机替代方案）
@@ -312,4 +312,4 @@ journalctl -u tgbot -f
 - **群里 @ 它没反应**：检查是否关闭了隐私模式（见上文步骤 4），且改完后重新拉群。
 - **模型说自己无法联网**：默认它确实不能。配置 `SEARCH_PROVIDER` 开启联网搜索（见上文「联网搜索」）。
 - **提示调用模型失败**：确认模型服务在运行，并检查所选协议对应的地址和模型：OpenAI/Claude 使用 `LLM_BASE_URL`，Gemini 原生使用 `GEMINI_BASE_URL`，同时确认 `LLM_MODEL`。
-- **多轮对话失忆**：对话历史保存在内存中，bot 重启后会丢失；此时回复 bot 消息仍可继续问，只是只带上 bot 上一条回答作为上下文。
+- **多轮对话失忆**：追问用的对话历史存在 `MEMORY_DB` 里，保留 `CONVERSATION_KEEP_DAYS` 天，重启不丢；更早的回复仍可继续问，只是只带上 bot 那条回答作为上下文。历史里的图片恢复后显示为「[图片]」。

@@ -138,5 +138,9 @@ def user_turn(text: str, images: list[str], chat_id: int, slang_scan: str,
     return {"role": "user", "content": with_time(media.build_content(content, images))}
 
 
+def system_message() -> dict:
+    return {"role": "system", "content": system_prompt(llm.adapter.supports_tool_loop)}
+
+
 def new_conversation(turn: dict) -> list[dict]:
-    return [{"role": "system", "content": system_prompt(llm.adapter.supports_tool_loop)}, turn]
+    return [system_message(), turn]

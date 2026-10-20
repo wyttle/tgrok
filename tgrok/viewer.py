@@ -7,10 +7,11 @@
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 
-from . import config
+from . import config, usage
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,27 @@ def _semaphore() -> asyncio.Semaphore:
     return _slots[1]
 
 
+async def _generate(**kwargs):
+    """一次 Gemini 媒体模型调用，成败和 token 都记进用量。"""
+    from .llm import gemini as llm_gemini
+
+    t0 = time.monotonic()
+    try:
+        resp = await llm_gemini.gemini_client.aio.models.generate_content(model=config.GEMINI_MEDIA_MODEL, **kwargs)
+    except BaseException:
+        usage.record("media", config.GEMINI_MEDIA_MODEL, 0, 0, time.monotonic() - t0, ok=False)
+        raise
+    spent = llm_gemini.usage_of(resp)
+    usage.record("media", config.GEMINI_MEDIA_MODEL, spent.input, spent.output, time.monotonic() - t0)
+    return resp
+
+
 async def look(data: bytes, mime: str, what: str, question: str) -> str:
     """一次 Gemini 调用：看/听这段媒体，按问题转述；空回复返回空串。"""
     from .llm import gemini as llm_gemini
 
     g = llm_gemini.gtypes
-    resp = await llm_gemini.gemini_client.aio.models.generate_content(
-        model=config.GEMINI_MEDIA_MODEL,
+    resp = await _generate(
         contents=[g.Part.from_bytes(data=data, mime_type=mime), t("watch_question", question=question)],
         config=g.GenerateContentConfig(system_instruction=t("watch_viewer_prompt", what=what),
                                        max_output_tokens=MAX_OUTPUT_TOKENS),
@@ -68,9 +83,7 @@ async def check(data: bytes, mime: str, question: str) -> bool | None:
     options = dict(system_instruction=t("image_check_system"), max_output_tokens=256)
     for thinking in (g.ThinkingConfig(thinking_level=g.ThinkingLevel.LOW), None):
         try:
-            resp = await llm_gemini.gemini_client.aio.models.generate_content(
-                model=config.GEMINI_MEDIA_MODEL, contents=contents,
-                config=g.GenerateContentConfig(**options, thinking_config=thinking))
+            resp = await _generate(contents=contents, config=g.GenerateContentConfig(**options, thinking_config=thinking))
             break
         except Exception as e:
             if thinking is None or "thinking" not in str(e).lower():

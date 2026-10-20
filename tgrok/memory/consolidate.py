@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 
-from .. import config, llm
+from .. import config, llm, usage
 from ..i18n import t
 from . import notes, store
 
@@ -54,11 +54,15 @@ async def _ask(history: list[dict]) -> tuple[str, list] | None:
     for adapter in (llm.helper_adapter, llm.adapter, llm.fallback_adapter):
         if adapter is None:
             continue
+        model = getattr(adapter, "model", "")
+        t0 = time.monotonic()
         try:
             result = await adapter.run_round(history, None, _noop)
         except Exception as e:
-            logger.warning("记忆整理调用 %s 失败：%s: %.200s", getattr(adapter, "model", ""), type(e).__name__, e)
+            usage.record("memory", model, 0, 0, time.monotonic() - t0, ok=False)
+            logger.warning("记忆整理调用 %s 失败：%s: %.200s", model, type(e).__name__, e)
             continue
+        usage.record("memory", model, result.usage.input, result.usage.output, time.monotonic() - t0)
         ops = _parse(result.content)
         if ops is not None:
             return result.content, ops

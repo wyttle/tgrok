@@ -12,7 +12,7 @@ import logging
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from .base import BaseAdapter, RequestOptions, RoundResult, error_param, error_text, watch_idle
+from .base import BaseAdapter, RequestOptions, RoundResult, Usage, error_param, error_text, watch_idle
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,9 @@ class ResponsesAdapter(BaseAdapter):
         return False
 
     async def _drain(self, stream, on_text) -> RoundResult:
-        calls, content = await drain_stream(stream, on_text)
-        return RoundResult(calls=calls, content=content)
+        usage = Usage()
+        calls, content = await drain_stream(stream, on_text, usage)
+        return RoundResult(calls=calls, content=content, usage=usage)
 
 
 def _rejects_stateless(e: BaseException) -> bool:
@@ -143,9 +144,9 @@ def _reasoning_input(item) -> dict | None:
                         for s in (getattr(item, "summary", None) or [])]}
 
 
-async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
+async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dict[int, dict], str]:
     """消费 Responses 事件流：正文增量交给 on_text，function_call 按 output_index 聚合，
-    推理条目收集后挂到首个调用的扩展字段，续传时由 to_responses_input 取回。
+    推理条目收集后挂到首个调用的扩展字段，续传时由 to_responses_input 取回；token 用量写进 usage。
     """
     calls: dict[int, dict] = {}
     content = ""
@@ -185,6 +186,10 @@ async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
                 if passback is not None:
                     reasoning.append(passback)
         elif etype in ("response.completed", "response.incomplete"):
+            reported = getattr(getattr(event, "response", None), "usage", None)
+            if usage is not None and reported is not None:
+                usage.input = getattr(reported, "input_tokens", 0) or 0
+                usage.output = getattr(reported, "output_tokens", 0) or 0
             # incomplete 多为 max_output_tokens 用尽：保留已有正文，按完成处理
             if etype == "response.incomplete":
                 logger.warning("Responses 生成未完整结束（多为 MAX_TOKENS 用尽），正文 %d 字", len(content))

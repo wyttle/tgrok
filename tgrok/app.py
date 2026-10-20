@@ -9,7 +9,7 @@ from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler
 
-from . import config, memory
+from . import config, logs, memory
 from .chat import on_cancel_button
 from .commands import COMMANDS
 from .handlers import MESSAGE_FILTER, handle_message
@@ -64,8 +64,7 @@ def _log_startup() -> None:
         logger.info("混合搜索模式：web_search 由 %s + google_search grounding 执行（失败回退自带搜索源）",
                     config.GEMINI_SEARCH_MODEL)
     if config.GEMINI_HELPER_MODEL:
-        logger.info("Gemini 帮手模型 %s：记忆整理%s", config.GEMINI_HELPER_MODEL,
-                    f"，主模型 {config.HEDGE_AFTER:g} 秒没输出就同时抢答" if config.HEDGE_AFTER > 0 else "")
+        logger.info("Gemini 帮手模型 %s：记忆整理", config.GEMINI_HELPER_MODEL)
     if config.GEMINI_MEDIA_MODEL and config.MEDIA_PREFETCH:
         logger.info("媒体预读已开启：视频语音一出现就由 %s 在后台转述", config.GEMINI_MEDIA_MODEL)
     if config.SEARCH_ENABLED:
@@ -84,7 +83,10 @@ def _log_startup() -> None:
 
 
 def main() -> None:
+    log_file = logs.add_file(config.LOG_DIR, config.LOG_KEEP_DAYS)
     app = build_application()
     _log_startup()
+    if log_file is not None:
+        logger.info("日志同时写入 %s（每天一个文件，留 %d 天）", log_file, config.LOG_KEEP_DAYS)
     # 只订阅用到的更新类型：不收 edited_message，群友编辑一条 @bot 的旧消息不会触发重复回答
     app.run_polling(allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY], drop_pending_updates=True)

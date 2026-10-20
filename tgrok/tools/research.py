@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
+from .. import config, logs, usage
 from ..i18n import t
 from . import Outcome, Tool, failed
 
@@ -43,7 +43,11 @@ class Report:
     text: str = ""
     error: str = ""
     secs: float = 0.0
-    usage: dict = field(default_factory=dict)
+    usage: dict = field(default_factory=dict)  # omp 报的累计用量：input、output、cacheRead、cacheWrite 等
+
+    @property
+    def tokens_in(self) -> int:
+        return sum(self.usage.get(k, 0) for k in ("input", "cacheRead", "cacheWrite"))
 
 
 def _command(model: str, task: str) -> list[str]:
@@ -124,8 +128,10 @@ async def run_researcher(model: str, task: str) -> Report:
     if not report.text and not report.error:
         tail = err.decode("utf-8", "replace").strip().splitlines()
         report.error = (tail[-1][:200] if tail else "") or f"no answer (exit code {proc.returncode})"
-    logger.info("研究员 %s %s：%.0fs，%d 字，token %s", model, "完成" if report.text else f"失败（{report.error}）",
-                report.secs, len(report.text), report.usage)
+    logger.info("研究员 %s %s：%.0fs，%d 字，token 输入 %s / 输出 %s", model,
+                "完成" if report.text else f"失败（{report.error}）", report.secs, len(report.text),
+                logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))
+    usage.record("research", model, report.tokens_in, report.usage.get("output", 0), report.secs, ok=bool(report.text))
     return report
 
 

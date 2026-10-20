@@ -1,11 +1,9 @@
 """入口：python bot.py（实现见 tgrok/ 包，架构文档见 docs/ARCHITECTURE.zh.md）。"""
 
-import logging
+from tgrok import logs
 
-# 先配好日志再导入 tgrok：配置解析时的告警也要按统一格式输出
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("trafilatura").setLevel(logging.ERROR)  # "discarding data" 等内部告警无诊断价值
+# 先配好控制台日志再导入 tgrok 其余部分：配置解析时的告警也要按统一格式输出
+logs.setup_console()
 
 from tgrok.app import main  # noqa: E402
 

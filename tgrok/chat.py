@@ -13,7 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from . import config, llm, prompt, tools
+from . import config, llm, logs, prompt, tools, usage
 from .tools import send_image
 from .bubble import Bubble
 from .i18n import phrases, t
@@ -57,8 +57,8 @@ def _adapt(working: list[dict], before, after) -> list[dict]:
 
 
 class _Models:
-    """本条回复用的模型：主模型出错且还没输出时，剩下的轮次整条换成备用模型；
-    首轮太慢被帮手模型抢答时，整条换成帮手模型。note 是回复末尾说明换了谁的附注（只显示，不进历史）。"""
+    """本条回复用的模型：主模型出错且还没输出时，剩下的轮次整条换成备用模型。
+    note 是回复末尾说明换了备用模型的附注（只显示，不进历史）。"""
 
     def __init__(self):
         self.adapter = llm.adapter
@@ -74,105 +74,6 @@ class _Models:
         before, self.adapter, self.using_fallback = self.adapter, self.fallback, True
         self.note = "\n\n" + t("fallback_note", model=getattr(self.adapter, "model", ""))
         return _adapt(working, before, self.adapter)
-
-    def hedge(self):
-        """可以拿来抢答的帮手模型；没配、关掉了、已经换过模型，或者帮手就是主模型本身时为 None。"""
-        helper = llm.helper_adapter
-        if helper is None or config.HEDGE_AFTER <= 0 or self.using_fallback:
-            return None
-        if helper.name == self.adapter.name and helper.model == getattr(self.adapter, "model", None):
-            return None
-        return helper
-
-    def adopt(self, helper) -> None:
-        self.adapter, self.using_fallback = helper, True
-        self.note = "\n\n" + t("hedge_note", model=getattr(helper, "model", ""))
-
-
-class _Lane:
-    """一路模型输出：live 时直接交给气泡；抢答期间先攒着，胜出后再一次放出来。"""
-
-    def __init__(self, bubble: Bubble, live: bool):
-        self.bubble, self.live, self.buf = bubble, live, []
-        self.spoke = asyncio.Event()
-
-    async def on_text(self, delta: str) -> None:
-        if self.live:
-            await self.bubble.on_text(delta)
-        else:
-            self.buf.append(delta)
-        if delta.strip():
-            self.spoke.set()
-
-    async def go_live(self) -> None:
-        self.live = True
-        text, self.buf = "".join(self.buf), []
-        if text:
-            await self.bubble.on_text(text)
-
-
-def _useful(task: asyncio.Task) -> bool:
-    """这一路已经跑完并且有东西（正文或工具调用）。"""
-    if not task.done() or task.cancelled() or task.exception() is not None:
-        return False
-    result = task.result()
-    return bool(result.calls or result.content.strip())
-
-
-def _drop(*tasks: asyncio.Task) -> None:
-    for task in tasks:
-        task.cancel()
-        # 被取消的一路可能稍后才抛出别的异常：取走，免得事件循环报「异常没人取」
-        task.add_done_callback(lambda t: t.cancelled() or t.exception())
-
-
-async def _race(models: _Models, working: list[dict], schemas: list[dict] | None,
-                bubble: Bubble) -> tuple[llm.RoundResult, list[dict], list[dict] | None]:
-    """首轮：主模型 HEDGE_AFTER 秒内既没出字也没跑完（没开始调工具），就同时让帮手模型（Gemini 原生，
-    自带 Google 搜索）作答，谁先出字用谁，另一个取消。一路出错时另一路继续，两路都失败才把主模型的错误抛出。"""
-    helper = models.hedge()
-    if helper is None:
-        return await models.adapter.run_round(working, schemas, bubble.on_text), working, schemas
-    primary = _Lane(bubble, live=True)
-    p_task = asyncio.create_task(models.adapter.run_round(working, schemas, primary.on_text))
-    p_spoke = asyncio.create_task(primary.spoke.wait())
-    waiters, h_task = [p_spoke], None
-    try:
-        done, _ = await asyncio.wait({p_task, p_spoke}, timeout=config.HEDGE_AFTER,
-                                     return_when=asyncio.FIRST_COMPLETED)
-        if done:
-            return await p_task, working, schemas
-        primary.live = False  # 从这里起两路都先攒着
-        h_working = _adapt(working, models.adapter, helper)
-        hedge = _Lane(bubble, live=False)
-        h_task = asyncio.create_task(helper.run_round(h_working, None, hedge.on_text))
-        h_spoke = asyncio.create_task(hedge.spoke.wait())
-        waiters.append(h_spoke)
-        logger.info("主模型 %.0f 秒没有输出，同时让 %s 抢答", config.HEDGE_AFTER, helper.model)
-        await bubble.set_stage(t("hedge_stage", model=helper.model))
-        pending = {p_task, h_task, p_spoke, h_spoke}
-        while True:
-            _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            if primary.spoke.is_set() or _useful(p_task):
-                _drop(h_task)
-                await primary.go_live()
-                return await p_task, working, schemas
-            if hedge.spoke.is_set() or _useful(h_task):
-                _drop(p_task)
-                logger.info("%s 抢答胜出", helper.model)
-                models.adopt(helper)
-                await hedge.go_live()
-                return await h_task, h_working, None
-            if p_task.done() and h_task.done():
-                if h_task.exception() is not None:
-                    logger.warning("抢答的 %s 也失败了：%s", helper.model, h_task.exception())
-                return await p_task, working, schemas  # 主模型的错误照常交给外层（重试、备用模型）
-    except BaseException:  # 被取消（用户点了取消）或主模型出错：还在跑的那路一并停掉
-        _drop(p_task, *([h_task] if h_task is not None else []))
-        raise
-    finally:
-        for waiter in waiters:
-            waiter.cancel()
 
 
 def _tool_schemas(models: _Models, round_idx: int) -> list[dict] | None:
@@ -190,23 +91,22 @@ async def _call_model(models: _Models, working: list[dict], round_idx: int,
     for attempt in range(2):
         out_before = bubble.output_len()
         t0 = time.monotonic()
+        model = getattr(models.adapter, "model", "")
         try:
-            if round_idx == 0 and attempt == 0:
-                result, working, schemas = await _race(models, working, schemas, bubble)
-            else:
-                result = await models.adapter.run_round(working, schemas, bubble.on_text)
+            result = await models.adapter.run_round(working, schemas, bubble.on_text)
             break
         except Exception as e:
             elapsed = time.monotonic() - t0
             if bubble.output_len() != out_before:
                 # 正文已经到手、流在收尾阶段被上游掐断：按完成处理而非失败
-                logger.warning("LLM 流中断但正文已到手（round=%d, %.1fs, %s），按完成处理",
-                               round_idx, elapsed, type(e).__name__)
+                logger.warning("模型流中断但正文已到手（第 %d 轮，%.1fs，%s），按完成处理",
+                               round_idx + 1, elapsed, type(e).__name__)
                 result = llm.RoundResult(content=bubble.segment)
                 break
+            usage.record("reply", model, 0, 0, elapsed, ok=False)
             if models.can_switch():
-                logger.warning("主模型 %s 调用失败（round=%d, %.1fs, %s: %.200s），切换备用模型 %s",
-                               getattr(models.adapter, "model", ""), round_idx, elapsed, type(e).__name__, e,
+                logger.warning("主模型 %s 调用失败（第 %d 轮，%.1fs，%s: %.200s），切换备用模型 %s",
+                               model, round_idx + 1, elapsed, type(e).__name__, e,
                                getattr(models.fallback, "model", ""))
                 working = models.switch(working)
                 schemas = _tool_schemas(models, round_idx)
@@ -215,11 +115,18 @@ async def _call_model(models: _Models, working: list[dict], round_idx: int,
                 continue
             if attempt or llm.is_quota_error(e):
                 raise
-            logger.warning("LLM 流中断且本轮无输出（round=%d, %.1fs, %s），重试一次",
-                           round_idx, elapsed, type(e).__name__)
+            logger.warning("模型流中断且本轮无输出（第 %d 轮，%.1fs，%s），重试一次",
+                           round_idx + 1, elapsed, type(e).__name__)
             await asyncio.sleep(1.5)
-    logger.info("LLM round=%d 完成 %.1fs：正文 %d 字，工具请求 %d 项，引用 %d 条",
-                round_idx, time.monotonic() - t0, len(result.content), len(result.calls), len(result.citations))
+    secs = time.monotonic() - t0
+    usage.record("reply", model, result.usage.input, result.usage.output, secs)
+    req = logs.current()
+    if req is not None:
+        req.rounds += 1
+    names = [c["name"] or "?" for _, c in sorted(result.calls.items())]
+    logger.info("第 %d 轮 %.1fs：正文 %d 字%s%s", round_idx + 1, secs, len(result.content),
+                f"，调用 {', '.join(names)}" if names else "",
+                f"，引用 {len(result.citations)} 条" if result.citations else "")
     return result, working, schemas
 
 
@@ -240,6 +147,9 @@ async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _
         if bubble.has_text:
             draft = bubble.take_draft()
         assistant_msg = llm.assistant_tool_call_msg(result.calls, result.content)
+        req = logs.current()
+        if req is not None:
+            req.tools.extend(c["function"]["name"] for c in assistant_msg["tool_calls"])
         plan = tools.plan_round(assistant_msg["tool_calls"], chat_id)
         # 执行期间撤下底部状态行，完成后挂上结果行，下一轮的思考阶段行再顶上
         bubble.progress.extend(plan.lines)
@@ -281,11 +191,11 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
                 task.uncancel()
             await bubble.stop()
             if not bubble.placeholder_failed:
-                logger.info("生成已被用户取消 chat=%s user=%s", msg.chat_id, requester)
+                logger.info("生成已被用户取消")
                 await bubble.show_cancelled()
             return [], ""
         except Exception as e:
-            logger.exception("调用 LLM 失败")
+            logger.exception("调用模型失败")
             await bubble.stop()
             await bubble.show_error(t("llm_quota") if llm.is_quota_error(e) else t("llm_failed"))
             return [], ""
@@ -293,7 +203,7 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
             bubble.stop_ticker()
         if images and not draft:
             draft = t("images_only_reply")  # 模型只发了图没写字：气泡里留一句，别显示成空回复
-        # 换了备用模型或被帮手模型抢答，就在回复末尾注明；提示只用于显示，不进对话历史
+        # 换了备用模型就在回复末尾注明；提示只用于显示，不进对话历史
         ids, answer = await bubble.finish(models.note, draft)
         if ids and images:
             sent = await bubble.send_images(images)

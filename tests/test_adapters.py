@@ -78,6 +78,18 @@ def test_rejected_extra_body_is_dropped_and_remembered():
     assert "extra_body" not in seen[1] and adapter.extra_body_supported is False
 
 
+def test_rejected_stream_options_are_dropped_and_usage_read_from_last_chunk():
+    seen, create = _recording(bad_request(BadRequestError, "Unrecognized request argument supplied: stream_options"))
+    adapter = OpenAIAdapter(client=ns(chat=ns(completions=ns(create=create))))
+    assert run(adapter._create_stream(HIST, tools=None)) == "S"
+    assert seen[0]["stream_options"] == {"include_usage": True} and "stream_options" not in seen[1]
+    assert adapter.usage_supported is False
+    result = run(adapter._drain(stream_of([
+        ns(choices=[ns(delta=ns(content="好", tool_calls=None))], usage=None),
+        ns(choices=[], usage=ns(prompt_tokens=120, completion_tokens=7))]), _ignore))
+    assert result.content == "好" and (result.usage.input, result.usage.output) == (120, 7)
+
+
 def test_claude_history_conversion():
     """system 单独拿出、图片转 base64 块、思考块回传、连续的工具结果合并成一条 user。"""
     history = [
@@ -126,6 +138,18 @@ def test_claude_stream_collects_text_tool_use_and_thinking():
     call = llm.assistant_tool_call_msg(calls, content)["tool_calls"][0]
     assert call["id"] == "tu1" and json.loads(call["function"]["arguments"]) == {"query": "q"}
     assert call["extra_content"]["anthropic_thinking"] == [{"type": "thinking", "thinking": "推理", "signature": "SG"}]
+
+
+def test_claude_usage_counts_cached_input_and_final_output():
+    events = [
+        ns(type="message_start", message=ns(usage=ns(input_tokens=10, cache_read_input_tokens=900,
+                                                     cache_creation_input_tokens=50, output_tokens=1))),
+        ns(type="content_block_delta", index=0, delta=ns(type="text_delta", text="答")),
+        ns(type="message_delta", usage=ns(output_tokens=42)),
+        ns(type="message_stop"),
+    ]
+    result = run(ClaudeAdapter(client=ns())._drain(stream_of(events), _ignore))
+    assert (result.usage.input, result.usage.output) == (960, 42)
 
 
 def test_claude_lowers_max_tokens_and_drops_rejected_thinking():

@@ -1,12 +1,13 @@
 """普通消息的处理：判断要不要回、拼出对话、生成回复，并记进对话缓存、最近群聊和长期记忆。"""
 
 import logging
+from collections import Counter
 
 from telegram import Message, Update
 from telegram.constants import MessageEntityType
 from telegram.ext import ContextTypes, filters
 
-from . import config, conversations, media, memory, prompt, recent, render, rich, viewer
+from . import config, conversations, logs, media, memory, prompt, recent, render, rich, viewer
 from .chat import stream_reply
 from .i18n import t
 from .tg_auth import is_authorized
@@ -118,8 +119,9 @@ async def _follow_up(msg: Message, bot, question: str, note: str | None) -> list
     history = conversations.get(msg.chat_id, replied.message_id)
     if history is not None:
         return history + [prompt.user_turn(text, images, msg.chat_id, question, recent_chat=chat_since)]
-    # 历史已过期（如 bot 重启）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
+    # 历史已过期（超过 CONVERSATION_KEEP_DAYS）：把 bot 那条回复并入本轮 user 消息作为最小上下文，
     # 不单独伪造 assistant 轮——以 assistant 开头的对话会被严格交替的接口拒绝
+    logger.info("追问的那条回复没有存下的上下文，只带上回复原文")
     quoted = replied.text or replied.caption or ""
     if quoted:
         text = t("prev_reply", content=quoted) + "\n\n" + text
@@ -202,8 +204,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     question = extract_question(msg, bot.username)
-    logger.info("收到请求 chat=%s(%s) user=%s(%s) reply_to_bot=%s q=%.80s",
-                msg.chat_id, msg.chat.type, msg.from_user.full_name, msg.from_user.id, is_reply_to_bot, question)
+    req = logs.begin()
+    where = "私聊" if msg.chat.type == "private" else f"群「{msg.chat.title or ''}」（{msg.chat_id}）"
+    logger.info("收到 %s，%s（%s）%s：%s", where, msg.from_user.full_name, msg.from_user.id,
+                "追问" if is_reply_to_bot else "提问", logs.one_line(question) or "（没有文字）")
     if not is_reply_to_bot:
         media.prefetch(bot, replied)  # 被引用的媒体 bot 之前可能没见过（比如重启前发的）
     # 贴纸、视频语音、看不到的图片：说明和提问一起交给模型，没有文字也要让模型知道对方发了什么
@@ -219,15 +223,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = conversations.trim(history)
     answer_ids, answer = await stream_reply(msg, history)
     if not (answer_ids and answer):
-        logger.warning("未产生回复 chat=%s user=%s", msg.chat_id, msg.from_user.id)
+        logger.warning("没有产生回复（%.1fs）", req.elapsed())
         return
-    logger.info("已回复 chat=%s msg_ids=%s len=%d", msg.chat_id, answer_ids, len(answer))
+    tools_used = "，".join(f"{name}×{n}" if n > 1 else name for name, n in Counter(req.tools).items())
+    logger.info("完成 %.1fs：%d 轮%s，token 输入 %s / 输出 %s，回复 %d 字 → 消息 %s", req.elapsed(), req.rounds,
+                f"，工具 {tools_used}" if tools_used else "", logs.tokens(req.tokens_in), logs.tokens(req.tokens_out),
+                len(answer), ",".join(map(str, answer_ids)))
     full = history + [{"role": "assistant", "content": answer}]
     for message_id in answer_ids:
-        conversations.remember(msg.chat_id, message_id, full)
+        conversations.remember(msg.chat_id, message_id, full, msg.from_user.id)
     asker = prompt.person_label(msg.from_user)
     # 最近群聊和原始记录存纯文本：模型的 HTML 标签对之后读这些记录的人和模型都是噪音
     shown = render.to_plain(answer)
-    recent.add_bot(msg.chat_id, answer_ids, shown, asker)
+    recent.add_bot(msg.chat_id, answer_ids, shown, asker, msg.from_user.id)
     topic, quoted = _memory_record(msg, question, note, is_reply_to_bot)
     memory.record_exchange(msg.chat_id, msg.from_user.id, asker, topic, shown, quoted=quoted, msg_id=msg.message_id)

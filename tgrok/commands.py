@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from . import config, memory, render, rich, slang
+from . import config, conversations, memory, recent, render, rich, slang, usage
 from .memory import notes, store
 from .i18n import t
 from .prompt import person_label
@@ -57,7 +57,8 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
     ids = [a.lstrip("#") for a in context.args or []]
     if not ids:
-        await _reply(update, t("memory_cleared") if memory.clear(chat_id) else t("memory_empty"))
+        removed = [memory.clear(chat_id), conversations.forget_chat(chat_id), recent.forget_chat(chat_id)]
+        await _reply(update, t("memory_cleared") if any(removed) else t("memory_empty"))
         return
     try:
         notes.apply(chat_id, [{"action": "remove", "id": i} for i in ids], "command")
@@ -68,7 +69,8 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_forgetme(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    removed = memory.forget_user(update.effective_user.id)
+    user_id = update.effective_user.id
+    removed = memory.forget_user(user_id) + conversations.forget_user(user_id) + recent.forget_user(user_id)
     await _reply(update, t("forgetme_done", n=removed) if removed else t("forgetme_none"))
 
 
@@ -159,6 +161,10 @@ async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, usage.report()[:4000])
+
+
 @dataclass(frozen=True)
 class Command:
     names: tuple[str, ...]
@@ -179,6 +185,7 @@ COMMANDS = [
     Command(("adduser",), cmd_adduser, _admin, "cmd_adduser", True),
     Command(("deluser",), cmd_deluser, _admin, "cmd_deluser", True),
     Command(("listusers",), cmd_listusers, _admin, "cmd_listusers", True),
+    Command(("stats",), cmd_stats, _admin, "cmd_stats", True),
     Command(("memory",), cmd_memory, _manages_memory, "cmd_memory", True),
     Command(("forget",), cmd_forget, _manages_memory, "cmd_forget", True),
     Command(("slang",), cmd_slang, _manages_memory, "cmd_slang", True),

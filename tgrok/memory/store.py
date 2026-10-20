@@ -1,18 +1,14 @@
-"""记忆的 SQLite 存储：原始记录（全文索引）、精选条目、每个聊天的整理进度。
+"""记忆的 SQLite 表：原始记录（全文索引）、精选条目、每个聊天的整理进度。
 
-所有读写都很小，直接在事件循环线程里同步执行。中文检索用 FTS5 的 trigram 分词：
-三个字以上的片段走全文索引，更短的词退回 LIKE（只在一个聊天、保留期内的记录里扫）。
+中文检索用 FTS5 的 trigram 分词：三个字以上的片段走全文索引，更短的词退回 LIKE（只在一个聊天、保留期内的记录里扫）。
 """
 
-import logging
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 
-from .. import config
-
-logger = logging.getLogger(__name__)
+from ..db import db, schema
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -54,30 +50,17 @@ CREATE TABLE IF NOT EXISTS progress (
 );
 """
 
-_conn: sqlite3.Connection | None = None
+
+def _setup(conn: sqlite3.Connection) -> None:
+    conn.executescript(_SCHEMA)
+    # 旧库没有 msg_id 列：补上。同一条 Telegram 消息（比如既旁听到、又被人引用）只记一次
+    if "msg_id" not in {r[1] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("ALTER TABLE messages ADD COLUMN msg_id INTEGER")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_msg ON messages(chat_id, msg_id) "
+                 "WHERE msg_id IS NOT NULL")
 
 
-def db() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        config.MEMORY_DB.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(config.MEMORY_DB, isolation_level=None, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.executescript(_SCHEMA)
-        # 旧库没有 msg_id 列：补上。同一条 Telegram 消息（比如既旁听到、又被人引用）只记一次
-        if "msg_id" not in {r[1] for r in _conn.execute("PRAGMA table_info(messages)")}:
-            _conn.execute("ALTER TABLE messages ADD COLUMN msg_id INTEGER")
-        _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS messages_msg ON messages(chat_id, msg_id) "
-                      "WHERE msg_id IS NOT NULL")
-    return _conn
-
-
-def close() -> None:
-    global _conn
-    if _conn is not None:
-        _conn.close()
-        _conn = None
+schema(_setup)
 
 
 # ---- 原始记录 ----

@@ -6,7 +6,7 @@ import re
 import anthropic
 
 from .. import config
-from .base import BaseAdapter, RequestOptions, RoundResult, error_text, tool_args, watch_idle
+from .base import BaseAdapter, RequestOptions, RoundResult, Usage, error_text, tool_args, watch_idle
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
@@ -54,8 +54,9 @@ class ClaudeAdapter(BaseAdapter):
         return super()._degrade(e, kind, opts)
 
     async def _drain(self, stream, on_text) -> RoundResult:
-        calls, content = await drain_stream(stream, on_text)
-        return RoundResult(calls=calls, content=content)
+        usage = Usage()
+        calls, content = await drain_stream(stream, on_text, usage)
+        return RoundResult(calls=calls, content=content, usage=usage)
 
 
 def anthropic_tools(tools: list[dict]) -> list[dict]:
@@ -126,17 +127,32 @@ def to_anthropic_messages(history: list[dict]) -> tuple[str, list[dict]]:
     return system_text, out
 
 
-async def drain_stream(stream, on_text) -> tuple[dict[int, dict], str]:
+def _take_usage(reported, usage: Usage) -> None:
+    """message_start 带输入（含缓存）用量，message_delta 带累计输出；有的网关把输入也放在 message_delta 里。"""
+    if reported is None:
+        return
+    total_in = sum(getattr(reported, k, None) or 0
+                   for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    usage.input = max(usage.input, total_in)
+    usage.output = max(usage.output, getattr(reported, "output_tokens", None) or 0)
+
+
+async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dict[int, dict], str]:
     """消费 Anthropic 原生流：text_delta 交给 on_text，tool_use 块按 index 聚合，
-    thinking 块（含签名）原样收集、挂到首个调用的扩展字段上以便续传时回传。
+    thinking 块（含签名）原样收集、挂到首个调用的扩展字段上以便续传时回传；token 用量写进 usage。
     """
     calls: dict[int, dict] = {}
     content = ""
     thinking_blocks: list[dict] = []
     cur_think: dict | None = None
+    usage = usage if usage is not None else Usage()
     async for event in watch_idle(stream, lambda: bool(content) and not calls, "Claude"):
         etype = getattr(event, "type", "")
-        if etype == "content_block_start":
+        if etype == "message_start":
+            _take_usage(getattr(getattr(event, "message", None), "usage", None), usage)
+        elif etype == "message_delta":
+            _take_usage(getattr(event, "usage", None), usage)
+        elif etype == "content_block_start":
             block = event.content_block
             btype = getattr(block, "type", "")
             if btype == "tool_use":

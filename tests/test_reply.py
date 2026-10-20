@@ -1,13 +1,14 @@
 """一条回复从生成到显示：重试、断流、取消、分段、工具轮、备用模型。"""
 
 import asyncio
+import time
 
 import pytest
 from fakes import HIST, FakeMsg, FakeSent, chunk_text, chunk_tool, html_text, ns, openai_adapter, run, stream_of, \
     use_model
 from telegram.error import BadRequest, TimedOut
 
-from tgrok import bubble, chat, config, llm, rich, web
+from tgrok import bubble, chat, config, llm, logs, rich, usage, web
 from tgrok.i18n import STRINGS, t
 from tgrok.llm.base import BaseAdapter, RoundResult
 
@@ -342,6 +343,23 @@ def test_primary_error_before_output_switches_to_fallback_and_notes_it(fallback_
     assert answer == "备用模型的回答"  # 提示只在显示里，不进对话历史
     assert msg.sent[0].text.startswith("备用模型的回答") and "fb-model" in msg.sent[0].text.replace("\\", "")
     assert any("备用" in x for x in msg.log[1:-1])  # 等备用模型期间进度行有提示
+
+
+def test_usage_records_failed_primary_and_fallback_tokens_and_stats_by_period():
+    async def ok(history, has_tools):
+        return stream_of([chunk_text("答"), ns(choices=[], usage=ns(prompt_tokens=1500, completion_tokens=20))])
+
+    use_model(_dead)
+    llm.fallback_adapter = openai_adapter(ok, model="fb-model")
+    req = logs.begin()
+    run(chat.stream_reply(FakeMsg(), HIST))
+    rows = {(r["model"], r["calls"], r["fails"], r["tin"], r["tout"]) for r in usage.summary(0)}
+    assert rows == {("local-model", 1, 1, 0, 0), ("fb-model", 1, 0, 1500, 20)}
+    assert (req.rounds, req.tokens_in, req.tokens_out) == (1, 1500, 20)  # 汇总日志行的合计
+    report = usage.report()
+    assert report.count("fb-model") == 2  # 今天、近 7 天各一行
+    later = usage.report(now=time.time() + 2 * 86400)
+    assert later.count("fb-model") == 1 and t("stats_empty", name="今天") in later
 
 
 def test_primary_cut_after_text_does_not_switch(fallback_calls):

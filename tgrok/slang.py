@@ -11,11 +11,10 @@
 词典写在 SLANG_FILE（JSON），词条数超过 SLANG_MAX_ENTRIES 时淘汰最久没用到的。
 """
 
-import json
 import logging
 import time
 
-from . import config
+from . import config, jsonstore
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -31,30 +30,12 @@ INJECT_LIMIT = 5
 GLOBAL = "global"
 
 
-def _load() -> dict[str, dict]:
-    path = config.SLANG_FILE
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        logger.warning("梗词典 %s 读取失败，从空词典开始", path)
-        return {}
-
-
 # key = f"{scope}|{词的小写}"，value = {term, scope, used, senses: [{meaning, context, example, by, t}]}
-_entries: dict[str, dict] = _load() if config.SLANG_ENABLED else {}
+_entries: dict[str, dict] = jsonstore.load(config.SLANG_FILE, {}, dict) if config.SLANG_ENABLED else {}
 
 
 def _save() -> None:
-    path = config.SLANG_FILE
-    try:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(_entries, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
-    except OSError as e:
-        logger.warning("梗词典 %s 写入失败：%s", path, e)
+    jsonstore.save(config.SLANG_FILE, _entries)
 
 
 def _norm(term: str) -> str:

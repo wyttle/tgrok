@@ -9,13 +9,12 @@ MEMORY_MAX_CHARS 限制（摘要最多占一半），控制每次请求多花的
 """
 
 import asyncio
-import json
 import logging
 import re
 import time
 from datetime import date, datetime
 
-from . import config, llm
+from . import config, jsonstore, llm
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -31,29 +30,11 @@ _compressing: set[str] = set()
 _tasks: set[asyncio.Task] = set()
 
 
-def _load() -> dict[str, dict]:
-    path = config.MEMORY_FILE
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        logger.warning("记忆文件 %s 读取失败，从空记忆开始", path)
-        return {}
-
-
-_store: dict[str, dict] = _load() if config.MEMORY_ENABLED else {}
+_store: dict[str, dict] = jsonstore.load(config.MEMORY_FILE, {}, dict) if config.MEMORY_ENABLED else {}
 
 
 def _save() -> None:
-    path = config.MEMORY_FILE
-    try:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(_store, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)  # 原子替换：写到一半崩溃也不会留下半截文件
-    except OSError as e:
-        logger.warning("记忆文件 %s 写入失败：%s", path, e)
+    jsonstore.save(config.MEMORY_FILE, _store)
 
 
 def _clip(text: str, limit: int) -> str:

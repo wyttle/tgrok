@@ -1,25 +1,27 @@
 """白名单与管理员判定。"""
 
-import json
 import logging
 
-from . import config
+from . import config, jsonstore
 
 logger = logging.getLogger(__name__)
 
-def load_allowed_users() -> set[int]:
-    """白名单：优先读 allowed_users.json（运行时增删的结果），首次启动用 .env 初始值。"""
-    path = config.WHITELIST_FILE
-    if path.exists():
-        try:
-            return {int(x) for x in json.loads(path.read_text(encoding="utf-8"))}
-        except (ValueError, json.JSONDecodeError):
-            logger.warning("allowed_users.json 解析失败，回退到 .env 中的 ALLOWED_USER_IDS")
-    return set(config.ALLOWED_USER_IDS)
+
+def _load_allowed_users() -> set[int]:
+    """优先读白名单文件（运行时增删的结果），首次启动用 .env 的 ALLOWED_USER_IDS。"""
+    initial = set(config.ALLOWED_USER_IDS)
+    try:
+        return {int(x) for x in jsonstore.load(config.WHITELIST_FILE, sorted(initial), list)}
+    except (TypeError, ValueError):
+        logger.warning("%s 里有不是用户 ID 的内容，改用 ALLOWED_USER_IDS", config.WHITELIST_FILE)
+        return initial
+
+
+allowed_users: set[int] = _load_allowed_users()
 
 
 def save_allowed_users() -> None:
-    config.WHITELIST_FILE.write_text(json.dumps(sorted(allowed_users)), encoding="utf-8")
+    jsonstore.save(config.WHITELIST_FILE, sorted(allowed_users))
 
 
 def is_admin(user_id: int) -> bool:
@@ -33,6 +35,3 @@ def is_authorized(user_id: int) -> bool:
     if not config.ADMIN_USER_IDS and not allowed_users:
         return True
     return user_id in allowed_users
-
-
-allowed_users: set[int] = load_allowed_users()

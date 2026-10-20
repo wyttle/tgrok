@@ -151,7 +151,7 @@ python bot.py
 - `gemini`：通过 google-genai SDK 连接 Gemini 原生接口，地址使用 `GEMINI_BASE_URL`，留空连接 Google 官方。Google Search 和 URL context 在服务端执行，因此不走 bot 自带工具循环。
 - `claude`：Anthropic Messages API 原生协议，地址使用 `LLM_BASE_URL`。保留原生 thinking 块、签名与工具语义，bot 自带搜索工具仍可使用。
 
-`GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 仅用于兼容旧配置；新配置只应设置 `LLM_PROTOCOL`。
+旧开关 `GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 已不再读取：`.env` 里还有它们而没有 `LLM_PROTOCOL` 时，bot 启动时报错并提示该写成什么。重新运行一次 `python configure.py` 会自动改写成 `LLM_PROTOCOL`。
 
 **备用模型。** 设置 `LLM_FALLBACK_MODEL`（或用 `python configure.py` 第 8.5 步）即可启用。每条回复都先调用主模型；主模型在输出任何正文之前出错（HTTP 错误、配额、超时、模型不存在等），这条回复剩下的部分改由备用模型完成，切换时进度行会提示，回复末尾注明由哪个备用模型回答。这条提示只用于显示，不进追问历史。主模型已经输出部分正文后才断开的，仍按原来的方式保留已有内容。备用模型可以用不同的协议、地址和 key，留空的项沿用主模型。
 

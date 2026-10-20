@@ -157,7 +157,7 @@ Set `LLM_PROTOCOL` to choose the wire protocol:
 - `gemini`: native Gemini through the google-genai SDK, using `GEMINI_BASE_URL` (empty means Google's official endpoint). Google Search and URL context run server-side, so the bot's own tool loop is bypassed.
 - `claude`: native Anthropic Messages API, using `LLM_BASE_URL`. Native thinking blocks, signatures, and tool-use semantics are preserved, and the bot's own search tools remain available.
 
-`GEMINI_NATIVE_SEARCH` and `CLAUDE_NATIVE` are legacy compatibility keys only; new configurations should use `LLM_PROTOCOL`.
+The old `GEMINI_NATIVE_SEARCH` and `CLAUDE_NATIVE` switches are no longer read: if they are still in `.env` without `LLM_PROTOCOL`, the bot refuses to start and says which value to use. Running `python configure.py` once rewrites them as `LLM_PROTOCOL`.
 
 **Fallback model.** Set `LLM_FALLBACK_MODEL` (or use `python configure.py`, step 8.5) to add a backup. Every reply tries the primary model first. If it errors before any text has been streamed (HTTP errors, quota, timeouts, unknown model, and so on), the rest of that reply runs on the fallback model, the progress line says so while switching, and the reply ends with a note naming the fallback model. The note is display-only and is not stored in the follow-up history. If the primary already streamed text before failing, the partial answer is kept as before. The fallback can use a different protocol, endpoint, and key; empty fields reuse the primary model's.
 

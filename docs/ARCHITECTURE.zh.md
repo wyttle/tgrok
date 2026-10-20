@@ -1,142 +1,141 @@
 # tgrok 架构设计文档
 
-Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主模型支持 OpenAI 兼容 Chat Completions、OpenAI Responses API、Gemini 原生和 Claude 原生四种协议；工具循环提供 `calculate` 计算器，并可选 bot 工具搜索或 Google grounding 搜索。
+Telegram 群聊 AI 助手，提供类似 X 上 @grok 的引用提问体验。主模型支持 OpenAI 兼容 Chat Completions、OpenAI Responses API、Gemini 原生和 Claude 原生四种协议；bot 自带工具循环提供计算器、梗词典，以及可选的联网搜索和读网页。
 
 ## 模块划分
 
 ```text
-bot.py                 入口（python bot.py），只做 from tgrok.tg import main
+bot.py                 入口（python bot.py）：配置日志，然后运行 tgrok.app.main
 configure.py           交互式配置向导和多配置档管理（独立运行，不进 Docker 镜像）
-tests/smoke_test.py    45 项冒烟和回归测试（无需网络与真实 Telegram）
+tests/                 pytest 用例（无需网络与真实 Telegram），conftest.py 固定环境变量并在每个测试后还原状态
 tgrok/
-|-- config.py          环境变量解析、常量、日志与时区初始化
-|-- i18n.py            全部界面和提示词文案，以及 t()
-|-- prompt.py          SYSTEM_PROMPT 组装和实时时间注入 with_time()
-|-- calc.py            calculate 工具：白名单 AST 求值的算术、比较与日期推算
-|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、静默旁听缓冲、后台摘要整理和持久化
-|-- slang.py           梗词典：按词保存多种带语境的用法、按消息命中注入参考、remember_slang 工具和持久化
-|-- llm/
-|   |-- __init__.py    按 LLM_PROTOCOL 装配唯一 adapter 单例并导出共享 helper
-|   |-- base.py        RoundResult、BaseAdapter、工具定义与 active_tools()、错误分类和共享 helper
-|   |-- openai.py      OpenAI 兼容 Chat Completions 适配器和流消费
-|   |-- responses.py   OpenAI Responses API 适配器、输入转换和事件流消费
-|   |-- gemini.py      Gemini 原生协议适配器、原生客户端和 grounding 共用客户端
-|   `-- claude.py      Claude 原生协议适配器、消息转换和流消费
-|-- web.py             多搜索源聚合、Gemini grounding、网页抓取和 Jina 兜底
-|-- chat.py            进度显示、工具执行、统一的 stream_reply 轮次循环和取消回调
+|-- config.py          环境变量解析和常量；其它模块一律在用到时读 config.X
+|-- i18n.py            全部界面和提示词文案，t() 与 phrases()
+|-- jsonstore.py       JSON 文件读写：读取失败回退初始值，写入原子替换（白名单、记忆、梗词典共用）
 |-- tg_auth.py         白名单和管理员判定
-`-- tg.py              Telegram 路由、图片和相册、管理命令、对话缓存及 main()
+|-- app.py             组装 python-telegram-bot 应用、注册处理函数和命令菜单、启动日志
+|-- handlers.py        普通消息：要不要回、拼出对话、生成回复、记进缓存和记忆；静默旁听
+|-- commands.py        斜杠命令；COMMANDS 是唯一的命令表，注册、权限检查和菜单都从它生成
+|-- prompt.py          系统提示词，以及每条 user 消息的拼装（说话人、引用、记忆和梗附注、时间、图片）
+|-- media.py           图片、贴纸和相册：data URL、看不到内容时的文字说明、相册缓存
+|-- conversations.py   追问用的对话缓存和历史截断
+|-- chat.py            一次回复的流程：模型轮次循环、重试、备用模型切换、工具轮、取消按钮
+|-- bubble.py          一条回复在 Telegram 上的显示：占位、流式编辑、分段、进度、取消、报错、定稿
+|-- render.py          Markdown 转 MarkdownV2、流式中间态、压成一段
+|-- tools/             bot 自带工具：每个工具的 schema、执行、进度文案、结果摘要和提示词说明放在一起
+|   |-- __init__.py    Tool 基类、REGISTRY、schemas()/prompt_notes()、plan_round() 进度与并发执行
+|   |-- calculate.py   calculate
+|   |-- remember_slang.py  remember_slang
+|   `-- web.py         web_search（grounding 模式下同轮合并）、open_url
+|-- calc.py            calculate 的求值器：白名单 AST 的算术、比较与日期推算
+|-- web.py             多搜索源聚合、Gemini grounding、网页抓取和 Jina 兜底；失败抛 WebError
+|-- memory.py          按聊天保存的长期记忆：注入块、问答记录、静默旁听缓冲、后台摘要整理
+|-- slang.py           梗词典：按词保存多种带语境的用法、按消息命中注入参考
+`-- llm/
+    |-- __init__.py    按配置装配主模型和备用模型的 adapter
+    |-- base.py        RoundResult、BaseAdapter（共用的降级重试循环）、watch_idle 空闲看门狗、错误分类
+    |-- openai.py      OpenAI 兼容 Chat Completions
+    |-- responses.py   OpenAI Responses API：输入转换和事件流消费
+    |-- gemini.py      Gemini 原生协议和 grounding 共用客户端
+    `-- claude.py      Claude 原生协议：消息转换和流消费
 ```
 
-主要依赖方向为 `config -> i18n/prompt/llm/web -> chat -> tg`。`web.py` 仅在执行 Gemini grounding 时在函数体内延迟导入 `llm.gemini`，避免其他协议无条件加载 Google SDK。
+依赖方向大致是 `config -> i18n/jsonstore -> llm/web/calc/slang/memory -> tools -> prompt/render/bubble -> chat -> handlers/commands -> app`。`llm` 不依赖工具定义：工具的 schema 由调用方作为参数传给 `run_round`。`web.py` 只在执行 Gemini grounding 时在函数体内导入 `llm.gemini`，其他协议不加载 Google SDK。
 
 ## LLM 适配器接口
-
-`tgrok.llm` 根据 `LLM_PROTOCOL` 创建一个进程级 `adapter`。四个协议实现相同的最小接口：
 
 ```python
 @dataclass
 class RoundResult:
-    calls: dict[int, dict] = field(default_factory=dict)
+    calls: dict[int, dict] = field(default_factory=dict)  # 按序号聚合的工具调用 {id, name, arguments, extra}
     content: str = ""
     citations: list[dict] = field(default_factory=list)
 
 
 class BaseAdapter:
-    name: str = ""
     supports_tool_loop: bool = True
+    bad_request: tuple[type[BaseException], ...] = ()   # SDK 的 400 异常
 
-    async def run_round(self, history, use_tools, on_text) -> RoundResult:
-        raise NotImplementedError
+    async def run_round(self, history, tools, on_text) -> RoundResult: ...  # = _create_stream + _drain
+    async def _open(self, history, opts: RequestOptions): ...               # 子类：按 opts 发起流式请求
+    async def _drain(self, stream, on_text) -> RoundResult: ...             # 子类：消费流
+    def _degrade(self, e, kind, opts) -> bool: ...                          # 子类补充协议特有的降级
 ```
 
-一轮调用同时完成建流和消费流。`RoundResult.calls` 保存聚合后的工具调用，`content` 保存本轮正文，`citations` 保存 Gemini 原生 grounding 引用。OpenAI、Responses 和 Claude 适配器支持 bot 自带工具循环，挂载的工具由 `base.active_tools()` 决定：`calculate` 总是挂载，`web_search` 和 `open_url` 只在配置了搜索源时挂载。Gemini 原生适配器将 `supports_tool_loop` 设为 `False`，搜索与读页由 Google 服务端完成。
+`tools` 是 OpenAI function 格式的工具定义，`None` 表示这轮不挂工具；Claude 和 Responses 适配器各自转换成原生格式。`BaseAdapter._create_stream` 统一处理后端明确拒绝采样参数、`LLM_EXTRA_BODY` 或 tools 的 400：去掉那一项重试，并记在适配器实例上，本进程内不再发送。协议特有的降级在子类 `_degrade` 里补充：OpenAI 的 `max_tokens` → `max_completion_tokens`，Claude 按报错里的上限降低 `max_tokens`，Responses 不认 `store`/`include` 时改为不回传推理条目。错误分类优先读 SDK 的结构化字段，只在缺少时用受约束的文本匹配，避免把普通业务错误（例如工具调用配对错误）误判成后端不支持 tools。
 
-后端能力降级状态属于适配器实例，例如 tools、采样参数和 `LLM_EXTRA_BODY` 是否被接受，以及协议特有的 token 参数探测结果。错误分类优先读取 SDK 的结构化错误字段，只在缺少结构化信息时使用受约束的文本回退，避免把普通业务错误误判为后端不支持 tools。
+四个协议的流消费都用 `base.watch_idle` 做空闲看门狗：已有正文、且没有聚合到一半的工具调用时，连续 `STREAM_IDLE_TIMEOUT` 秒无新数据就按完成收尾。它不是整次请求的超时。
 
 ## 四种主模型协议
 
-`LLM_PROTOCOL` 是主协议选择键：
-
-| 值 | 接口与地址 | 工具行为 |
+| `LLM_PROTOCOL` | 接口与地址 | 工具行为 |
 |---|---|---|
-| `openai` | OpenAI 兼容 `/chat/completions`；使用 `LLM_BASE_URL` | 支持 bot 工具循环 |
-| `responses` | OpenAI Responses API `/responses`；使用 `LLM_BASE_URL` | 支持 bot 工具循环；默认 `store=False` 并回传加密推理条目，后端不认时降级为不回传。GPT-6.1 Sol 等只在 Responses 上支持工具调用的模型需要用它 |
-| `gemini` | google-genai 原生接口；使用 `GEMINI_BASE_URL`，留空连接 Google 官方地址 | 单轮生成，Google 服务端执行 `google_search` 和 `url_context` |
-| `claude` | Anthropic Messages API；使用 `LLM_BASE_URL`，末尾 `/v1` 会在客户端根地址处理时剥离 | 支持 bot 工具循环，并保留原生 thinking 块和签名 |
+| `openai`（默认） | OpenAI 兼容 `/chat/completions`；`LLM_BASE_URL` | bot 工具循环 |
+| `responses` | OpenAI Responses API `/responses`；`LLM_BASE_URL` | bot 工具循环；默认 `store=False` 并回传加密推理条目。GPT-6.1 Sol 等只在 Responses 上支持工具调用的模型需要用它 |
+| `gemini` | google-genai 原生接口；`GEMINI_BASE_URL`，留空连接 Google 官方 | 单轮生成，Google 服务端执行 `google_search` 和 `url_context` |
+| `claude` | Anthropic Messages API；`LLM_BASE_URL`，末尾的 `/v1` 会被剥掉 | bot 工具循环，保留原生 thinking 块和签名 |
 
-`LLM_PROTOCOL` 留空时默认为 `openai`。`GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 仅用于读取旧配置；新配置应只写 `LLM_PROTOCOL`。代码会把最终协议结果映射到这两个兼容属性，供尚未迁移的显示逻辑使用。
-
-`LLM_TEMPERATURE` 和 `LLM_TOP_P` 留空时不发送，由后端使用默认值。`LLM_EXTRA_BODY` 接受 JSON 对象，OpenAI 兼容、Responses 和 Claude 原生适配器都会将其作为 `extra_body` 透传；Gemini 原生不使用该配置。后端明确拒绝可选采样参数或额外字段时，对应适配器会去掉参数重试，并在当前进程内粘性禁用。
+旧开关 `CLAUDE_NATIVE` / `GEMINI_NATIVE_SEARCH` 不再兼容：`.env` 里只有它们、没有 `LLM_PROTOCOL` 时启动报错并提示改法；`configure.py` 读到它们会换算成 `LLM_PROTOCOL` 写回。
 
 ## 一条消息的生命周期
 
 ```text
 Telegram update
-  -> tg.handle_message
-     路由、鉴权、相册收集，组装 system、引用上下文、图片和实时时间；新对话的首条 user 消息带上 memory.memory_block
+  -> handlers.handle_message
+     路由（私聊、@bot、回复 bot）、鉴权、相册收集；没叫到 bot 的消息交给静默旁听
+     -> 追问：conversations.get 接上历史；过期时把 bot 那条回复并入本轮 user 消息
+     -> 新对话：prompt.new_conversation（系统提示词 + 首条 user 消息）
+        prompt.user_turn 拼出 [记忆附注] [梗词典附注] 正文 [当前时间]，有图时是多模态数组
+     -> conversations.trim
   -> chat.stream_reply
-     后台发送占位消息和取消按钮（与首轮 LLM 请求并发），注册 active_generations
-     -> 取得 llm.adapter
-     -> 进入统一轮次循环
-        -> 每轮调用 adapter.run_round
-        -> 无输出就出错：配置了备用模型时，本条回复剩余轮次改用 llm.fallback_adapter
-           （去掉工具调用上的厂商扩展字段，进度行提示切换，定稿末尾注明，提示不进历史）；
-           没配备用模型时重试一次，429 不重试；已有正文则按完成处理
-        -> 若返回工具调用且本轮允许 tools，执行 chat._execute_tool_calls
-           -> calculate 调用 calc.run_calculate
-           -> remember_slang 调用 slang.run_remember（按当前聊天记下一种用法）
-           -> web_search 调用 web.run_web_search
-              -> 可选 Gemini grounding
-              -> 或多搜索源并发聚合、去重和交错合并
-           -> open_url 调用 web.run_fetch_url
-              -> httpx 抓取、独立进程提取正文、必要时 Jina 兜底
-        -> 工具结果追加到 working history 后进入下一轮
-        -> Gemini 原生返回的 citations 在循环结束后附到正文
-     -> 正文按节流间隔在后台流式编辑（中间态同样渲染 MarkdownV2），超过分段阈值时发送下一条消息
-  -> 等在途编辑落地后 MarkdownV2 定稿，失败时回退纯文本
-  -> tg.remember 按回复的每一段消息 id 保存追问所需的对话历史
-  -> memory.record 记下这一轮问答；原文攒到 6 条时后台调用模型把较早的并进摘要
+     Bubble.open 后台发占位消息和取消按钮（与首轮请求并发），注册 active_generations
+     -> chat._generate：最多 SEARCH_MAX_ROUNDS + 1 轮，最后一轮不挂工具
+        -> chat._call_model：adapter.run_round，正文增量交给 Bubble.on_text
+           零输出就出错：配了备用模型就整条换成备用模型（去掉厂商扩展字段；两边工具能力不同时
+           连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
+        -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
+           -> calculate、remember_slang、web_search（grounding 模式同轮合并）、open_url
+        -> 工具结果追加到这次调用自己的 working history，进入下一轮
+        -> Gemini 原生返回的引用附到正文末尾
+     -> Bubble.finish 定稿（MarkdownV2，失败回退纯文本）；终轮空手时回用最后一版草稿
+  -> conversations.remember 按回复的每一段消息 id 保存追问用的历史
+  -> memory.record 记下这一轮问答；攒到 6 条时后台让模型把较早的并进摘要
 ```
-
-OpenAI、Responses 和 Claude 最多运行 `SEARCH_MAX_ROUNDS + 1` 轮（搜索和计算共用轮数），最后一轮强制不带 tools，避免无限工具调用。Gemini 原生仍走同一段 chat 循环，但固定为一轮且不启用 bot 工具。
 
 ## 关键设计决策
 
-- 实时时间追加到最新一条用户消息，而不是系统提示或历史消息。这样多轮间的 system prompt 与历史字节保持不变，有利于上游 prompt cache 命中。
-- SDK 内建重试被禁用，OpenAI 与 Anthropic 客户端均使用 `max_retries=0`。重试语义只由 chat 的统一循环控制。
-- 流消费使用空闲看门狗：仅在已有正文且没有半截工具调用时，连续 `STREAM_IDLE_TIMEOUT` 秒无新数据才按完成收尾。它不是整次请求的人为超时。
-- OpenAI 兼容路径会回传 Gemini 思考型模型 tool call 中的 `thought_signature`。Claude 原生路径会收集 thinking 和签名，并在工具续传时恢复为 Anthropic 消息块。Responses 路径把带 `encrypted_content` 的推理条目挂在首个工具调用上，续传时放回 input；function_call 条目不带条目 id，不依赖服务端存储。
-- `calculate` 只解释白名单 AST 节点（数字、四则与幂、比较、少量数学和日期函数），没有名字查找和属性访问；整数位数、幂指数、阶乘和表达式长度都有上限，越界返回失败文案而不是执行。
+- 实时时间追加到最新一条 user 消息，系统提示词和历史保持字节不变，上游 prompt cache 才能命中；记忆也只注入一段对话的首条 user 消息。
+- 系统提示词由 `prompt.system_prompt(with_tools)` 生成：只有当前模型走 bot 工具循环时才附各工具的使用说明（来自 `Tool.prompt_note`），Gemini 原生不提这些工具。
+- 工具成功与否由工具自己返回（`Outcome.ok`），进度结果行不靠文本形状判断。`web.py` 搜不到或读不到时抛 `WebError`，`str(e)` 就是给模型看的说明。
+- SDK 内建重试关闭（`max_retries=0`），重试只由 chat 控制。
+- OpenAI 兼容路径回传 Gemini 思考型模型的 `thought_signature`；Claude 原生收集 thinking 和签名，续传时恢复成原生块；Responses 把带 `encrypted_content` 的推理条目挂在首个工具调用上，续传时放回 input。
+- `calculate` 只解释白名单 AST 节点，没有名字查找和属性访问；整数位数、幂指数、阶乘和表达式长度都有上限。
 - 网页正文提取运行在独立进程，避免 trafilatura 和 lxml 的 CPU 工作阻塞事件循环。
-- 气泡更新单飞且在后台执行：占位、中间编辑和进度渲染同一时刻最多一个在途请求，流消费不等待 Telegram 往返或限流退避，编辑的网络错误只丢该次显示、不打断生成。定稿、取消和报错前先等在途编辑落地，避免旧编辑覆盖新内容。占位消息发送失败（如 bot 被踢出群）会取消本次生成。
-- 相册多图并发下载。
-- 回复 bot 的任一段消息（带不带 @ 都算）即为追问，接上缓存的历史；群聊里每条 user 消息、被引用消息的作者和记忆里的说话人都标成「名字（@用户名，id）」，同名的人靠唯一 id 区分，系统提示词附带一句约定：回复时只用名字称呼，不念 id、不写 @用户名。历史过期时把 bot 那条回复并入本轮 user 消息，不伪造 assistant 轮；`trim_history` 截断后从 user 开始，满足严格交替的接口和本地模型对话模板。
+- 气泡更新单飞且在后台执行，编辑的网络错误只丢该次显示、不打断生成；定稿、取消和报错前先等在途编辑落地。占位消息发不出去（例如 bot 被踢出群）会取消本次生成。
+- 群聊里每条 user 消息、被引用消息的作者和记忆里的说话人都标成「名字（@用户名，id）」，同名的人靠 id 区分；截断后的历史从 user 开始，满足严格交替的接口和本地模型模板。
 - 只订阅 `message` 和 `callback_query` 更新：编辑旧消息不会触发重复回答。
-- grounding 被视为调研代理。同轮多个 `web_search` 会合并为一个综合任务，减少重复调用。
-- 进度显示使用纯文本和缩进，不向群成员展示 URL。
-- `open_url` 只接受公网 HTTP(S) 地址，拒绝内网和回环 IP 字面量。
-- 对话缓存同时按条目数和近似内容字符量驱逐。字符预算统计文本、图片 data URL 等 content 长度，用于避免视觉历史无界增长；它不是进程内存硬上限，Python 对象开销、字符编码和共享消息对象都会使实际内存与统计值不同。
+- 进度显示用纯文本和缩进，不向群成员展示网址；`open_url` 只接受公网 HTTP(S) 地址。
+- 对话缓存同时按条目数和近似内容字符量驱逐；字符量不是进程内存硬上限。
 
 ## 运行时状态归属
 
-- `llm.adapter`、`llm.fallback_adapter`：主模型和备用模型的协议适配器（各自独立的粘性能力降级状态）。两者都由 `config.LLMEndpoint`（协议、模型、地址、key、额外参数）构造；`config.fallback_endpoint()` 中留空的协议、地址和 key 沿用主模型，额外参数不继承。
-- `web._grounding_cooldown_until`：Gemini grounding 遇到配额错误后的冷却状态。
+- `llm.adapter`、`llm.fallback_adapter`：主模型和备用模型的适配器，各自记着自己的降级状态。`config.fallback_endpoint()` 里留空的协议、地址和 key 沿用主模型，额外参数不继承。
+- `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
-- `tg_auth.allowed_users`：运行时白名单。
-- `tg.conversations`、`tg._conv_sizes`、`tg._conv_total`：对话历史及近似内容字符预算会计。
-- `tg.album_cache`：相册聚合缓存。
-- `memory._store`：每个聊天的记忆摘要和最近问答，写入 `MEMORY_FILE`（原子替换）。注入块总字数不超过 `MEMORY_MAX_CHARS`，摘要最多占一半；最近问答只注入「谁问了什么」，不带 bot 的旧回答，附注要求模型默认忽略、只在相关时用，避免旧话题喧宾夺主。完整问答只交给压缩摘要的那次调用。记忆只注入一段对话的首条 user 消息，追问前缀字节不变，不影响 prompt 缓存。压缩期间被 `/forget` 清空时不写回结果。
-- 记忆淡化：`memory.RECENT_TTL`（3 天）以外的提问不再注入，只剩过期内容时整块不注入。压缩时模型拿到今天的日期和每条问答的完整日期，摘要每行末尾标（YYYY-MM-DD）最近一次提到的日期，长期有效的行首标 `[长期]`。注入时 `memory._digest_lines` 把日期换成「距今多久」，一时话题超过 `MEMORY_FRESH_DAYS` 天不注入（旧的（MM-DD）格式按今年或去年解析，没日期的行原样保留）；最近的提问也标距今多久。情绪发泄、玩笑和一时的状态不进摘要。
-- 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息（含未授权用户的）由 `tg._observe` 交给 `memory.observe`，只进 `entry["observed"]` 缓冲区，不请求模型、不立刻写盘；`post_init` 启动的 `memory._observe_loop` 每分钟检查一次，满 `MEMORY_OBSERVE_INTERVAL` 分钟且攒够 5 条的群才串行整理，顺带把缓冲区落盘。问答压缩和旁听整理共用 `_compressing` 互斥，不会同时改同一个摘要；整理失败保留缓冲区，等下个周期。
-- 梗词典：`slang._entries` 按 `作用域|词` 存，每个词最多 3 种用法（释义、什么语境下是这个意思、原句），新用法排前、释义相同的去重，不覆盖旧理解；本群用法排在通用用法前面。`tg.handle_message` 用本条提问和被引用内容做子串匹配，只把命中的词（最多 5 个，长词优先，单字词只在 12 字以内的短句里算命中）作为「参考、先看语境、可能是字面意思」的附注拼到这条 user 消息前面；没命中不注入。写入 `SLANG_FILE`（原子替换），超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
-- 只回一段：`REPLY_SINGLE_PARAGRAPH` 开启时，系统提示词追加一条要求，同时 `chat._shape` 在每次显示前（中间编辑、分段定稿、取消、报错、终稿）把正文压成一段：去掉分点、编号和标题符号，中文行直接接上、没收尾的补逗号，英文行用空格或逗号接上，代码块原样保留。存进对话历史的也是压过的这一段。备用模型提示、「已取消」这类系统附注不并入正文。
+- `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
+- `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
+- `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。
+- `memory._store`：每个聊天的记忆摘要、最近问答和旁听缓冲，写入 `MEMORY_FILE`。注入块不超过 `MEMORY_MAX_CHARS`，摘要最多占一半；最近问答只注入「谁问了什么」，不带旧回答。压缩期间被 `/forget` 清空时不写回结果。
+- 记忆淡化：`memory.RECENT_TTL`（3 天）以外的提问不再注入。压缩时模型拿到今天和每条问答的完整日期，摘要每行末尾标最近一次提到的日期，长期有效的行首标 `[长期]`；注入时把日期换成「距今多久」，一时话题超过 `MEMORY_FRESH_DAYS` 天不注入。
+- 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只进缓冲区；`app.post_init` 启动的 `memory._observe_loop` 每分钟检查，满 `MEMORY_OBSERVE_INTERVAL` 分钟且攒够 5 条才整理。问答压缩和旁听整理共用 `_compressing` 互斥；整理失败保留缓冲区等下个周期。
+- `slang._entries`：梗词典，按「作用域|词」存，每个词最多 3 种用法，新的在前；本群用法排在通用用法前。只把这条消息和被引用内容里出现了的词附上（最多 5 个，单字词只在 12 字以内的短句里算命中）。写入 `SLANG_FILE`，超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
+- 只回一段：`REPLY_SINGLE_PARAGRAPH` 开启时系统提示词追加要求，`render.shape` 在每次显示前把正文压成一段（代码块保留），存进对话历史的也是这一段。
 
 ## 配置
 
-全部配置通过环境变量读取，示例和逐项注释见 `.env.example`。协议地址必须区分：OpenAI、Responses 和 Claude 使用 `LLM_BASE_URL`，Gemini 原生及 Gemini grounding 使用 `GEMINI_BASE_URL`。`SYSTEM_PROMPT` 中字面的 `\n` 会被当作换行，方便写成单行；`configure.py` 能读取跨行的引号值，写出时一律转成带 `\n` 转义的单行双引号值。多配置档保存在 `profiles/*.env`，由 `configure.py` 新建、切换和删除。
+全部配置通过环境变量读取，示例和逐项注释见 `.env.example`。OpenAI、Responses 和 Claude 使用 `LLM_BASE_URL`，Gemini 原生及 grounding 使用 `GEMINI_BASE_URL`。`SYSTEM_PROMPT` 中字面的 `\n` 当作换行。`configure.py` 能读跨行的引号值，写出时一律转成带 `\n` 转义的单行双引号值；向导每一步是一个 `_step_*` 函数，共享状态在 `Wizard` 里。多配置档保存在 `profiles/*.env`。
 
 ## 测试与部署
 
-- `python tests/smoke_test.py`：45 项行为级断言，覆盖流重试、空闲看门狗、取消、分段（含全部分段 id）、工具调用、四协议适配器、错误降级、引用、相册、SSRF、对话缓存预算、编辑网络错误不截断正文、历史截断从 user 开始、配置向导多行值读写和额外参数解析、calculate 计算与边界、Responses 转换、降级和工具循环、备用模型切换、提示和配置继承、长期记忆的预算、压缩、清空和淡化、贴纸和无字图片的回复、同名用户按 id 区分、静默旁听的攒批定期整理、梗词典的多用法记录、按词注入和按群隔离，以及只回一段的整段压缩。
-- 部署流程不属于测试的一部分。修改后应先在本地通过测试，再按项目部署方式重建服务。
+- `pip install -r requirements-dev.txt` 后运行 `python -m pytest`。用例按模块分文件：回复流程（test_reply）、工具（test_tools）、适配器（test_adapters）、消息拼装（test_messages）、记忆（test_memory）、梗词典（test_slang）、显示格式（test_render）、联网（test_web）、配置和向导（test_config、test_configure）。
+- 部署不属于测试。修改后先在本地跑通测试，再按项目部署方式重建服务。

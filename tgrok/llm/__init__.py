@@ -1,8 +1,10 @@
 """LLM 接入层：按配置装配主模型与可选备用模型的协议适配器。"""
 
 from .. import config
-from . import base
 from .base import RoundResult, assistant_tool_call_msg, is_quota_error, tool_args
+
+__all__ = ["RoundResult", "assistant_tool_call_msg", "is_quota_error", "tool_args",
+           "make_adapter", "adapter", "fallback_adapter"]
 
 
 def make_adapter(endpoint: config.LLMEndpoint):

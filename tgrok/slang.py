@@ -155,14 +155,3 @@ def slang_block(text: str, chat_id: int) -> str:
 
 def entries_for(chat_id: int) -> list[dict]:
     return sorted(_visible(chat_id), key=lambda e: e["term"].lower())
-
-
-def run_remember(args: dict, chat_id: int | None) -> str:
-    """remember_slang 工具入口：永不抛异常，返回给模型看的结果文本。"""
-    scope = str(args.get("scope", "chat")).strip().lower()
-    term = learn(str(args.get("term", "")), str(args.get("meaning", "")), chat_id,
-                 scope=GLOBAL if scope == GLOBAL else "chat",
-                 context=str(args.get("context", "")), example=str(args.get("example", "")))
-    if term is None:
-        return t("slang_bad_args", min=MIN_TERM_CHARS, max=MAX_TERM_CHARS)
-    return t("slang_saved", term=term)

@@ -19,7 +19,7 @@ os.environ["MEMORY_ENABLED"] = "true"
 os.environ["SLANG_FILE"] = str(_TMP / "slang.json")
 os.environ["SLANG_ENABLED"] = "true"
 
-from tgrok import chat, config, llm, prompt, tg, web  # noqa: E402
+from tgrok import chat, config, llm, prompt, render, tg, tools, web  # noqa: E402
 from tgrok.i18n import STRINGS  # noqa: E402
 from tgrok.llm import claude, gemini, openai  # noqa: E402
 from tgrok.llm.claude import ClaudeAdapter  # noqa: E402
@@ -191,7 +191,7 @@ web.run_web_search=fake_grounded
 am={"tool_calls":[
     {"id":"a","function":{"name":"web_search","arguments":json.dumps({"query":"q1"})}},
     {"id":"b","function":{"name":"web_search","arguments":json.dumps({"query":"q2"})}}]}
-rs = run(chat._execute_tool_calls(am))
+rs = run(tools.plan_round(am["tool_calls"], None).execute())
 assert len(gcalls)==1 and "q1；q2" in gcalls[0] and "已合并" in rs[1]["content"]
 config.GEMINI_SEARCH_MODEL = ""
 ok("同轮搜索合并")
@@ -251,7 +251,7 @@ class _FC:
                 body=None)
         return "S"
 a16 = OpenAIAdapter(client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FC())))
-out = run(a16._create_stream(HIST, use_tools=False))
+out = run(a16._create_stream(HIST, tools=None))
 assert seen[0]["temperature"]==0.9 and seen[0]["top_p"]==0.95
 assert out=="S" and "temperature" not in seen[1] and "top_p" not in seen[1]
 assert a16.sampling_supported is False
@@ -272,7 +272,7 @@ class _StructuredSampling:
         return "S"
 a_structured = OpenAIAdapter(client=types.SimpleNamespace(
     chat=types.SimpleNamespace(completions=_StructuredSampling())))
-out = run(a_structured._create_stream(HIST, use_tools=False))
+out = run(a_structured._create_stream(HIST, tools=None))
 assert out == "S" and seen[0]["temperature"] == 0.7 and "temperature" not in seen[1]
 assert a_structured.sampling_supported is False
 config.LLM_TEMPERATURE = None
@@ -298,7 +298,7 @@ class _FC2:
                 body=None)
         return "S"
 a17 = OpenAIAdapter(client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FC2())))
-out = run(a17._create_stream(HIST, use_tools=False))
+out = run(a17._create_stream(HIST, tools=None))
 assert seen[0]["extra_body"]["thinking"]["budget_tokens"] == 1000
 assert out=="S" and "extra_body" not in seen[1]
 assert a17.extra_body_supported is False
@@ -376,7 +376,7 @@ class _CC:
                 response=httpx.Response(400, request=httpx.Request("POST", "http://x")), body=None)
         return "CS"
 a20 = ClaudeAdapter(client=types.SimpleNamespace(messages=_CC()))
-out = run(a20._create_stream(HIST, use_tools=False))
+out = run(a20._create_stream(HIST, tools=None))
 assert out == "CS"
 assert seen[0]["system"] == "s" and seen[0]["max_tokens"] == 200000
 assert seen[0]["extra_body"]["thinking"]["budget_tokens"] == 1024
@@ -388,12 +388,12 @@ config.LLM_EXTRA_BODY = None
 ok("Claude 降级链")
 
 # 21. Gemini 主链：服务端工具协议只执行一轮，引用拼到最终正文
-class _GA:
+class _GA(llm.base.BaseAdapter):
     supports_tool_loop = False
     def __init__(s): s.n = 0
     async def run_round(s, history, use_tools, on_text):
         s.n += 1
-        assert use_tools is False
+        assert not use_tools
         await on_text("Gemini 答案")
         return llm.RoundResult(content="Gemini 答案", citations=[
             {"uri": "https://example.com/a", "title": "来源 A"}])
@@ -542,7 +542,7 @@ for bad in ("9**9**9", "factorial(5000)", "__import__('os')", "(1).__class__", "
         raise AssertionError(f"accepted {bad}")
     except calc.CalcError:
         pass
-assert calc.run_calculate("1/0").startswith("（")  # 失败文案让进度行显示为失败
+assert not run(tools.REGISTRY["calculate"].run({"expression": "1/0"}, None)).ok  # 失败让进度行显示为失败
 ok("calculate 精确计算与边界")
 
 # 33. Responses：chat 历史转换（instructions/图片/推理回传/工具结果）与事件流聚合
@@ -613,7 +613,7 @@ class _RC:
                 body={"error": {"param": "store", "message": "Unknown parameter: 'store'."}})
         return "RS"
 a34 = resp_mod.ResponsesAdapter(client=types.SimpleNamespace(responses=_RC()))
-assert run(a34._create_stream(hist33, use_tools=True)) == "RS"
+assert run(a34._create_stream(hist33, tools=tools.schemas())) == "RS"
 assert seen34[0]["temperature"] == 0.7 and seen34[0]["store"] is False
 assert "temperature" not in seen34[1] and seen34[1]["include"] == ["reasoning.encrypted_content"]
 assert "store" not in seen34[2] and "include" not in seen34[2]
@@ -730,7 +730,7 @@ _saved_budget = config.MEMORY_MAX_CHARS
 config.MEMORY_MAX_CHARS = 200  # 每条提问约 90 字：只放得下最新两条
 memory._store.clear()
 summaries = []
-class _SummaryAdapter:
+class _SummaryAdapter(llm.base.BaseAdapter):
     model = "sum"
     def __init__(s, text=None, fail=False, gate=None): s.text, s.fail, s.gate = text, fail, gate
     async def run_round(s, history, use_tools, on_text):
@@ -794,7 +794,7 @@ memory.record(-9, "老王（id 7）", "今天吃什么", "火锅")
 _block = memory.memory_block(-9)
 assert "今天吃什么" in _block and "跳楼" not in _block
 _seen_inputs = []
-class _DateProbe:
+class _DateProbe(llm.base.BaseAdapter):
     model = "probe"
     async def run_round(s, history, use_tools, on_text):
         _seen_inputs.append(history[-1]["content"])
@@ -878,7 +878,7 @@ ok("同名用户按 id 区分")
 # 43. 静默旁听：指定群里没叫 bot 的消息只进缓冲区、不请求模型；满一个周期且攒够条数才整理一次，
 #     整理期间新来的消息不会被吞；失败保留缓冲区等下个周期；未指定的群不旁听
 _obs_calls = []
-class _ObsAdapter:
+class _ObsAdapter(llm.base.BaseAdapter):
     model = "obs"
     def __init__(s, fail=False): s.fail = fail
     async def run_round(s, history, use_tools, on_text):
@@ -995,8 +995,8 @@ try:
     assert "老套又经典" in _ask44(-60, "太典了", 307)
     assert "老套又经典" not in _ask44(-60, "字典里查不到这个词怎么办啊各位", 308)
     # 参数不合格（空词或空释义）不写入，返回让模型能看懂的失败文案
-    assert slang.run_remember({"term": "", "meaning": "x", "scope": "chat"}, -60).startswith("（")
-    assert slang.run_remember({"term": "啥", "meaning": "", "scope": "chat"}, -60).startswith("（")
+    assert not run(tools.REGISTRY["remember_slang"].run({"term": "", "meaning": "x", "scope": "chat"}, -60)).ok
+    assert not run(tools.REGISTRY["remember_slang"].run({"term": "啥", "meaning": "", "scope": "chat"}, -60)).ok
 finally:
     tg.stream_reply = _orig_reply
     tg.allowed_users.discard(1007)
@@ -1005,9 +1005,9 @@ ok("梗词典：记住、按词附上、按群隔离")
 
 # 45. 只回一段：开启 REPLY_SINGLE_PARAGRAPH 后，模型分段、分点、带标题的输出在显示前被压成一段，
 #     中文行之间不加多余空格、没收尾的行补逗号，代码块原样保留；返回给对话历史的也是这一段；关闭时原样显示
-assert chat._single_paragraph("## 结论\n能。\n\n步骤：\n1. 先烧水\n2. 放面") == "结论，能。步骤：先烧水，放面"
-assert chat._single_paragraph("Short answer: yes.\n\n- one\n- two") == "Short answer: yes. one, two"
-_code45 = chat._single_paragraph("看代码：\n\n```python\nprint(1)\nprint(2)\n```\n\n就这。")
+assert render.single_paragraph("## 结论\n能。\n\n步骤：\n1. 先烧水\n2. 放面") == "结论，能。步骤：先烧水，放面"
+assert render.single_paragraph("Short answer: yes.\n\n- one\n- two") == "Short answer: yes. one, two"
+_code45 = render.single_paragraph("看代码：\n\n```python\nprint(1)\nprint(2)\n```\n\n就这。")
 assert "```python\nprint(1)\nprint(2)\n```" in _code45 and "\n\n" not in _code45
 async def cs45(h, use_tools):
     return stream_of([chunk_text("就你还想捏爆？\n\n整只握在手心没事。\n\n"), chunk_text("- 指尖戳一下就行")])

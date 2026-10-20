@@ -6,7 +6,7 @@ import logging
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from .base import BaseAdapter, RoundResult, active_tools, rejected_param, sampling_kwargs
+from .base import BaseAdapter, RoundResult, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +30,13 @@ class OpenAIAdapter(BaseAdapter):
         self.extra_body_supported = True
         self.token_param = "max_tokens"
 
-    async def run_round(self, history, use_tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history, use_tools)
+    async def run_round(self, history, tools, on_text) -> RoundResult:
+        stream = await self._create_stream(history, tools)
         calls, content = await drain_stream(stream, on_text)
         return RoundResult(calls=calls, content=content)
 
-    async def _create_stream(self, history: list[dict], use_tools: bool):
-        include_tools = use_tools and self.tools_supported
+    async def _create_stream(self, history: list[dict], tools: list[dict] | None):
+        include_tools = bool(tools) and self.tools_supported
         sampling = sampling_kwargs() if self.sampling_supported else {}
         extra_body = self.endpoint.extra_body if self.extra_body_supported else None
         while True:
@@ -47,7 +47,7 @@ class OpenAIAdapter(BaseAdapter):
             if extra_body:
                 kwargs["extra_body"] = extra_body
             if include_tools:
-                kwargs["tools"] = active_tools()
+                kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             try:
                 return await self.client.chat.completions.create(**kwargs)

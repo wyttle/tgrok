@@ -293,7 +293,7 @@ async def _summarize(input_text: str) -> str | None:
         if adapter is None:
             continue
         try:
-            result = await adapter.run_round(history, False, _noop)
+            result = await adapter.run_round(history, None, _noop)
         except Exception as e:
             logger.warning("记忆压缩调用 %s 失败：%s: %.200s", getattr(adapter, "model", ""), type(e).__name__, e)
             continue

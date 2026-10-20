@@ -7,7 +7,7 @@ import re
 import anthropic
 
 from .. import config
-from .base import BaseAdapter, RoundResult, active_tools, error_text, rejected_param, sampling_kwargs, tool_args
+from .base import BaseAdapter, RoundResult, error_text, rejected_param, sampling_kwargs, tool_args
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
@@ -31,15 +31,15 @@ class ClaudeAdapter(BaseAdapter):
         self.extra_body_supported = True
         self.max_tokens_limit: int | None = None
 
-    async def run_round(self, history, use_tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history, use_tools)
+    async def run_round(self, history, tools, on_text) -> RoundResult:
+        stream = await self._create_stream(history, tools)
         calls, content = await drain_stream(stream, on_text)
         return RoundResult(calls=calls, content=content)
 
-    async def _create_stream(self, history: list[dict], use_tools: bool):
+    async def _create_stream(self, history: list[dict], tools: list[dict] | None):
         """建立 Anthropic 原生流。降级链与 OpenAI 兼容路径同一套路。"""
         system_text, messages = to_anthropic_messages(history)
-        include_tools = use_tools and self.tools_supported
+        include_tools = bool(tools) and self.tools_supported
         sampling = sampling_kwargs() if self.sampling_supported else {}
         extra_body = self.endpoint.extra_body if self.extra_body_supported else None
         max_tokens = min(config.MAX_TOKENS, self.max_tokens_limit) if self.max_tokens_limit else config.MAX_TOKENS
@@ -51,7 +51,7 @@ class ClaudeAdapter(BaseAdapter):
             if extra_body:
                 kwargs["extra_body"] = extra_body
             if include_tools:
-                kwargs["tools"] = anthropic_tools()
+                kwargs["tools"] = anthropic_tools(tools)
             try:
                 return await self.client.messages.create(**kwargs)
             except anthropic.BadRequestError as e:
@@ -88,7 +88,7 @@ class ClaudeAdapter(BaseAdapter):
                 raise
 
 
-def anthropic_tools() -> list[dict]:
+def anthropic_tools(tools: list[dict]) -> list[dict]:
     """OpenAI function 工具定义 → Anthropic 原生工具格式。"""
     return [
         {
@@ -96,7 +96,7 @@ def anthropic_tools() -> list[dict]:
             "description": t["function"]["description"],
             "input_schema": t["function"]["parameters"],
         }
-        for t in active_tools()
+        for t in tools
     ]
 
 

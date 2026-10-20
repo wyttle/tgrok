@@ -11,7 +11,7 @@ import operator
 from datetime import date, datetime, timedelta
 
 from . import config
-from .i18n import phrases, t
+from .i18n import phrases
 
 MAX_EXPRESSION_CHARS = 500
 _MAX_INT_BITS = 10_000  # 约 3000 位十进制
@@ -183,10 +183,3 @@ def evaluate(expression: str) -> str:
         raise CalcError("expression nested too deeply") from None
     except (OverflowError, ValueError, TypeError) as e:
         raise CalcError(str(e) or type(e).__name__) from None
-
-def run_calculate(expression: str) -> str:
-    """工具入口：永不抛异常，失败返回让模型能继续作答的说明文本。"""
-    try:
-        return f"{expression.strip()} = {evaluate(expression)}"
-    except CalcError as e:
-        return t("calc_error", error=str(e))

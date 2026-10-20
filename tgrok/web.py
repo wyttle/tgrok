@@ -18,6 +18,11 @@ from .i18n import t
 logger = logging.getLogger(__name__)
 _grounding_cooldown_until = 0.0
 
+
+class WebError(Exception):
+    """搜索或读网页没拿到内容；str(e) 是给模型看的说明（为什么失败、接下来怎么办）。"""
+
+
 # 共享 HTTP 连接池：搜索/抓取复用连接，省掉每次请求的 TLS 握手。
 # 进程常驻，不显式关闭；超时在每次请求上单独指定。
 _http = httpx.AsyncClient(follow_redirects=True)
@@ -85,7 +90,7 @@ def format_search_results(query: str, rows: list[dict]) -> str:
         blocks.append(block)
         total += len(block)
     if not blocks:
-        return t("search_no_results", query=query)
+        raise WebError(t("search_no_results", query=query))
     return "\n\n".join(blocks)
 
 
@@ -180,14 +185,14 @@ async def _search_gemini_grounded(query: str) -> str | None:
 
 
 async def run_web_search(query: str) -> str:
-    """并发聚合所有已配置的搜索源。永不抛异常：失败返回让模型能继续作答的说明文本。
+    """并发聚合所有已配置的搜索源，返回编号的结果列表；搜不到或全部失败时抛 WebError。
 
     配置了 config.GEMINI_SEARCH_MODEL 时优先用 Gemini grounding（Google 服务端检索），
     失败/冷却期自动回退到普通搜索源。
     """
     query = (query or "").strip()
     if not query:
-        return t("search_no_results", query="")
+        raise WebError(t("search_no_results", query=""))
     if config.GEMINI_SEARCH_MODEL:
         grounded = await _search_gemini_grounded(query)
         if grounded is not None:
@@ -206,8 +211,8 @@ async def run_web_search(query: str) -> str:
             grouped.append(outcome)
     if not grouped:
         if first_error is not None:
-            return t("search_error", error=type(first_error).__name__)
-        return t("search_no_results", query=query)
+            raise WebError(t("search_error", error=type(first_error).__name__))
+        raise WebError(t("search_no_results", query=query))
     # 各源结果交错合并（每源轮流出一条）并按 URL 去重，保证每个源都有机会排前
     rows, seen = [], set()
     for tier in range(max(len(g) for g in grouped)):
@@ -398,10 +403,10 @@ async def _fetch_jina(url: str) -> str | None:
 
 
 async def run_fetch_url(url: str) -> str:
-    """抓取网页正文回灌给模型：本地直取为主，Jina Reader 兜底。永不抛异常。"""
+    """抓取网页正文：本地直取为主，Jina Reader 兜底；读不到时抛 WebError。"""
     url = (url or "").strip()
     if not _is_public_http_url(url):
-        return t("fetch_bad_url")
+        raise WebError(t("fetch_bad_url"))
     logger.info("读取网页: %s", url)
     t0 = time.monotonic()
     text, err = await _fetch_local(url)
@@ -416,4 +421,4 @@ async def run_fetch_url(url: str) -> str:
                 "读取网页完成（Jina 兜底，共 %.1fs，%d 字）: %s", time.monotonic() - t0, len(jina_text), url
             )
             return jina_text
-    return err
+    raise WebError(err)

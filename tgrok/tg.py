@@ -17,10 +17,10 @@ from telegram.ext import (
     filters,
 )
 
-from . import config, memory, slang
+from . import config, llm, memory, slang
 from .chat import on_cancel_button, stream_reply
 from .i18n import t
-from .prompt import SYSTEM_PROMPT, with_time
+from .prompt import system_prompt, with_time
 from .tg_auth import allowed_users, is_admin, is_authorized, save_allowed_users
 
 logger = logging.getLogger(__name__)
@@ -309,7 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if quoted_text:
                 user_content = t("prev_reply", content=quoted_text) + "\n\n" + user_content
             user_content = with_memory(with_slang(user_content, question))
-            history = [{"role": "system", "content": SYSTEM_PROMPT}]
+            history = [{"role": "system", "content": system_prompt(llm.adapter.supports_tool_loop)}]
         else:
             user_content = with_slang(user_content, question)
         history = history + [{"role": "user", "content": with_time(build_content(user_content, images))}]
@@ -327,7 +327,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             user_content = speaker(user_content)
         history = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt(llm.adapter.supports_tool_loop)},
             {"role": "user", "content": with_time(build_content(
                 with_memory(with_slang(user_content, f"{question}\n{quoted_text}")), images))},
         ]

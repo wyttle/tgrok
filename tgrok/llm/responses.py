@@ -13,7 +13,7 @@ import logging
 from openai import AsyncOpenAI, BadRequestError
 
 from .. import config
-from .base import BaseAdapter, RoundResult, active_tools, error_param, error_text, rejected_param, sampling_kwargs
+from .base import BaseAdapter, RoundResult, error_param, error_text, rejected_param, sampling_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +36,13 @@ class ResponsesAdapter(BaseAdapter):
         self.extra_body_supported = True
         self.stateless_supported = True
 
-    async def run_round(self, history, use_tools, on_text) -> RoundResult:
-        stream = await self._create_stream(history, use_tools)
+    async def run_round(self, history, tools, on_text) -> RoundResult:
+        stream = await self._create_stream(history, tools)
         calls, content = await drain_stream(stream, on_text)
         return RoundResult(calls=calls, content=content)
 
-    async def _create_stream(self, history: list[dict], use_tools: bool):
-        include_tools = use_tools and self.tools_supported
+    async def _create_stream(self, history: list[dict], tools: list[dict] | None):
+        include_tools = bool(tools) and self.tools_supported
         sampling = sampling_kwargs() if self.sampling_supported else {}
         extra_body = self.endpoint.extra_body if self.extra_body_supported else None
         while True:
@@ -58,7 +58,7 @@ class ResponsesAdapter(BaseAdapter):
             if extra_body:
                 kwargs["extra_body"] = extra_body
             if include_tools:
-                kwargs["tools"] = responses_tools()
+                kwargs["tools"] = responses_tools(tools)
                 kwargs["tool_choice"] = "auto"
             try:
                 return await self.client.responses.create(**kwargs)
@@ -96,7 +96,7 @@ def _rejects_stateless(e: BaseException) -> bool:
     return "encrypted_content" in text or "'store'" in text or "'include'" in text
 
 
-def responses_tools() -> list[dict]:
+def responses_tools(tools: list[dict]) -> list[dict]:
     """chat 格式的 function 工具 → Responses 的扁平格式。
     strict 显式关掉：Responses 默认按严格模式校验 schema，现有 schema 不满足其要求。"""
     return [
@@ -107,7 +107,7 @@ def responses_tools() -> list[dict]:
             "parameters": t["function"]["parameters"],
             "strict": False,
         }
-        for t in active_tools()
+        for t in tools
     ]
 
 

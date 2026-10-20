@@ -2,9 +2,7 @@
 
 from .. import config
 from . import base
-from .base import (
-    RoundResult, active_tools, assistant_tool_call_msg, is_quota_error, tool_args,
-)
+from .base import RoundResult, assistant_tool_call_msg, is_quota_error, tool_args
 
 
 def make_adapter(endpoint: config.LLMEndpoint):

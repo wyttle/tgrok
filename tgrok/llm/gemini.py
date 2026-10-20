@@ -39,7 +39,7 @@ class GeminiAdapter(BaseAdapter):
         self.model = self.endpoint.model
         self.client = client if client is not None else make_client(self.endpoint.api_key, self.endpoint.base_url)
 
-    async def run_round(self, history, use_tools, on_text) -> RoundResult:
+    async def run_round(self, history, tools, on_text) -> RoundResult:
         stream = await self._create_stream(history)
         citations, content = await drain_stream(stream, on_text)
         return RoundResult(content=content, citations=citations)

@@ -2,26 +2,24 @@
 
 from datetime import datetime
 
-from . import config
+from . import config, tools
 from .i18n import phrases, t
 
-SYSTEM_PROMPT = (config.SYSTEM_PROMPT_OVERRIDE
-                 if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt"))
-# 说话人标识的约定：用 id 区分同名的人，回复里只用名字
-SYSTEM_PROMPT += "\n\n" + t("speaker_note")
-if config.REPLY_SINGLE_PARAGRAPH:
-    SYSTEM_PROMPT += "\n\n" + t("single_paragraph_note")
-if config.LLM_PROTOCOL != "gemini":
-    # Gemini 原生不走 bot 的工具循环；其余协议都会挂载 calculate（和开启时的 remember_slang）
-    SYSTEM_PROMPT += "\n\n" + t("calc_system_prompt")
-    if config.SLANG_ENABLED:
-        SYSTEM_PROMPT += "\n\n" + t("slang_system_prompt")
-if config.SEARCH_ENABLED:
-    # 明确告知模型它拥有联网搜索能力，避免它声称"我无法联网"
-    SYSTEM_PROMPT += "\n\n" + t("search_system_prompt")
-    if config.GEMINI_SEARCH_MODEL:
-        SYSTEM_PROMPT += t("search_agent_note")
-    SYSTEM_PROMPT += "\n\n" + t("slang_search_prompt")
+
+def system_prompt(with_tools: bool) -> str:
+    """系统提示词：人设（SYSTEM_PROMPT 或内置默认）+ 固定约定 + 挂载工具的使用说明。
+
+    with_tools 跟着当前模型走：不走 bot 工具循环的协议（Gemini 原生）不提这些工具，
+    免得模型以为自己能调用。
+    """
+    base = config.SYSTEM_PROMPT_OVERRIDE if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt")
+    # 说话人标识的约定：用 id 区分同名的人，回复里只用名字
+    parts = [base, t("speaker_note")]
+    if config.REPLY_SINGLE_PARAGRAPH:
+        parts.append(t("single_paragraph_note"))
+    if with_tools:
+        parts += tools.prompt_notes()
+    return "\n\n".join(parts)
 
 
 def current_time_line() -> str:

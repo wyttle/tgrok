@@ -39,6 +39,7 @@ async def post_init(app: Application) -> None:
 
 
 async def post_shutdown(app: Application) -> None:
+    await memory.stop_maintenance()
     await research.close_pool()
 
 

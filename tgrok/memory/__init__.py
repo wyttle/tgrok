@@ -112,6 +112,16 @@ def start_maintenance() -> None:
         logger.info("静默旁听：群 %s", ",".join(map(str, sorted(config.MEMORY_OBSERVE_CHATS))))
 
 
+async def stop_maintenance() -> None:
+    """应用退出前停掉定期整理：不停的话事件循环关闭时会报「Task was destroyed but it is pending」。"""
+    global _maintenance
+    if _maintenance is None:
+        return
+    _maintenance.cancel()
+    await asyncio.wait([_maintenance])
+    _maintenance = None
+
+
 # ---- 旧版 memory.json 迁移 ----
 
 _LEGACY_DATE_RE = re.compile(r"\s*[（(]\s*(?:(\d{4})-)?(\d{1,2})-(\d{1,2})\s*[)）]\s*$")

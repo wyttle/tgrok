@@ -16,21 +16,23 @@ def _search_summary(content: str) -> str:
 
 
 class WebSearchTool(Tool):
-    """配置了 GEMINI_SEARCH_MODEL 时它是深度调研代理：每次调用内部已经多轮检索，
-    所以同一轮的多个调用合并成一次综合调研执行，避免主模型把它当浏览器逐条调度。"""
+    """配置了 GEMINI_SEARCH_MODEL 时由 Gemini + Google 搜索执行：每次调用内部会检索几次并汇总，
+    所以同一轮的多个调用合并成一次执行。它只是快速检索；要认真查证的事交给 research。"""
 
     name = "web_search"
 
     @property
     def description(self) -> str:
+        research = (" For anything serious or that needs real checking (why something happened, money, health, "
+                    "law, politics, safety, origins, true-or-false), use research instead."
+                    if config.RESEARCH_MODELS else "")
         if config.GEMINI_SEARCH_MODEL:
-            return ("Deep research agent backed by Google Search. Give it ONE comprehensive "
-                    "research task in natural language — it can cover several aspects at once, "
-                    "and the agent will run multiple Google searches internally and return a "
-                    "fact summary with sources. Do NOT split one round of research into many "
-                    "narrow queries; one well-phrased task per round is enough.")
-        return ("Search the web for up-to-date information. Use this for recent events, "
-                "time-sensitive facts, or anything you are unsure about.")
+            return ("Quick Google lookup run by Gemini: give it one question in natural language and it returns a "
+                    "short fact summary with sources. Good for simple lookups with one clear answer (weather, "
+                    "current prices or rates, scores, schedules, a date). Don't split one round into many narrow "
+                    "queries." + research)
+        return ("Search the web for up-to-date information: simple lookups, recent events, time-sensitive facts."
+                + research)
 
     @property
     def parameters(self) -> dict:

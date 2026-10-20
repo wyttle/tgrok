@@ -233,8 +233,12 @@ STRINGS = {
             "- 问出处、来源：梗、名言、台词、诗句、段子、图片、谣言最早出自哪里，谁先说的、在什么场合\n"
             "- 辨真假：某句话是不是某人说的，截图、传闻、新闻靠不靠谱，有争议或流传很广的说法\n"
             "- 不认识或拿不准的梗、圈子黑话、新词\n"
-            "web_search（包括它背后的 Gemini 检索）只适合拿个概况；结果互相矛盾或说不清时也换 research。"
-            "可以在同一轮同时调 web_search 先看一眼。天气、价格、比分这类实时数据，闲聊和课本常识不用 research。"
+            "- 问原因、来龙去脉、怎么回事：某只股票或某个市场为什么涨跌、某件事是怎么发生的、现在局势怎样、会有什么影响\n"
+            "- 严肃的事：钱和投资、健康和用药、法律、政治、安全、人身财产，以及群友要据此做决定的事\n"
+            "- 需要准确数字、日期、出处才能答对的事实，或者 web_search 查完还说不清、互相矛盾的\n"
+            "web_search（包括它背后的 Gemini 检索）只是快速检索，只用于一搜就有确定答案的简单查询：天气、现价和汇率、"
+            "比分、时刻表、某个日期。拿不准一个问题算不算简单查询，就当作严肃问题用 research。"
+            "可以在同一轮同时调 web_search 先看一眼。闲聊和课本常识不用 research。"
             "等待期间 bot 会显示进度，不用担心慢。\n"
             "task 要写全背景：原话、出自哪个圈子或平台、群友到底想知道什么，研究员看不到群聊。"
             "两份报告由你来判断：说法一致又有一手来源的可以采信；有分歧时信来源更权威、更具体、更新的那份，"
@@ -304,10 +308,10 @@ STRINGS = {
         "search_no_results": "（没有找到「{query}」的联网搜索结果）",
         "search_error": "（联网搜索失败：{error}。凭已有知识回答，顺带提一句没查到最新信息即可。）",
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
-        "search_merged": "（本轮多个 web_search 已合并为一次深度调研执行，结果见第一条 web_search 返回）",
+        "search_merged": "（本轮多个 web_search 已合并为一次检索执行，结果见第一条 web_search 返回）",
         "search_agent_note": (
-            "注意：web_search 是深度调研代理，一次调用内部会自动执行多轮 Google 搜索并汇总。"
-            "把一轮要查证的内容合并成一个综合调研任务提交，不要拆成多个小查询。"
+            "注意：web_search 由 Gemini 执行，一次调用内部会跑几次 Google 搜索并汇总，但它只是快速检索，不是深入调研。"
+            "把一轮要查的内容合并成一个问题提交，不要拆成多个小查询。"
         ),
         "fetch_bad_url": "（无法读取该地址：仅支持公网 http/https 链接）",
         "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
@@ -634,9 +638,16 @@ STRINGS = {
             "- whether it's true: whether someone really said something, whether a screenshot, rumor, or news item "
             "holds up, widely repeated or disputed claims\n"
             "- memes, community jargon, or new words you don't know or aren't sure about\n"
-            "web_search (including the Gemini lookup behind it) is for a quick overview; when its results conflict "
-            "or don't settle it, switch to research. You may call web_search in the same turn for a first look. Live "
-            "data like weather, prices, or scores, small talk, and textbook facts don't need research. The bot shows "
+            "- why or how something happened: why a stock or market moved, how an event came about, where a situation "
+            "stands now, what it will lead to\n"
+            "- anything serious: money and investing, health and medication, law, politics, safety, people's lives and "
+            "property, and anything someone will base a decision on\n"
+            "- facts that need exact numbers, dates, or sources to get right, or that web_search left unclear or "
+            "contradictory\n"
+            "web_search (including the Gemini lookup behind it) is only a quick lookup, for simple questions with one "
+            "clear answer: weather, current prices and exchange rates, scores, schedules, a date. If you're not sure "
+            "whether a question is that simple, treat it as serious and use research. You may call web_search in the "
+            "same turn for a first look. Small talk and textbook facts don't need research. The bot shows "
             "progress while it runs, so don't worry about the wait.\n"
             "Write the task with full background (the exact wording, which community or platform it comes from, what "
             "the person actually wants to know); the researchers can't see the chat. You judge the two reports: "
@@ -712,10 +723,10 @@ STRINGS = {
         "search_no_results": "(no web search results found for \"{query}\")",
         "search_error": "(web search failed: {error}. Answer from what you know and briefly mention you couldn't check the latest info.)",
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
-        "search_merged": "(multiple web_search calls this round were merged into one deep-research run; see the first web_search result)",
+        "search_merged": "(multiple web_search calls this round were merged into one lookup; see the first web_search result)",
         "search_agent_note": (
-            "Note: web_search is a deep research agent that internally runs multiple Google "
-            "searches per call. Submit ONE combined research task per round instead of many narrow queries."
+            "Note: web_search is run by Gemini and does a few Google searches per call, but it is a quick lookup, "
+            "not in-depth research. Submit ONE combined question per round instead of many narrow queries."
         ),
         "fetch_bad_url": "(cannot fetch this address: only public http/https URLs are supported)",
         "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",

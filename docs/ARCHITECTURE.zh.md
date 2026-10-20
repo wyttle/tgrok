@@ -115,12 +115,18 @@ Telegram update
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
            -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
            -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
-              超时或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次；
+              超时或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
+              每个研究员的主→备先后跑）；超时（包括 omp 自己的 --max-time 中止）不换备选；失败原因取 omp 事件流里
+              接口报的错误（网关 HTML 错误页只取标题）；
               报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。系统提示词要求问出处、辨真假、
               不认识的梗一律先用 research（开了 research 时，查梗的说明也指向它而不是 web_search）
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
         -> Gemini 原生返回的引用附到正文末尾
+     -> 轮次跑完还没有正文（空返回，或者最后一轮不挂工具时模型还想调工具）：chat._answer_now 追加一条
+        「不能再调用工具，根据已有资料直接作答」再问一次，还没有就换备用模型再问一次
      -> Bubble.finish 定稿（富文本消息，细节过长自动折叠；被拒绝时改发纯文本）；终轮空手时回用最后一版草稿
+     -> 还是没写出回答、或者出错时，这次工具已经查到了东西：提示「回复这条消息就接着答」，并通过 keep 回调
+        把对话 + 工具结果（纯文本，最多 chat.FINDINGS_CHARS 字）按那条提示的消息 id 存进 conversations
   -> conversations.remember 按回复的每一段消息 id 保存追问用的历史；recent.add_bot 记下 bot 的回复
   -> memory.record_exchange 把这一轮问答原样存进原始记录：被引用的原话按原作者单独记（按消息 id 去重），
      提问只记「（回复了谁的消息）问了什么」；后台整理再从里面挑出值得记的条目

@@ -113,7 +113,7 @@ def test_recent_group_chat_is_attached_with_who_said_what(monkeypatch):
     """群友就刚才的聊天直接问 bot：附上最近群聊，每行写明谁说的、回复谁；追问只附上次回答之后的新消息。"""
     asked = []
 
-    async def fake_reply(msg, history):
+    async def fake_reply(msg, history, keep=None):
         asked.append(history)
         return [60], "他俩在争火锅还是烧烤"
 

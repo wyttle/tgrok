@@ -221,7 +221,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     history = conversations.trim(history)
-    answer_ids, answer = await stream_reply(msg, history)
+
+    def keep(ids: list[int], kept: list[dict]) -> None:
+        for message_id in ids:
+            conversations.remember(msg.chat_id, message_id, kept, msg.from_user.id)
+
+    answer_ids, answer = await stream_reply(msg, history, keep)
     if not (answer_ids and answer):
         logger.warning("没有产生回复（%.1fs）", req.elapsed())
         return

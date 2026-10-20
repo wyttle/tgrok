@@ -116,7 +116,7 @@ python bot.py
 | `JINA_FALLBACK` | 直接提取网页失败时使用 Jina Reader 兜底 | `true` |
 | `JINA_API_KEY` | 可选 Jina API key，用于提高速率限制 | （空） |
 | `RESEARCH_MODELS` | `research` 工具用的 omp 模型名（逗号分隔），每个模型一个研究员；留空关闭 | （空） |
-| `RESEARCH_FALLBACK_MODELS` | 每个研究员的备选 omp 模型（按位置对应，只写一个则共用）；研究员失败（超时除外）时换它再跑一次 | （空） |
+| `RESEARCH_FALLBACK_MODELS` | 每个研究员的备选 omp 模型（按位置对应，只写一个则共用）；研究员失败时换它再跑一次，时间用完的除外 | （空） |
 | `RESEARCH_TIMEOUT` | 单个研究员最多跑多少秒 | `150` |
 | `RESEARCH_THINKING` | 研究员的思考强度（`omp --thinking`） | `low` |
 | `RESEARCH_CONCURRENCY` | 同时最多几个调研任务 | `2` |

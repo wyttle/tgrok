@@ -164,6 +164,9 @@ STRINGS = {
         "media_heard": "（发了{what}。另一个模型看/听过，内容转述如下：「{text}」{more}）",
         "media_heard_more": "转述没回答到的细节可以用 watch_media（media_id={id}）带着具体问题再看。",
         "empty_reply": "（模型返回了空回复）",
+        "answer_now": "（系统提示：不能再调用工具了。请只根据上面已经拿到的资料，直接回答提问；资料不够的地方直接说明。）",
+        "findings_kept_notice": "这次查到的资料都留着：回复这条消息（比如说「继续」），我接着用这些资料回答，不用重新查。",
+        "findings_kept_history": "（上一次查到了下面这些资料，但没来得及写出回答。对方回复时，根据这些资料回答。）\n\n{findings}",
         "thinking_stages": ["思考中", "根据结果继续思考"],
         "elapsed_s": "{s} 秒",
         "elapsed_m": "{m} 分 {s:02d} 秒",
@@ -562,6 +565,12 @@ STRINGS = {
         "media_heard_more": "For details the account doesn't cover, call watch_media (media_id={id}) with a specific "
                             "question.",
         "empty_reply": "(the model returned an empty response)",
+        "answer_now": "(System note: no more tool calls are possible. Answer the question directly from the material "
+                      "gathered above; say plainly where it isn't enough.)",
+        "findings_kept_notice": "What I found is kept: reply to this message (e.g. \"continue\") and I'll answer from it "
+                                "without searching again.",
+        "findings_kept_history": "(Last time I gathered the material below but didn't get to write an answer. When "
+                                 "they reply, answer from it.)\n\n{findings}",
         "thinking_stages": ["Thinking", "Working through the results"],
         "elapsed_s": "{s}s",
         "elapsed_m": "{m}m {s:02d}s",

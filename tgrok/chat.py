@@ -7,6 +7,7 @@ import asyncio
 import html
 import logging
 import time
+from collections.abc import Callable
 from itertools import count
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -130,9 +131,25 @@ async def _call_model(models: _Models, working: list[dict], round_idx: int,
     return result, working, schemas
 
 
-async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _Models) -> str:
+FINDINGS_CHARS = 12000  # 没写出回答时留给追问的工具结果总字数
+
+
+async def _answer_now(models: _Models, working: list[dict], bubble: Bubble) -> None:
+    """轮次跑完还没有正文（空返回，或者在不挂工具的最后一轮还想调工具）：加一句「直接根据已有资料作答」
+    再问一次；还是没有就换备用模型再问一次。"""
+    nudge = {"role": "user", "content": t("answer_now")}
+    for _ in range(2):
+        logger.warning("%s 没有写出正文，要求它根据已有资料直接作答", getattr(models.adapter, "model", ""))
+        await _call_model(models, working + [nudge], config.SEARCH_MAX_ROUNDS, bubble)
+        if bubble.has_text or not models.can_switch():
+            return
+        working = models.switch(working)
+
+
+async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _Models,
+                    findings: list[dict]) -> str:
     """跑模型轮次直到出终稿（正文留在 bubble 里），返回最后一版被丢弃的草稿。
-    工具消息只追加到副本，调用方的 history 保持干净。"""
+    工具消息只追加到副本，调用方的 history 保持干净；工具结果同时收进 findings，没写出回答时留给追问。"""
     working = list(history)
     citations: list[dict] = []
     draft = ""
@@ -156,7 +173,11 @@ async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _
         bubble.stage = None
         await bubble.show_progress()
         working.append(assistant_msg)
-        working.extend(await plan.execute())
+        results = await plan.execute()
+        working.extend(results)
+        findings.extend(m for m in results if m.get("role") == "tool")
+    if not bubble.has_text and not draft:
+        await _answer_now(models, working, bubble)
     if citations and bubble.has_text:
         # Gemini 原生 grounding 的引用附在正文末尾
         links = "\n".join(f'<a href="{html.escape(c["uri"])}">{html.escape(c["title"] or c["uri"], quote=False)}</a>'
@@ -165,11 +186,38 @@ async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _
     return draft
 
 
-async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], str]:
+def _kept_history(history: list[dict], findings: list[dict]) -> list[dict]:
+    """没写出回答时留给追问的对话：原来的对话 + 一条 assistant 消息，里面是这次工具查到的资料（纯文本）。"""
+    parts, used = [], 0
+    for m in findings:
+        part = f"[{m.get('name') or 'tool'}]\n{m.get('content') or ''}"[: FINDINGS_CHARS - used]
+        parts.append(part)
+        used += len(part)
+        if used >= FINDINGS_CHARS:
+            break
+    return history + [{"role": "assistant", "content": t("findings_kept_history", findings="\n\n".join(parts))}]
+
+
+Keep = Callable[[list[int], list[dict]], None]
+
+
+async def _fail(bubble: Bubble, text: str, history: list[dict], findings: list[dict], keep: Keep | None) -> None:
+    """报错或空回复。这次已经用工具查到了东西时不白查：提示回复这条消息就能接着答，并把资料交给 keep 存下。"""
+    if findings and keep is not None:
+        notice_id = await bubble.show_error(text + "\n" + t("findings_kept_notice"))
+        if notice_id is not None:
+            keep([notice_id], _kept_history(history, findings))
+            logger.info("没写出回答，%d 条工具结果已留给追问（消息 %s）", len(findings), notice_id)
+            return
+    await bubble.show_error(text)
+
+
+async def stream_reply(msg: Message, history: list[dict], keep: Keep | None = None) -> tuple[list[int], str]:
     """生成回复并在 Telegram 上流式显示。
 
     返回（承载回复的全部消息 id, 完整回复文本）——长回复分段时每一段都能被回复追问；
-    失败、取消或空回复时已就地提示，返回 ([], "")。
+    失败、取消或空回复时已就地提示，返回 ([], "")。失败或空回复前工具已经查到东西时，
+    调用 keep(提示消息 id, 带上这些资料的对话)，群友回复那条提示就能接着答。
     """
     gen_id = next(_gen_count)
     task = asyncio.current_task()
@@ -180,10 +228,11 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
     bubble.open(_stage_line(0))
     models = _Models()
     images: list[send_image.Image] = []
+    findings: list[dict] = []
     token = send_image.outbox.set(images)  # send_image 工具把要发的图攒到这里，正文定稿后再发
     try:
         try:
-            draft = await _generate(history, bubble, msg.chat_id, models)
+            draft = await _generate(history, bubble, msg.chat_id, models, findings)
             await bubble.stop()
         except asyncio.CancelledError:
             # 提问者或管理员点了取消按钮（或占位消息发不出去）
@@ -197,12 +246,15 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
         except Exception as e:
             logger.exception("调用模型失败")
             await bubble.stop()
-            await bubble.show_error(t("llm_quota") if llm.is_quota_error(e) else t("llm_failed"))
+            await _fail(bubble, t("llm_quota") if llm.is_quota_error(e) else t("llm_failed"), history, findings, keep)
             return [], ""
         finally:
             bubble.stop_ticker()
         if images and not draft:
             draft = t("images_only_reply")  # 模型只发了图没写字：气泡里留一句，别显示成空回复
+        if not bubble.has_text and not draft and findings:
+            await _fail(bubble, t("empty_reply"), history, findings, keep)
+            return [], ""
         # 换了备用模型就在回复末尾注明；提示只用于显示，不进对话历史
         ids, answer = await bubble.finish(models.note, draft)
         if ids and images:

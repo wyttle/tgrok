@@ -77,6 +77,20 @@ def test_backup_failing_too_reports_both_errors():
     assert outcome.ok and "fail: boom: no credentials; fail-backup:" in outcome.content
 
 
+def test_gateway_error_page_is_reported_by_its_title_and_backup_runs():
+    config.RESEARCH_MODELS = ["blocked"]
+    config.RESEARCH_FALLBACK_MODELS = ["fail-backup"]
+    outcome = _research()
+    assert "blocked: 403 网站防火墙; fail-backup: boom: no credentials" in outcome.content
+
+
+def test_researcher_stopped_by_its_own_time_limit_is_not_rerun_on_backup():
+    # omp 自己的 --max-time 到点：再跑备选只会让群友再等一整轮
+    config.RESEARCH_MODELS = ["aborted"]
+    config.RESEARCH_FALLBACK_MODELS = ["cpa/ok-opus"]
+    outcome = _research()
+    assert not outcome.ok and "aborted: timed out" in outcome.content and "ok-opus" not in outcome.content
+
 
 def test_missing_omp_binary_is_a_failure_not_a_crash():
     config.RESEARCH_MODELS = ["cpa/ok-opus"]
@@ -119,4 +133,4 @@ def test_parse_events_takes_last_answer_and_sums_usage():
         '{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "结论"}], '
         '"usage": {"input": 5, "output": 3}}}',
     ]
-    assert research.parse_events("\n".join(lines)) == ("结论", {"input": 12, "output": 6})
+    assert research.parse_events("\n".join(lines)) == ("结论", {"input": 12, "output": 6}, "")

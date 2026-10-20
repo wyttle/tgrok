@@ -262,18 +262,19 @@ class Bubble:
         except TelegramError:
             pass
 
-    async def show_error(self, text: str) -> None:
-        """已有部分正文时保留定稿、错误另发一条；否则把占位改成错误提示。"""
+    async def show_error(self, text: str) -> int | None:
+        """已有部分正文时保留定稿、错误另发一条；否则把占位改成错误提示。返回提示所在的消息 id（发不出去时为 None）。"""
         try:
             if self.has_text:
                 await self.push(self.segment, final=True)
-                await rich.send_rich(self.msg, render.plain_to_html(text), text)
-            elif self.sent is not None and not self.finalized:
+                sent = await rich.send_rich(self.msg, render.plain_to_html(text), text)
+                return sent[0].message_id if sent else None
+            if self.sent is not None and not self.finalized:
                 await self.sent.edit_text(text)
-            else:
-                await self.msg.reply_text(text)
+                return self.sent.message_id
+            return (await self.msg.reply_text(text)).message_id
         except TelegramError:
-            pass
+            return None
 
     async def finish(self, note: str, draft: str) -> tuple[list[int], str]:
         """定稿最后一段。note 是只用于显示的附注（备用模型提示），不计入返回的正文。

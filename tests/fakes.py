@@ -209,7 +209,7 @@ def capture_replies(monkeypatch):
 
     captured = []
 
-    async def fake_reply(msg, history):
+    async def fake_reply(msg, history, keep=None):
         captured.append(history)
         return [], ""
 

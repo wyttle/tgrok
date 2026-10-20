@@ -106,7 +106,7 @@ def test_old_questions_are_not_injected():
 def _replying(monkeypatch, answer="好的"):
     histories = []
 
-    async def fake_reply(msg, history):
+    async def fake_reply(msg, history, keep=None):
         histories.append(history)
         return [77], answer
 

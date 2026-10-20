@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -60,9 +61,23 @@ def _command(model: str, task: str) -> list[str]:
     ]
 
 
-def parse_events(stdout: str) -> tuple[str, dict]:
-    """omp --mode json 的事件流 → (最后一条回答的正文, 累计 token 用量)。"""
-    text, usage = "", {}
+_TITLE_RE = re.compile(r"<title>(.*?)</title>", re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _error_text(raw: str) -> str:
+    """omp 报的接口错误压成一行：网关返回的 HTML 错误页只取标题（如「403 网站防火墙」）。"""
+    title = _TITLE_RE.search(raw)
+    if title:
+        raw = raw[: raw.find("<")] + title.group(1)
+    return " ".join(_TAG_RE.sub(" ", raw).split())[:160]
+
+
+def parse_events(stdout: str) -> tuple[str, dict, str]:
+    """omp --mode json 的事件流 → (最后一条回答的正文, 累计 token 用量, 失败原因)。
+    失败原因取最后一条回答的结束原因：aborted 是 omp 自己的 --max-time 到点，记成 timed out；
+    error 取接口报的错误；正常结束为空串。"""
+    text, usage, failure = "", {}, ""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -80,7 +95,10 @@ def parse_events(stdout: str) -> tuple[str, dict]:
         for key, value in (message.get("usage") or {}).items():
             if isinstance(value, int):
                 usage[key] = usage.get(key, 0) + value
-    return text.strip(), usage
+        stop = message.get("stopReason")
+        failure = ("timed out" if stop == "aborted"
+                   else _error_text(str(message.get("errorMessage") or "provider error")) if stop == "error" else "")
+    return text.strip(), usage, failure
 
 
 def _kill(proc: asyncio.subprocess.Process) -> None:
@@ -124,10 +142,12 @@ async def run_researcher(model: str, task: str) -> Report:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     report.secs = time.monotonic() - t0
-    report.text, report.usage = parse_events(out.decode("utf-8", "replace"))
+    report.text, report.usage, failure = parse_events(out.decode("utf-8", "replace"))
     if not report.text and not report.error:
         tail = err.decode("utf-8", "replace").strip().splitlines()
-        report.error = (tail[-1][:200] if tail else "") or f"no answer (exit code {proc.returncode})"
+        report.error = failure or (tail[-1][:200] if tail else "") or f"no answer (exit code {proc.returncode})"
+    if not report.text and report.secs >= config.RESEARCH_TIMEOUT:
+        report.error = "timed out"  # 时间已经用完，不管 omp 报的是什么：再换备选只会让大家再等一轮
     logger.info("研究员 %s %s：%.0fs，%d 字，token 输入 %s / 输出 %s", model,
                 "完成" if report.text else f"失败（{report.error}）", report.secs, len(report.text),
                 logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))
@@ -144,7 +164,8 @@ def _backup(i: int) -> str | None:
 
 
 async def run_with_backup(i: int, model: str, task: str) -> Report:
-    """跑第 i 个研究员；失败（超时除外：时间已经花完了）就用它的备选模型再跑一次。"""
+    """跑第 i 个研究员；失败（超时除外：时间已经花完了，再跑备选就是让群友再等一整轮）就用它的备选模型再跑一次。
+    几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
     report = await run_researcher(model, task)
     backup = _backup(i)
     if report.text or not backup or backup == model or report.error == "timed out":

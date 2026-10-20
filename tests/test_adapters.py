@@ -114,6 +114,17 @@ def test_claude_history_conversion():
     assert msgs[4]["role"] == "user" and [b["tool_use_id"] for b in msgs[4]["content"]] == ["t1", "t2"]
 
 
+def test_claude_user_text_after_tool_results_joins_the_same_turn():
+    history = [{"role": "user", "content": "算一下"},
+               {"role": "assistant", "content": "", "tool_calls": [
+                   {"id": "t1", "function": {"name": "calculate", "arguments": '{"expression":"1+1"}'}}]},
+               {"role": "tool", "tool_call_id": "t1", "name": "calculate", "content": "2"},
+               {"role": "user", "content": "直接作答"}]
+    _, msgs = claude.to_anthropic_messages(history)
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]  # 严格交替
+    assert [b["type"] for b in msgs[2]["content"]] == ["tool_result", "text"]
+
+
 def test_claude_stream_collects_text_tool_use_and_thinking():
     events = [
         ns(type="message_start"),

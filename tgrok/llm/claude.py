@@ -109,7 +109,7 @@ def to_anthropic_messages(history: list[dict]) -> tuple[str, list[dict]]:
                 out.append({"role": "user", "content": [block]})
         elif isinstance(content, str):
             if content:
-                out.append({"role": role, "content": content})
+                _append(out, role, [{"type": "text", "text": content}])
         else:
             blocks = []
             for p in content:
@@ -123,8 +123,21 @@ def to_anthropic_messages(history: list[dict]) -> tuple[str, list[dict]]:
                             "source": {"type": "base64", "media_type": mm.group(1), "data": mm.group(2)},
                         })
             if blocks:
-                out.append({"role": role, "content": blocks})
+                _append(out, role, blocks)
     return system_text, out
+
+
+def _append(out: list[dict], role: str, blocks: list[dict]) -> None:
+    """普通消息：紧跟在工具结果后的 user 消息（比如「直接作答」的提示）并进同一条，保持 role 交替；
+    其余情况单独一条，纯文本仍用字符串形式。"""
+    last = out[-1] if out else None
+    if (role == "user" and last and last["role"] == "user" and isinstance(last["content"], list)
+            and last["content"] and last["content"][0].get("type") == "tool_result"):
+        last["content"].extend(blocks)
+    elif len(blocks) == 1 and blocks[0]["type"] == "text":
+        out.append({"role": role, "content": blocks[0]["text"]})
+    else:
+        out.append({"role": role, "content": blocks})
 
 
 def _take_usage(reported, usage: Usage) -> None:

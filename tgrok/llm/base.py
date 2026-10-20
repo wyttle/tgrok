@@ -55,7 +55,12 @@ class BaseAdapter:
     async def run_round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
         """跑一轮：tools 是 OpenAI function 格式的工具定义，None 表示这轮不挂工具。"""
         stream = await self._create_stream(history, tools)
-        return await self._drain(stream, on_text)
+        try:
+            return await self._drain(stream, on_text)
+        finally:
+            # 消费方读到结束事件就不再读了（Responses 的 completed、Claude 的 message_stop）：
+            # 立刻关掉连接，不留给垃圾回收在别处收尾（那时关会报 aclose 错误）
+            await close_stream(stream)
 
     async def _create_stream(self, history: list[dict], tools: list[dict] | None):
         opts = RequestOptions(
@@ -114,14 +119,20 @@ async def watch_idle(stream, quiet_ok: Callable[[], bool], label: str) -> AsyncI
             return
         except asyncio.TimeoutError:
             logger.warning("%s 流已有正文但 %.0fs 无新数据，视为完成", label, timeout)
-            close = getattr(stream, "close", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:
-                    pass
+            await close_stream(stream)
             return
         yield item
+
+
+async def close_stream(stream) -> None:
+    """关闭 SDK 的流（OpenAI/Anthropic 的 close，Gemini 的异步生成器 aclose）；关不掉不影响结果。"""
+    close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:
+        pass
 
 
 def sampling_kwargs() -> dict:

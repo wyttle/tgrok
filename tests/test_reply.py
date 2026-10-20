@@ -243,6 +243,38 @@ def test_draft_is_reused_when_final_round_is_empty():
     assert run(chat.stream_reply(FakeMsg(), HIST))[1] == "唯一草稿"
 
 
+def test_tool_call_on_final_round_is_retried_with_answer_now_nudge():
+    # 线上：工具轮用完后，最后一轮（不挂工具）模型还在调工具、正文为空，整条回复被丢掉
+    rounds = []
+
+    async def create(history, has_tools):
+        rounds.append(history)
+        if history[-1].get("content") == t("answer_now"):
+            return stream_of([chunk_text("根据资料：2")])
+        return stream_of([chunk_tool(0, "calculate", {"expression": "1+1"})])
+
+    use_model(create)
+    assert run(chat.stream_reply(FakeMsg(), HIST))[1] == "根据资料：2"
+    assert len(rounds) == config.SEARCH_MAX_ROUNDS + 2
+    assert any(m.get("role") == "tool" for m in rounds[-1])  # 重试时工具结果都还在
+
+
+def test_findings_are_kept_for_a_follow_up_when_no_answer_comes():
+    async def create(history, has_tools):
+        if has_tools and not any(m.get("role") == "tool" for m in history):
+            return stream_of([chunk_tool(0, "calculate", {"expression": "6*7"})])
+        return stream_of([])
+
+    use_model(create)
+    kept = []
+    msg = FakeMsg()
+    assert run(chat.stream_reply(msg, HIST, lambda ids, history: kept.append((ids, history)))) == ([], "")
+    assert t("findings_kept_notice") in msg.sent[0].text
+    [(ids, history)] = kept
+    assert ids == [msg.sent[0].message_id] and history[:-1] == HIST
+    assert history[-1]["role"] == "assistant" and "[calculate]" in history[-1]["content"] and "42" in history[-1]["content"]
+
+
 def test_network_error_on_intermediate_edit_does_not_truncate():
     class FlakySent(FakeSent):
         async def edit_text(self, text, parse_mode=None, reply_markup=None):

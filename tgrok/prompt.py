@@ -66,8 +66,8 @@ def asked_by(msg: Message, text: str) -> str:
 
 
 def quoted_context(replied: Message) -> str | None:
-    """被引用的那条消息（别人发的）给模型的描述；没有文字也没有可说明的媒体时返回 None。"""
-    content = replied.text or replied.caption or media.media_note(replied)
+    """被引用的那条消息（别人发的）给模型的描述：文字加上媒体说明；都没有时返回 None。"""
+    content = "\n".join(p for p in (replied.text or replied.caption, media.media_note(replied)) if p)
     if not content:
         return None
     author = person_label(replied.from_user) if replied.from_user else t("someone")

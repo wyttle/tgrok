@@ -17,6 +17,7 @@ os.environ.update({
     "LLM_FALLBACK_MODEL": "",
     "RESEARCH_MODELS": "",
     "GEMINI_SEARCH_MODEL": "",
+    "GEMINI_MEDIA_MODEL": "",
     "SEARCH_PROVIDER": "",
     "ADMIN_USER_IDS": "999",
     "ALLOWED_USER_IDS": "",
@@ -45,6 +46,7 @@ def _clear_state() -> None:
     conversations._sizes.clear()
     conversations._total = 0
     media.album_cache.clear()
+    media.watch_cache.clear()
     chat.active_generations.clear()
 
 

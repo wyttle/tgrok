@@ -13,6 +13,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Follow-ups**: reply to the bot's answers to continue the conversation with full context
 - **Private chat**: just message the bot directly
 - **Image understanding**: with a vision-capable model, ask about photos and stickers sent in the group. Replying to the bot with a sticker gets a reply even without vision (the model sees the sticker's emoji)
+- **Videos and voice messages**: with `GEMINI_MEDIA_MODEL` set, Gemini watches videos, GIFs, round videos, voice messages, and audio and hands the main model a transcript and description (the main model needs no vision)
 - **Web search**: the model can search the internet on its own via a `web_search` tool and answer with sources (Tavily / DuckDuckGo / SearXNG / Serper)
 - **Calculator**: a built-in `calculate` tool lets the model check arithmetic, percentages, unit conversions, and date math instead of guessing (no setup needed)
 - **Long-term memory**: per chat, curated entries (group notes and a profile per person) plus a searchable log of past messages, modeled on Hermes Agent and OpenClaw
@@ -97,6 +98,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `SLANG_ENABLED` | slang glossary: the model saves memes it figured out with `remember_slang`; matching terms get their meaning attached | `true` |
 | `SLANG_MAX_ENTRIES` | max glossary entries; the least recently used are dropped | `500` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
+| `GEMINI_MEDIA_MODEL` | Gemini model that watches videos and listens to voice messages; also views images when vision is off. Uses `GEMINI_BASE_URL` / `GEMINI_API_KEY` | (empty) |
 | `MAX_IMAGES` | images attached per request | `4` |
 | `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
 | `TAVILY_API_KEY` | Tavily API key | (empty) |
@@ -185,6 +187,14 @@ With a vision-capable model, set `ENABLE_VISION=true` (wizard step 6) to:
 
 Note: with vision enabled, group images are sent to your configured LLM service — if that's
 a cloud API, images leave your server.
+
+**Videos and voice messages.** Main models usually can't watch video or hear audio (Claude doesn't accept video, and relays may not forward it), so Gemini does it for them: set `GEMINI_MEDIA_MODEL` (e.g. `gemini-2.5-flash`) and the bot gives the main model a `watch_media` tool. When someone mentions the bot, replies to it, or sends a private message involving a video, GIF, round video, voice message, or audio (including ones sent as files), the main model sees a note like "sent a voice message (8s), media_id=…" and calls the tool with a specific question (what is said, what happens, where this is) when it needs the content. Gemini downloads the file, watches picture and sound together, and returns a word-for-word transcript plus a description; the main model judges it and answers. The progress line shows "Viewing media: …". In follow-ups the same media can be viewed again with a new question. With `ENABLE_VISION` off, images go through the same path, so text-only models can see them too.
+
+- uses the native Gemini API (`GEMINI_BASE_URL`, empty = Google; key `GEMINI_API_KEY`, empty = reuse `LLM_API_KEY`), shared with grounded search
+- the official Bot API only lets bots download files up to 20 MB; larger ones are reported to the main model as too large to view
+- with `LLM_PROTOCOL=gemini` there is no bot tool loop, so this doesn't apply
+- without `GEMINI_MEDIA_MODEL` the main model is told plainly that it can't see or hear the media, so it doesn't make up the content
+- media are sent to the Gemini service; after a bot restart, media in old messages must be sent again to be viewed
 
 ## Web search
 

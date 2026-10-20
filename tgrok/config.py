@@ -109,11 +109,14 @@ SYSTEM_PROMPT_OVERRIDE = None if _system_prompt is None else _system_prompt.repl
 
 # ---- Gemini ----
 GEMINI_BASE_URL = _url("GEMINI_BASE_URL")
-# grounding 专用 key：主模型走中转站时 grounding 仍可用 AI Studio key；留空复用 LLM_API_KEY
+# grounding 和看媒体用的 Gemini key：主模型走中转站时仍可用 AI Studio key；留空复用 LLM_API_KEY
 GEMINI_API_KEY = _str("GEMINI_API_KEY") or LLM_API_KEY
 # 混合模式：web_search 由这个 Gemini 模型带 google_search grounding 执行，回复仍用主模型；留空关闭
 GEMINI_SEARCH_MODEL = _str("GEMINI_SEARCH_MODEL")
 GEMINI_SEARCH_COOLDOWN = 600.0  # grounding 配额超限（429）后改用普通搜索源的秒数
+# 看媒体：视频、GIF、语音、音频（没开视觉时也包括图片）由主模型调用 watch_media 交给这个 Gemini 模型看/听，
+# 转述给主模型；留空关闭。同样用 GEMINI_BASE_URL / GEMINI_API_KEY
+GEMINI_MEDIA_MODEL = _str("GEMINI_MEDIA_MODEL")
 
 # ---- 备用模型 ----
 # 主模型出错且这条回复还没输出正文时，改用备用模型并在回复末尾注明。留空 LLM_FALLBACK_MODEL 不启用；

@@ -13,9 +13,12 @@ from .tg_auth import is_authorized
 
 logger = logging.getLogger(__name__)
 
-# 交给 handle_message 的消息类型：文字、带说明的媒体、图片、图片文件和贴纸（命令除外）
+# 交给 handle_message 的消息类型：文字、带说明的媒体、图片、图片文件、贴纸，以及交给 Gemini 看/听的
+# 视频、GIF、圆形视频、语音、音频（命令除外）
 MESSAGE_FILTER = (
     filters.TEXT | filters.CAPTION | filters.PHOTO | filters.Document.IMAGE | filters.Sticker.ALL
+    | filters.VIDEO | filters.ANIMATION | filters.VIDEO_NOTE | filters.VOICE | filters.AUDIO
+    | filters.Document.VIDEO | filters.Document.AUDIO
 ) & ~filters.COMMAND
 
 
@@ -53,15 +56,24 @@ def _clip(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _join(*parts: str | None) -> str:
+    return "\n".join(p for p in parts if p)
+
+
 def _observe(msg: Message) -> None:
     """旁听群里没叫到 bot 的消息：只存进原始记录，由后台定期整理，不触发模型请求。"""
     if not memory.is_observed(msg.chat_id):
         return
-    text = msg.text or msg.caption
-    if not text and msg.sticker:
-        text = t("observed_sticker", emoji=f" {msg.sticker.emoji}" if msg.sticker.emoji else "")
-    elif not text and media.image_entry(msg):
-        text = t("observed_image")
+    entry = media.media_entry(msg)
+    if entry:
+        tag = t("observed_media", what=media.describe(entry))
+    elif msg.sticker:
+        tag = t("observed_sticker", emoji=f" {msg.sticker.emoji}" if msg.sticker.emoji else "")
+    elif media.image_entry(msg):
+        tag = t("observed_image")
+    else:
+        tag = ""
+    text = " ".join(p for p in (tag, msg.text or msg.caption) if p)
     if text:
         memory.observe(msg.chat_id, msg.from_user.id, prompt.person_label(msg.from_user), text)
 
@@ -72,7 +84,7 @@ async def _follow_up(msg: Message, bot, question: str, note: str | None) -> list
     images = await media.image_data_urls(bot, msg)
     if not question and not images and not note:
         return None
-    text = prompt.asked_by(msg, question or note or t("look_image"))
+    text = prompt.asked_by(msg, _join(question, note) or t("look_image"))
     history = conversations.get(msg.chat_id, replied.message_id)
     if history is not None:
         return history + [prompt.user_turn(text, images, msg.chat_id, question)]
@@ -94,7 +106,7 @@ async def _new_question(msg: Message, bot, question: str, note: str | None) -> l
         await msg.reply_text(t("nudge"))
         return None
     own_image = bool(images) and not quoted
-    text = question or note or (t("look_image") if own_image else t("comment_default"))
+    text = _join(question, note) or (t("look_image") if own_image else t("comment_default"))
     if quoted:
         text = quoted + "\n\n" + t("question_from", name=prompt.person_label(msg.from_user), question=text)
     else:
@@ -138,7 +150,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     question = extract_question(msg, bot.username)
     logger.info("收到请求 chat=%s(%s) user=%s(%s) reply_to_bot=%s q=%.80s",
                 msg.chat_id, msg.chat.type, msg.from_user.full_name, msg.from_user.id, is_reply_to_bot, question)
-    note = media.media_note(msg)  # 贴纸、看不到的图片：没有文字也要让模型知道对方发了什么
+    # 贴纸、视频语音、看不到的图片：说明和提问一起交给模型，没有文字也要让模型知道对方发了什么
+    media.offer_to_watch(bot, msg, replied)
+    note = media.media_note(msg)
     if is_reply_to_bot:
         history = await _follow_up(msg, bot, question, note)
     else:

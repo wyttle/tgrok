@@ -1003,9 +1003,10 @@ def _step_web_search(w: Wizard) -> None:
             cfg["GEMINI_BASE_URL"] = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
                                          required=True).strip().rstrip("/") if route == "2" else ""
         else:
-            cfg["GEMINI_API_KEY"] = ""
             cfg["GEMINI_SEARCH_MODEL"] = ""
-            cfg["GEMINI_BASE_URL"] = ""
+            if not old.get("GEMINI_MEDIA_MODEL", "").strip():  # 看媒体（GEMINI_MEDIA_MODEL）还要用这套 key 和地址
+                cfg["GEMINI_API_KEY"] = ""
+                cfg["GEMINI_BASE_URL"] = ""
     print()
 
 

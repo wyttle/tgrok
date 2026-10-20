@@ -12,6 +12,7 @@ bot 会结合被引用的消息内容，调用你本地的 LLM 模型（或任�
 - **多轮追问**：回复 bot 的回答可以继续对话，上下文自动延续
 - **私聊**：私聊里直接发消息即可
 - **图片理解**：搭配视觉模型可以对群里的图片和贴纸提问；没开视觉时回复 bot 一个贴纸也会接话（模型能看到贴纸对应的 emoji）
+- **看视频、听语音**：配上 `GEMINI_MEDIA_MODEL` 后，视频、GIF、圆形视频、语音和音频交给 Gemini 看/听，转写和画面描述交给主模型（主模型不用支持视觉）
 - **联网搜索**：模型可通过 `web_search` 工具自主联网搜索实时信息再回答、附来源（Tavily / DuckDuckGo / SearXNG / Serper 可选）
 - **计算器**：内置 `calculate` 工具，模型可以用它核对算术、百分比、单位换算和日期推算，不靠心算（无需配置）
 - **长期记忆**：按聊天分开，精选条目（群笔记和每个人的档案）加可检索的聊天原话，参照 Hermes Agent 和 OpenClaw
@@ -94,6 +95,7 @@ python bot.py
 | `SLANG_ENABLED` | 梗词典：模型用 `remember_slang` 记下弄明白的梗，消息里出现时附上释义 | `true` |
 | `SLANG_MAX_ENTRIES` | 梗词典条目上限，超出淘汰最久没用到的 | `500` |
 | `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
+| `GEMINI_MEDIA_MODEL` | 看视频、听语音用的 Gemini 模型；没开视觉时图片也交给它看。走 `GEMINI_BASE_URL` / `GEMINI_API_KEY` | （空） |
 | `MAX_IMAGES` | 单次请求最多附带的图片数 | `4` |
 | `SEARCH_PROVIDER` | 逗号分隔搜索源：`tavily`、`duckduckgo`、`searxng`、`serper`；留空关闭 | （空） |
 | `TAVILY_API_KEY` | Tavily API key | （空） |
@@ -178,6 +180,14 @@ python bot.py
 - 单次最多附带 4 张图，过大的图片文件（>10MB）会被跳过
 
 注意：开启后图片会发送给你配置的 LLM 服务；若用的是云端 API，意味着群内图片会离开你的服务器。
+
+**看视频、听语音。** 主模型一般看不了视频、听不了语音（Claude 不收视频，中转站也未必转发），所以交给 Gemini 代劳：设置 `GEMINI_MEDIA_MODEL`（例如 `gemini-2.5-flash`），bot 会给主模型挂上 `watch_media` 工具。有人发了视频、GIF、圆形视频、语音或音频（也包括以文件形式发送的），并 @bot、回复 bot 或在私聊里发时，主模型会看到「发了语音（8 秒），media_id=…」这样的说明，需要内容时带着具体问题（说了什么、发生了什么、这是哪里）调用工具。Gemini 下载原文件，画面和声音一起看，返回逐字转写和画面描述，主模型再自己判断、作答。进度里会显示「查看媒体: …」。追问时同一段媒体可以换个问题再看。没开 `ENABLE_VISION` 时图片也走这条路，纯文本模型也能看图。
+
+- 用 Gemini 原生接口（`GEMINI_BASE_URL`，留空连 Google 官方；key 用 `GEMINI_API_KEY`，留空复用 `LLM_API_KEY`），和 grounding 搜索共用
+- 官方 Bot API 只能下载 20MB 以内的文件，更大的会告诉主模型「看不了」
+- 主模型走 `LLM_PROTOCOL=gemini` 时没有 bot 工具循环，这个功能不生效
+- 没配 `GEMINI_MEDIA_MODEL` 时，主模型会被明确告知「看不到也听不到」，不会凭说明瞎编内容
+- 媒体会发给 Gemini 服务；bot 重启后旧消息里的媒体要重新发一次才能看
 
 ## 联网搜索
 

@@ -87,6 +87,7 @@ STRINGS = {
         "curate_retry": "这批操作没有执行：{error}\n请重新给出完整的 JSON。",
         "observed_sticker": "[贴纸{emoji}]",
         "observed_image": "[图片]",
+        "observed_media": "[{what}]",
         "memory_show": "当前记忆：\n{block}",
         "memory_archive": "原始记录：{n} 条（保留 {days} 天，模型可以用 recall 查）",
         "memory_chat_id": "本聊天 id：{chat_id}",
@@ -122,7 +123,12 @@ STRINGS = {
         "comment_default": "这条你怎么看？靠谱吗？",
         "look_image": "看看这张图。",
         "sticker_note": "（发了一个贴纸{emoji}）",
-        "image_unseen": "（发了一张图片，但你看不到图片内容）",
+        "media_kinds": {"video": "视频", "gif": "GIF 动图", "video_note": "圆形视频", "voice": "语音",
+                        "audio": "音频", "image": "图片"},
+        "media_duration": "{what}（{n} 秒）",
+        "media_watchable": "（发了{what}，media_id={id}。你看不到也听不到它，要知道内容就用 watch_media 工具查看）",
+        "media_unseen": "（发了{what}，但你看不到也听不到它的内容）",
+        "media_too_large": "（发了{what}，文件超过 20MB，看不了它的内容）",
         "empty_reply": "（模型返回了空回复）",
         "thinking_stages": ["思考中", "深入思考中", "继续深挖", "就快好了"],
         "tool_search": "搜索: {q}",
@@ -131,6 +137,26 @@ STRINGS = {
         "tool_calc": "计算: {expr}",
         "calc_error": "（计算失败：{error}。检查表达式写法后重试，或说明这一步没算出来。）",
         "tool_unknown": "（没有名为 {name} 的工具）",
+        "tool_watch": "查看媒体: {q}",
+        "watch_system_prompt": (
+            "消息里标了 media_id 的视频、GIF、语音、音频或图片，你自己看不到也听不到。回答要用到它的内容时，"
+            "先调用 watch_media，带上具体想知道的问题（说了什么、发生了什么、这是哪里），不要凭文字说明猜。"
+            "转述来自另一个模型的观察，真假、出处和怎么看仍由你判断；同一段媒体换个问题可以再看一次。"
+        ),
+        "watch_viewer_prompt": (
+            "你是另一个 AI 助手的眼睛和耳朵：它看不到也听不到这段{what}，只能读你写的文字。"
+            "先直接回答它的问题，再完整交代内容：\n"
+            "- 说话和歌词逐字转写，标出是谁在说、大约第几秒；不是中文的保留原文并附中文翻译\n"
+            "- 画面：场景、人物和动作、出现的文字（字幕、招牌、屏幕内容照抄）、镜头切换\n"
+            "- 声音：背景音乐、音效、语气和情绪\n"
+            "只写实际看到、听到的；听不清、看不清就明说，不要猜测出处或真假。"
+        ),
+        "watch_question": "它想知道：{question}",
+        "watch_default": "完整描述这段内容。",
+        "watch_unknown": "（找不到这个 media_id 对应的媒体，可能 bot 重启过或已经过期；请对方重新发一次。）",
+        "watch_failed": "（查看媒体失败：{error}。跟对方说明这段没看成，不要编造内容。）",
+        "watch_timeout": "超时",
+        "watch_empty": "模型没有返回内容",
         "calc_system_prompt": (
             "涉及算术、百分比、单位换算或日期推算（相差几天、某天星期几、多久以后）时，"
             "用 calculate 工具算，不要心算；别人消息里的数字也可以用它核对。"
@@ -365,6 +391,7 @@ STRINGS = {
         "curate_retry": "That batch was not applied: {error}\nGive the complete JSON again.",
         "observed_sticker": "[sticker{emoji}]",
         "observed_image": "[image]",
+        "observed_media": "[{what}]",
         "memory_show": "Current memory:\n{block}",
         "memory_archive": "Chat log: {n} messages (kept {days} days; the model can search it with recall)",
         "memory_chat_id": "This chat's id: {chat_id}",
@@ -406,7 +433,13 @@ STRINGS = {
         "comment_default": "What do you make of this? Is it legit?",
         "look_image": "Take a look at this image.",
         "sticker_note": "(sent a sticker{emoji})",
-        "image_unseen": "(sent an image, but you can't see its content)",
+        "media_kinds": {"video": "a video", "gif": "a GIF", "video_note": "a round video", "voice": "a voice message",
+                        "audio": "an audio file", "image": "an image"},
+        "media_duration": "{what} ({n}s)",
+        "media_watchable": "(sent {what}, media_id={id}. You can't see or hear it; use the watch_media tool when "
+                           "you need its content)",
+        "media_unseen": "(sent {what}, but you can't see or hear its content)",
+        "media_too_large": "(sent {what} larger than 20 MB, too large to view)",
         "empty_reply": "(the model returned an empty response)",
         "thinking_stages": ["Thinking", "Thinking hard", "Digging deeper", "Almost done"],
         "tool_search": "Search: {q}",
@@ -415,6 +448,33 @@ STRINGS = {
         "tool_calc": "Calc: {expr}",
         "calc_error": "(calculation failed: {error}. Fix the expression and retry, or say this step could not be computed.)",
         "tool_unknown": "(there is no tool named {name})",
+        "tool_watch": "Viewing media: {q}",
+        "watch_system_prompt": (
+            "You can't see or hear videos, GIFs, voice messages, audio, or images marked with a media_id in a "
+            "message. When your answer depends on one, call watch_media first with a specific question (what is "
+            "said, what happens, where this is) instead of guessing from the note. The result is another model's "
+            "observation: judging whether it's true, where it's from, and what to make of it is still up to you. "
+            "You can view the same media again with a different question."
+        ),
+        "watch_viewer_prompt": (
+            "You are the eyes and ears of another AI assistant: it can't see or hear this {what} and only reads "
+            "what you write. Answer its question first, then cover the content fully:\n"
+            "- transcribe all speech and lyrics word for word, with who is speaking and roughly when; keep "
+            "non-English speech in the original and add an English translation\n"
+            "- visuals: setting, people and actions, any text shown (subtitles, signs, screens, copied exactly), "
+            "cuts\n"
+            "- sound: music, effects, tone and mood\n"
+            "Only describe what you actually see and hear; say so when something is unclear, and don't guess "
+            "where it's from or whether it's real."
+        ),
+        "watch_question": "It wants to know: {question}",
+        "watch_default": "Describe this fully.",
+        "watch_unknown": "(no media found for this media_id; the bot may have restarted or it expired. Ask them to "
+                         "send it again.)",
+        "watch_failed": "(viewing the media failed: {error}. Tell them you couldn't view it; don't make up its "
+                        "content.)",
+        "watch_timeout": "timed out",
+        "watch_empty": "the model returned nothing",
         "calc_system_prompt": (
             "For arithmetic, percentages, unit conversions, or date math (days between dates, "
             "what weekday a date is, how long until something), use the calculate tool instead "

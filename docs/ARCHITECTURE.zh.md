@@ -17,7 +17,7 @@ tgrok/
 |-- handlers.py        普通消息：要不要回、拼出对话、生成回复、记进缓存和记忆；静默旁听
 |-- commands.py        斜杠命令；COMMANDS 是唯一的命令表，注册、权限检查和菜单都从它生成
 |-- prompt.py          系统提示词，以及每条 user 消息的拼装（说话人、引用、记忆和梗附注、时间、图片）
-|-- media.py           图片、贴纸和相册：data URL、看不到内容时的文字说明、相册缓存
+|-- media.py           图片、贴纸、相册和视频语音：data URL、媒体说明（media_id 或看不到）、相册缓存、watch_media 的媒体登记
 |-- conversations.py   追问用的对话缓存和历史截断
 |-- chat.py            一次回复的流程：模型轮次循环、重试、备用模型切换、工具轮、取消按钮
 |-- bubble.py          一条回复在 Telegram 上的显示：占位、流式编辑、分段、进度、取消、报错、定稿
@@ -28,6 +28,7 @@ tgrok/
 |   |-- remember_slang.py  remember_slang
 |   |-- remember.py    memory：增改删本聊天的群笔记和个人档案
 |   |-- recall.py      recall：按关键词、说话人、时间查本聊天的原始记录
+|   |-- watch.py       watch_media：把视频、GIF、语音、音频（没开视觉时也包括图片）交给 GEMINI_MEDIA_MODEL 看/听
 |   |-- web.py         web_search（grounding 模式下同轮合并）、open_url
 |   |-- research.py    research：同一任务并发交给 RESEARCH_MODELS 里的每个 omp 研究员，报告一起交回
 |   `-- research_hook.ts  研究员进程加载的 omp hook：read 只准读公网 http(s) 网页
@@ -102,7 +103,7 @@ Telegram update
            零输出就出错：配了备用模型就整条换成备用模型（去掉厂商扩展字段；两边工具能力不同时
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
-           -> calculate、remember_slang、memory、recall、web_search（grounding 模式同轮合并）、open_url
+           -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url
            -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
               超时或回复被取消时整组结束；报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
@@ -136,6 +137,7 @@ Telegram update
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
 - `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
 - `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。
+- `media.watch_cache`：配了 `GEMINI_MEDIA_MODEL` 且主模型走工具循环时，bot 被叫到的那条消息和它引用的消息里的视频、语音等按（聊天, 消息 id）登记 file_id 和 bot，最多 300 条；`watch_media` 按 media_id 取出、下载（官方 Bot API 上限 20MB）、整段内联发给 Gemini（`llm.gemini.gemini_client`，与 grounding 共用），转述回灌主模型。别的聊天的 media_id 取不到；重启后清空。有文字也有媒体时，文字和媒体说明都交给模型，不再让说明文字盖掉媒体。
 - `memory.store`：`MEMORY_DB` 里的三张表。`messages`（+ `messages_fts`）是原始记录，三个字以上的检索词走 trigram 全文索引，更短的退回 LIKE；`notes` 是精选条目，`user_id` 为空是群笔记，否则是这个人在这个聊天的档案，可带到期时间；`progress` 记每个聊天整理到哪条记录。所有读写都很小，直接在事件循环线程里同步执行。
 - 注入：`memory.memory_block` 只拼进一段对话的首条 user 消息：群笔记、提问者和被引用者的档案（`MEMORY_GROUP_CHARS` / `MEMORY_PROFILE_CHARS` 限制总量），加上 3 天内最近 5 条提问；每条都标距今多久，过期条目不显示。
 - 写入：`memory` 工具和后台整理都走 `notes.apply`，超出字数上限时整批拒绝并把现有条目交还模型去合并或删除，不会悄悄淘汰。整理只执行模型提出的操作，没提到的条目原样保留。

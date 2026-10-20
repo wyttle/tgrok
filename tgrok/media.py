@@ -1,4 +1,4 @@
-"""消息里的图片、贴纸和相册：给模型的图片 data URL，以及看不到内容时的文字说明。"""
+"""消息里的媒体：给模型的图片 data URL、交给 Gemini 看/听的视频语音、看不到内容时的文字说明，以及相册缓存。"""
 
 import asyncio
 import base64
@@ -7,8 +7,8 @@ from collections import OrderedDict
 
 from telegram import Message
 
-from . import config
-from .i18n import t
+from . import config, llm
+from .i18n import phrases, t
 
 logger = logging.getLogger(__name__)
 
@@ -18,19 +18,98 @@ logger = logging.getLogger(__name__)
 # key = (chat_id, media_group_id)，value = [{file_id, mime, message_id}]
 album_cache: "OrderedDict[tuple[int, str], list[dict]]" = OrderedDict()
 
+# 主模型看不到/听不到、但可以交给 GEMINI_MEDIA_MODEL 的媒体：bot 被叫到时登记，watch_media 工具按
+# media_id（就是消息 id）取出来下载。key = (chat_id, message_id)，value = media_entry() + bot
+watch_cache: "OrderedDict[tuple[int, int], dict]" = OrderedDict()
+WATCH_CACHE_SIZE = 300
+MAX_MEDIA_BYTES = 20 * 1024 * 1024  # 官方 Bot API 只能下载 20MB 以内的文件
+
 
 def is_image_document(m: Message) -> bool:
     return bool(m.document and (m.document.mime_type or "").startswith("image/"))
 
 
+def media_entry(m: Message) -> dict | None:
+    """视频、GIF、圆形视频、语音、音频（包括以文件发送的）；没开视觉时也包括图片。其它返回 None。"""
+    doc_mime = (m.document.mime_type or "") if m.document else ""
+    if m.animation:  # GIF 在 Telegram 里是 mp4，animation 消息同时带 document，要先判断
+        obj, kind, mime = m.animation, "gif", "video/mp4"
+    elif m.video:
+        obj, kind, mime = m.video, "video", "video/mp4"
+    elif m.video_note:
+        obj, kind, mime = m.video_note, "video_note", "video/mp4"
+    elif m.voice:
+        obj, kind, mime = m.voice, "voice", "audio/ogg"
+    elif m.audio:
+        obj, kind, mime = m.audio, "audio", "audio/mpeg"
+    elif doc_mime.startswith(("video/", "audio/")):
+        obj, kind, mime = m.document, doc_mime.split("/")[0], doc_mime
+    elif not config.ENABLE_VISION and m.photo:
+        obj, kind, mime = m.photo[-1], "image", "image/jpeg"
+    elif not config.ENABLE_VISION and is_image_document(m):
+        obj, kind, mime = m.document, "image", doc_mime
+    else:
+        return None
+    # to_dict 取时长：直接读 .duration 会触发 PTB 的弃用警告（以后改成 timedelta）
+    return {"kind": kind, "file_id": obj.file_id, "mime": getattr(obj, "mime_type", None) or mime,
+            "seconds": obj.to_dict().get("duration"), "size": obj.file_size, "message_id": m.message_id}
+
+
+def describe(entry: dict) -> str:
+    """给模型看的媒体名称，带时长：语音（8 秒）。"""
+    what = phrases("media_kinds")[entry["kind"]]
+    return t("media_duration", what=what, n=int(entry["seconds"])) if entry["seconds"] else what
+
+
+def can_watch() -> bool:
+    """watch_media 只在配了 Gemini 媒体模型、且主模型走 bot 工具循环时可用。"""
+    return bool(config.GEMINI_MEDIA_MODEL) and llm.adapter.supports_tool_loop
+
+
+def _too_large(entry: dict) -> bool:
+    return bool(entry["size"]) and entry["size"] > MAX_MEDIA_BYTES
+
+
 def media_note(m: Message) -> str | None:
-    """没有文字的媒体消息给模型的说明：贴纸带上它的 emoji（看不到图时也能猜出情绪），
-    图片在未开启视觉时说明看不到内容。开启视觉的普通图片返回 None（图片本身会发给模型）。"""
+    """媒体消息给模型的说明：视频、语音等交给 Gemini 看时给出 media_id，看不了就明说看不到；
+    贴纸带上它的 emoji（看不到图时也能猜出情绪）。开启视觉的普通图片返回 None（图片本身会发给模型）。"""
+    entry = media_entry(m)
+    if entry:
+        what = describe(entry)
+        if _too_large(entry):
+            return t("media_too_large", what=what)
+        if can_watch():
+            return t("media_watchable", what=what, id=entry["message_id"])
+        return t("media_unseen", what=what)
     if m.sticker:
         return t("sticker_note", emoji=f" {m.sticker.emoji}" if m.sticker.emoji else "")
-    if not config.ENABLE_VISION and (m.photo or is_image_document(m)):
-        return t("image_unseen")
     return None
+
+
+def offer_to_watch(bot, *messages: Message | None) -> None:
+    """登记这次提问涉及的媒体（提问消息本身和被引用的消息），供 watch_media 按 media_id 取用。"""
+    if not can_watch():
+        return
+    for m in messages:
+        entry = media_entry(m) if m is not None else None
+        if entry and not _too_large(entry):
+            key = (m.chat_id, m.message_id)
+            watch_cache[key] = {**entry, "bot": bot}
+            watch_cache.move_to_end(key)
+    while len(watch_cache) > WATCH_CACHE_SIZE:
+        watch_cache.popitem(last=False)
+
+
+def watchable(chat_id: int | None, media_id: int) -> dict | None:
+    return watch_cache.get((chat_id, media_id))
+
+
+async def download(entry: dict) -> tuple[bytes, str]:
+    """下载登记过的媒体，返回（内容, MIME）；图片按文件头纠正 MIME。"""
+    file = await entry["bot"].get_file(entry["file_id"])
+    data = bytes(await file.download_as_bytearray())
+    mime = _sniff_mime(data, entry["mime"]) if entry["kind"] == "image" else entry["mime"]
+    return data, mime
 
 
 def image_entry(m: Message) -> dict | None:

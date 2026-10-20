@@ -72,7 +72,7 @@ def test_reply_to_bot_with_sticker_or_wordless_photo_still_gets_answered(monkeyp
 
     config.ENABLE_VISION = False
     run(handlers.handle_message(update_of(photo), CTX))
-    assert t("image_unseen") in captured[-1][-1]["content"]
+    assert t("media_unseen", what="图片") in captured[-1][-1]["content"]
 
 
 def test_same_name_users_are_told_apart_by_id(monkeypatch):

@@ -23,7 +23,9 @@ tgrok/
 |-- conversations.py   追问用的对话缓存和历史截断
 |-- chat.py            一次回复的流程：模型轮次循环、重试、备用模型切换、工具轮、取消按钮
 |-- bubble.py          一条回复在 Telegram 上的显示：占位、流式编辑、分段、进度、取消、报错、定稿
-|-- render.py          Markdown 转 MarkdownV2、流式中间态、压成一段
+|-- render.py          模型输出 → 富文本 html：白名单标签和转义、配平、<p>/<br> 段落结构、长回复自动折叠、按段落拆分不切断标签
+|-- rich.py            富文本消息的发送和编辑（sendRichMessage / editMessageText 的 rich_message，经 Bot.do_api_request），
+|                      被拒绝时改发纯文本并按 4096 拆条
 |-- tools/             bot 自带工具：每个工具的 schema、执行、进度文案、结果摘要和提示词说明放在一起
 |   |-- __init__.py    Tool 基类、REGISTRY、schemas()/prompt_notes()、plan_round() 进度与并发执行
 |   |-- calculate.py   calculate
@@ -117,7 +119,7 @@ Telegram update
               不认识的梗一律先用 research（开了 research 时，查梗的说明也指向它而不是 web_search）
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
         -> Gemini 原生返回的引用附到正文末尾
-     -> Bubble.finish 定稿（MarkdownV2，失败回退纯文本）；终轮空手时回用最后一版草稿
+     -> Bubble.finish 定稿（富文本消息，细节过长自动折叠；被拒绝时改发纯文本）；终轮空手时回用最后一版草稿
   -> conversations.remember 按回复的每一段消息 id 保存追问用的历史；recent.add_bot 记下 bot 的回复
   -> memory.record_exchange 把这一轮问答原样存进原始记录：被引用的原话按原作者单独记（按消息 id 去重），
      提问只记「（回复了谁的消息）问了什么」；后台整理再从里面挑出值得记的条目
@@ -160,7 +162,7 @@ Telegram update
 - 后台维护：`app.post_init` 调用 `memory.start_maintenance`，先迁移旧的 `MEMORY_FILE`，再每分钟跑一次 `consolidate.tick`：每个聊天最多每 `MEMORY_CONSOLIDATE_INTERVAL` 分钟整理一次，攒够 `MEMORY_CONSOLIDATE_MIN` 条新记录（或最早一条放了一天）才整理；同时清掉过期条目和超过 `MEMORY_ARCHIVE_DAYS` 天的记录。整理先用帮手模型，失败再用主模型、备用模型。`consolidate._running` 防止同一聊天并发整理。
 - 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只存进原始记录，不逐条请求模型，由后台整理处理。
 - `slang._entries`：梗词典，按「作用域|词」存，每个词最多 3 种用法，新的在前；本群用法排在通用用法前。只把这条消息和被引用内容里出现了的词附上（最多 5 个，单字词只在 12 字以内的短句里算命中）。写入 `SLANG_FILE`，超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
-- 只回一段：`REPLY_SINGLE_PARAGRAPH` 开启时系统提示词追加要求，`render.shape` 在每次显示前把正文压成一段（代码块保留），存进对话历史的也是这一段。
+- 回复格式：系统提示词附 `format_note`（空行分段、只用白名单 HTML 标签、短回复不加标签、长回复细节放进 `<blockquote expandable>`、链接放末尾）。富文本的 html 会把换行压成空格，所以 `render` 把空行分出的段落包成 `<p>`、段内换行变 `<br>`；可折叠引用只能装行内内容，里面的代码块改成行内代码；Telegram 自己的解析器很宽松（未闭合、未知标签都直接吞掉），白名单和转义由 `render` 负责。流式过程中每次编辑都是配平好的富文本，末尾挂光标；正文超过 `rich.RICH_CHARS` 时用 `render.cut` 在段落边界切开另起一条。对话历史留模型原文（带标签），最近群聊和原始记录存纯文本。
 
 ## 配置
 

@@ -20,6 +20,7 @@ message — powered by your own local LLM or any OpenAI-compatible API.
 - **Long-term memory**: per chat, curated entries (group notes and a profile per person) plus a searchable log of past messages, modeled on Hermes Agent and OpenClaw
 - **Slang glossary**: once the bot figures out a meme or metaphor (or someone corrects it), it remembers the real meaning and uses it next time
 - **Streaming replies**: answers appear progressively (typewriter style); while waiting, the progress line shows a running timer and the tool being run, and the chat shows "typing…"; long generations won't be cut off by gateway idle timeouts
+- **Rich-text replies**: replies are sent as Telegram rich messages (`sendRichMessage`): short paragraphs, bold/italic/code, code blocks, links, spoilers, and long details folded into an expandable quote; the model writes a small whitelist of HTML tags, everything else is escaped, and if Telegram rejects the formatting the reply is resent as plain text
 - **Access control**: admin-managed whitelist via bot commands; unauthorized users are silently ignored
 - **Bilingual**: all bot messages and the setup wizard available in English and Chinese (`BOT_LANG`)
 - **Four LLM protocols**: select OpenAI-compatible Chat Completions, the OpenAI Responses API, native Gemini, or native Claude with `LLM_PROTOCOL`; native Claude keeps Anthropic thinking and tool-use semantics
@@ -80,7 +81,6 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `LLM_API_KEY` | API key; anything works for most local servers | `not-needed` |
 | `LLM_USER_AGENT` | custom User-Agent (some cloud gateways validate it) | SDK default |
 | `SYSTEM_PROMPT` | system prompt; keep it on one line and use `\n` for line breaks (double quotes recommended) | built-in default |
-| `REPLY_SINGLE_PARAGRAPH` | reply as one paragraph: adds a prompt rule and merges paragraphs, lists, and headings before display (code blocks kept) | `false` |
 | `MAX_TOKENS` | max tokens per reply | `1024` |
 | `LLM_TEMPERATURE` | sampling temperature; empty = backend default, auto-dropped if rejected | (empty) |
 | `LLM_TOP_P` | nucleus sampling; empty = backend default, auto-dropped if rejected | (empty) |

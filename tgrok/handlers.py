@@ -6,7 +6,7 @@ from telegram import Message, Update
 from telegram.constants import MessageEntityType
 from telegram.ext import ContextTypes, filters
 
-from . import config, conversations, media, memory, prompt, recent, viewer
+from . import config, conversations, media, memory, prompt, recent, render, rich, viewer
 from .chat import stream_reply
 from .i18n import t
 from .tg_auth import is_authorized
@@ -142,7 +142,7 @@ async def _new_question(msg: Message, bot, question: str, note: str | None) -> l
     quoted = _quoted(msg, replied)
     images = await media.image_data_urls(bot, msg, replied)
     if not question and not quoted and not images and not note:
-        await msg.reply_text(t("nudge"))
+        await rich.send_rich(msg, render.plain_to_html(t("nudge")), t("nudge"))
         return None
     own_image = bool(images) and not quoted
     text = _join(question, note) or (t("look_image") if own_image else t("comment_default"))
@@ -226,6 +226,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for message_id in answer_ids:
         conversations.remember(msg.chat_id, message_id, full)
     asker = prompt.person_label(msg.from_user)
-    recent.add_bot(msg.chat_id, answer_ids, answer, asker)
+    # 最近群聊和原始记录存纯文本：模型的 HTML 标签对之后读这些记录的人和模型都是噪音
+    shown = render.to_plain(answer)
+    recent.add_bot(msg.chat_id, answer_ids, shown, asker)
     topic, quoted = _memory_record(msg, question, note, is_reply_to_bot)
-    memory.record_exchange(msg.chat_id, msg.from_user.id, asker, topic, answer, quoted=quoted, msg_id=msg.message_id)
+    memory.record_exchange(msg.chat_id, msg.from_user.id, asker, topic, shown, quoted=quoted, msg_id=msg.message_id)

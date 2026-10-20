@@ -235,17 +235,13 @@ MAX_HISTORY = _int("MAX_HISTORY", 20)  # 追问时保留的对话条数（不含
 CONVERSATION_CACHE_SIZE = 500
 # 所有缓存历史的 content 近似字符量上限，不是进程内存硬上限
 CONVERSATION_CONTENT_BUDGET = 64_000_000
-# 回复只写成一整段：系统提示词里加一句要求，显示前把多段、分点、标题压成一段（代码块保留）
-REPLY_SINGLE_PARAGRAPH = _bool("REPLY_SINGLE_PARAGRAPH", False)
 # 流式空闲看门狗：已有正文后连续这么多秒没有新数据就视为生成完成。0 = 关闭
 STREAM_IDLE_TIMEOUT = _float("STREAM_IDLE_TIMEOUT", 45)
 # 流式编辑消息的最小间隔（秒）。Telegram 建议同一聊天每秒最多一条、群里每分钟最多约 20 条，
 # 群里编辑太勤会被限流（RetryAfter），画面反而卡住
 STREAM_EDIT_INTERVAL_PRIVATE = 1.0
 STREAM_EDIT_INTERVAL_GROUP = 3.0
-# 单条消息承载的流式文本上限，超过另起一条。Telegram 上限 4096，MarkdownV2 转义约膨胀 10%
-STREAM_SEGMENT_LIMIT = 3400
-STREAM_CURSOR = " |"
+STREAM_CURSOR = " ▍"  # 流式输出时挂在正文末尾的光标
 
 # ---- 持久化 ----
 WHITELIST_FILE = Path(_str("WHITELIST_FILE") or Path(__file__).with_name("allowed_users.json"))

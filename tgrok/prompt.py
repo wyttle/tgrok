@@ -15,10 +15,8 @@ def system_prompt(with_tools: bool) -> str:
     免得模型以为自己能调用。
     """
     base = config.SYSTEM_PROMPT_OVERRIDE if config.SYSTEM_PROMPT_OVERRIDE is not None else t("system_prompt")
-    # 说话人标识的约定：用 id 区分同名的人，回复里只用名字
-    parts = [base, t("speaker_note")]
-    if config.REPLY_SINGLE_PARAGRAPH:
-        parts.append(t("single_paragraph_note"))
+    # 说话人标识的约定：用 id 区分同名的人，回复里只用名字；回复格式：富文本白名单标签
+    parts = [base, t("speaker_note"), t("format_note")]
     if with_tools:
         parts += tools.prompt_notes()
     return "\n\n".join(parts)

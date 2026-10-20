@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import html
 import logging
 import time
 from itertools import count
@@ -248,7 +249,8 @@ async def _generate(history: list[dict], bubble: Bubble, chat_id: int, models: _
         working.extend(await plan.execute())
     if citations and bubble.has_text:
         # Gemini 原生 grounding 的引用附在正文末尾
-        links = "\n".join(f"[{c['title']}]({c['uri']})" for c in citations[:5])
+        links = "\n".join(f'<a href="{html.escape(c["uri"])}">{html.escape(c["title"] or c["uri"], quote=False)}</a>'
+                          for c in citations[:5])
         bubble.segment += "\n\n" + t("sources") + "\n" + links
     return draft
 

@@ -24,7 +24,6 @@ os.environ.update({
     "ALLOWED_USER_IDS": "",
     "BOT_LANG": "zh",
     "STREAM_IDLE_TIMEOUT": "0",
-    "REPLY_SINGLE_PARAGRAPH": "false",
     "ENABLE_VISION": "false",
     "WHITELIST_FILE": str(_TMP / "allowed_users.json"),
     "MEMORY_ENABLED": "true",

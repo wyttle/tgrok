@@ -19,6 +19,7 @@ bot 会结合被引用的消息内容，调用你本地的 LLM 模型（或任�
 - **长期记忆**：按聊天分开，精选条目（群笔记和每个人的档案）加可检索的聊天原话，参照 Hermes Agent 和 OpenClaw
 - **梗词典**：弄明白一个梗或隐喻（或者被群友纠正）后会记住真正的意思，下次直接用
 - **流式输出**：回复像打字机一样逐步出现；等待期间进度行显示计时和正在执行的工具，聊天里显示「正在输入」；长生成不会被网关空闲超时掐断
+- **富文本回复**：回复用 Telegram 富文本消息（`sendRichMessage`）发出：分段、加粗/斜体/行内代码、代码块、链接、剧透，长回复的细节收进可折叠引用；模型只写白名单里的几个 HTML 标签，其余一律转义成文字，Telegram 拒绝这条格式时自动改发纯文本
 - **权限控制**：管理员用命令管理白名单，无权限用户静默忽略
 - **双语**：bot 消息和配置向导支持中文/英文（`BOT_LANG`）
 - **四种 LLM 协议**：通过 `LLM_PROTOCOL` 选择 OpenAI 兼容 Chat Completions、OpenAI Responses API、Gemini 原生或 Claude 原生；Claude 原生保留 Anthropic thinking 与工具调用语义
@@ -77,7 +78,6 @@ python bot.py
 | `LLM_API_KEY` | API key；本地服务一般随便填 | `not-needed` |
 | `LLM_USER_AGENT` | 自定义请求 UA（部分云端网关会校验） | SDK 默认值 |
 | `SYSTEM_PROMPT` | 系统提示词；写在一行里，用 `\n` 表示换行（建议用双引号包起来） | 内置默认值 |
-| `REPLY_SINGLE_PARAGRAPH` | 只回一段：提示词里加一条要求，并在显示前把分段、分点和标题压成一段（代码块保留） | `false` |
 | `MAX_TOKENS` | 单次回答最大 token 数 | `1024` |
 | `LLM_TEMPERATURE` | 采样温度；留空使用后端默认值，后端拒绝时自动去掉 | （空） |
 | `LLM_TOP_P` | 核采样 top_p；留空使用后端默认值，后端拒绝时自动去掉 | （空） |

@@ -315,12 +315,9 @@ def test_forget_command_removes_listed_entries_or_everything():
     _add("一")
     _add("二")
     first = store.notes(CHAT)[0].id
-    replies = []
-
-    async def reply(text, **kw):
-        replies.append(text)
-
-    update = ns(effective_chat=ns(id=CHAT), effective_message=ns(reply_text=reply))
+    msg = FakeMsg()
+    replies = msg.log
+    update = ns(effective_chat=ns(id=CHAT), effective_message=msg)
     run(commands.cmd_forget(update, ns(args=[f"#{first}"])))
     assert [n.text for n in store.notes(CHAT)] == ["二"] and f"#{first}" in replies[-1]
     run(commands.cmd_forget(update, ns(args=["12345"])))

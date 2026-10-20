@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from . import config, memory, slang
+from . import config, memory, render, rich, slang
 from .memory import notes, store
 from .i18n import t
 from .prompt import person_label
@@ -32,7 +32,8 @@ def _manages_memory(update: Update) -> bool:
 
 
 async def _reply(update: Update, text: str) -> None:
-    await update.effective_message.reply_text(text)
+    msg = update.effective_message
+    await rich.send_rich(msg, render.plain_to_html(text), text)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

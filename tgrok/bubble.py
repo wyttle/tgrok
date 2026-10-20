@@ -11,10 +11,10 @@ import time
 from collections.abc import Callable
 
 from telegram import InlineKeyboardMarkup, InputMediaPhoto, Message
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
-from . import config, render
+from . import config, render, rich
 from .i18n import t
 from .tools import ProgressLine
 
@@ -113,36 +113,33 @@ class Bubble:
             self._abort()
 
     async def push(self, text: str, final: bool) -> None:
-        """渲染一版正文：定稿不带光标和按钮，过程中带光标和取消按钮。
-        都优先 MarkdownV2，解析失败回退纯文本；限流时中间编辑直接跳过，定稿等待后重试一次；
+        """渲染一版正文（富文本消息）：定稿不带光标和按钮、较长的细节自动折叠；过程中带光标和取消按钮。
+        富文本被拒绝时 rich 模块改发纯文本；限流时中间编辑直接跳过，定稿等待后重试一次；
         定稿编辑网络超时也重试一次，不然气泡会停在带光标的中间版本上。"""
-        if final:
-            md, plain, kb = render.to_telegram_markdown(text), text, None
-        else:
-            md, plain, kb = render.streaming_markdown(text), text + config.STREAM_CURSOR, self.markup
-
-        async def deliver(body: str, mode: str | None) -> None:
-            if self.sent is None:
-                self.sent = await self.msg.reply_text(body, parse_mode=mode, reply_markup=kb)
-            else:
-                await self.sent.edit_text(body, parse_mode=mode, reply_markup=kb)
-
+        cursor = "" if final else config.STREAM_CURSOR
+        html = render.to_rich_html(text, cursor=cursor, fold=final)
+        plain = render.to_plain(text) + cursor
+        if not final:
+            plain = plain[-rich.PLAIN_CHARS:]  # 过程中的纯文本回退只改这一条，不拆出新消息
+        kb = None if final else self.markup
         for attempt in range(2):
             editing = self.sent is not None
             try:
-                try:
-                    await deliver(md, ParseMode.MARKDOWN_V2)
-                except BadRequest as e:
-                    if "not modified" in str(e).lower():
-                        return
-                    await deliver(plain, None)
+                if editing:
+                    msgs = await rich.edit_rich(self.sent, html, plain, self.msg, kb)
+                else:
+                    msgs = await rich.send_rich(self.msg, html, plain, kb)
+                # 纯文本回退把定稿拆成了几条：前面的算已定稿，最后一条接着当当前消息
+                self.answer_ids.extend(m.message_id for m in msgs[:-1])
+                self.sent = msgs[-1]
                 return
             except RetryAfter as e:
                 await asyncio.sleep(float(e.retry_after) + 0.5)
                 if not final:
                     return
-            except BadRequest:
-                return  # 例如 message is not modified
+            except BadRequest as e:
+                logger.error("回复显示失败（富文本和纯文本都被拒绝）：%s", e)
+                return
             except NetworkError:
                 # 超时的编辑可能其实已经生效，重试时会得到 not modified；新发的消息不重试，免得发出两条
                 if not final or attempt or not editing:
@@ -153,19 +150,12 @@ class Bubble:
         """模型的正文增量。"""
         self.segment += delta
         # while 而非 if：网关可能把很长的正文压在一个 delta 里发来，必须能一次切成多条消息，
-        # 否则超过 4096 的编辑会被 Telegram 拒绝、尾部丢失
-        limit = config.STREAM_SEGMENT_LIMIT
-        while len(self.segment) >= limit:
-            # 优先在换行处断开，其次空格，实在没有就硬切
-            cut = self.segment.rfind("\n", limit // 2, limit)
-            if cut == -1:
-                cut = self.segment.rfind(" ", limit // 2, limit)
-            if cut == -1:
-                cut = limit
-            part, self.segment = render.shape(self.segment[:cut]), self.segment[cut:].lstrip("\n")
+        # 否则超过富文本上限的编辑会被 Telegram 拒绝、尾部丢失。render.cut 在段落边界切，不会切断标签
+        while len(self.segment) >= rich.RICH_CHARS:
+            part, self.segment = render.cut(self.segment, rich.RICH_CHARS)
             await self.settle()
             await self.push(part, final=True)
-            self.finalized += part + "\n"
+            self.finalized += part + "\n\n"
             if self.sent is not None:
                 self.answer_ids.append(self.sent.message_id)
             self.sent, self._last_edit = None, 0.0
@@ -173,7 +163,7 @@ class Bubble:
         # 上一次更新还在途（慢网络或限流退避中）就跳过本次，等它落地后的下一个 delta 再刷新
         if self.has_text and now - self._last_edit >= self._edit_interval and not self._busy():
             await self.settle()
-            self._start(self.push(render.shape(self.segment), final=False))
+            self._start(self.push(self.segment, final=False))
             self._last_edit = self._last_render = now
 
     def take_draft(self) -> str:
@@ -204,7 +194,7 @@ class Bubble:
             lines.append(self.stage + "…" + self._since(self._t0, now))
         body = "\n".join(lines)
         if self.has_text:
-            body = self.segment.rstrip() + "\n\n" + body
+            body = render.to_plain(self.segment) + "\n\n" + body
         # Telegram 上限 4096：截头保尾，进度在底部必须可见
         return body[-4000:]
 
@@ -266,7 +256,7 @@ class Bubble:
         """保留已有正文并标注已取消；还没输出正文就把占位改成「已取消」。"""
         try:
             if self.has_text:
-                await self.push(render.shape(self.segment).rstrip() + "\n\n" + t("cancelled_suffix"), final=True)
+                await self.push(self.segment.rstrip() + "\n\n" + t("cancelled_suffix"), final=True)
             elif self.sent is not None and not self.finalized:
                 await self.sent.edit_text(t("cancelled"))
         except TelegramError:
@@ -276,8 +266,8 @@ class Bubble:
         """已有部分正文时保留定稿、错误另发一条；否则把占位改成错误提示。"""
         try:
             if self.has_text:
-                await self.push(render.shape(self.segment), final=True)
-                await self.msg.reply_text(text)
+                await self.push(self.segment, final=True)
+                await rich.send_rich(self.msg, render.plain_to_html(text), text)
             elif self.sent is not None and not self.finalized:
                 await self.sent.edit_text(text)
             else:
@@ -291,14 +281,15 @@ class Bubble:
         if not self.has_text and draft:
             self.segment = draft  # 终轮没有产出正文：回用最后一轮被丢弃的草稿，别让用户空手而归
         if self.has_text:
-            self.segment = render.shape(self.segment)
+            self.segment = self.segment.strip()
             await self.push(self.segment + note, final=True)
             self.finalized += self.segment
             if self.sent is not None:
                 self.answer_ids.append(self.sent.message_id)
         elif self.finalized and note:
             try:
-                await self.msg.reply_text(note.strip())  # 正文恰好在分段边界结束：提示单独发一条
+                # 正文恰好在分段边界结束：提示单独发一条
+                await rich.send_rich(self.msg, render.plain_to_html(note.strip()), note.strip())
             except TelegramError:
                 pass
         elif not self.finalized:

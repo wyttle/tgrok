@@ -56,13 +56,10 @@ def test_known_term_is_attached_only_when_it_appears(monkeypatch):
 
 def test_chat_scoped_usage_stays_in_its_chat(monkeypatch):
     ask, asker = _asker(monkeypatch)
-    replies = []
-
-    async def reply(text, **kw):
-        replies.append(text)
-
-    update = ns(effective_user=asker, effective_chat=group(-60),
-                effective_message=ns(text="/learn 老地方=群主家楼下那家烧烤", reply_text=reply))
+    msg = FakeMsg()
+    msg.text = "/learn 老地方=群主家楼下那家烧烤"
+    replies = msg.log
+    update = ns(effective_user=asker, effective_chat=group(-60), effective_message=msg)
     run(commands.cmd_learn(update, None))
     assert "老地方" in replies[-1]
     assert "烧烤" in ask(-60, "晚上老地方见")

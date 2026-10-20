@@ -3,10 +3,11 @@
 import asyncio
 
 import pytest
-from fakes import HIST, FakeMsg, FakeSent, chunk_text, chunk_tool, ns, openai_adapter, run, stream_of, use_model
+from fakes import HIST, FakeMsg, FakeSent, chunk_text, chunk_tool, html_text, ns, openai_adapter, run, stream_of, \
+    use_model
 from telegram.error import BadRequest, TimedOut
 
-from tgrok import bubble, chat, config, llm, web
+from tgrok import bubble, chat, config, llm, rich, web
 from tgrok.i18n import STRINGS, t
 from tgrok.llm.base import BaseAdapter, RoundResult
 
@@ -198,7 +199,8 @@ def test_slow_telegram_edit_does_not_hold_up_the_next_model_round():
 
 
 def test_long_output_is_split_without_losing_text():
-    big = "\n".join("段%d %s" % (i, "内容" * 40) for i in range(100))
+    """超过富文本单条上限时按段落拆成几条，每条标签完整、都能单独渲染。"""
+    big = "\n\n".join("<b>段%d</b> %s" % (i, "内容" * 200) for i in range(100))
 
     async def create(history, has_tools):
         return stream_of([chunk_text(big)])
@@ -206,10 +208,12 @@ def test_long_output_is_split_without_losing_text():
     use_model(create)
     msg = FakeMsg()
     ids, answer = run(chat.stream_reply(msg, HIST))
-    assert all(len(x) < 4096 for x in msg.log)
-    assert answer.replace("\n", "").replace(" ", "") == big.replace("\n", "").replace(" ", "")
+    finals = [s.html for s in msg.sent]
+    assert len(finals) > 1 and all(len(html_text(h)) <= rich.RICH_CHARS for h in finals)
+    assert all(h.count("<b>") == h.count("</b>") for h in finals)
+    assert answer.replace("\n", "") == big.replace("\n", "")
     # 每一段都要能被回复追问：返回全部分段消息的 id
-    assert len(ids) > 1 and ids == [x.message_id for x in msg.sent]
+    assert ids == [x.message_id for x in msg.sent]
 
 
 def test_draft_written_alongside_tool_calls_is_dropped(monkeypatch):
@@ -309,20 +313,7 @@ def test_server_search_model_runs_one_round_and_appends_sources():
     llm.adapter = model
     _, answer = run(chat.stream_reply(FakeMsg(), HIST))
     assert len(model.rounds) == 1 and model.rounds[0][1] is None
-    assert answer.endswith("来源：\n[来源 A](https://example.com/a)")
-
-
-def test_single_paragraph_mode_flattens_displayed_and_returned_text():
-    async def create(history, has_tools):
-        return stream_of([chunk_text("就你还想捏爆？\n\n整只握在手心没事。\n\n"), chunk_text("- 指尖戳一下就行")])
-
-    use_model(create)
-    config.REPLY_SINGLE_PARAGRAPH = True
-    msg = FakeMsg()
-    assert run(chat.stream_reply(msg, HIST))[1] == "就你还想捏爆？整只握在手心没事。指尖戳一下就行"
-    assert "\n" not in msg.sent[0].text
-    config.REPLY_SINGLE_PARAGRAPH = False
-    assert "\n\n" in run(chat.stream_reply(FakeMsg(), HIST))[1]
+    assert answer.endswith('来源：\n<a href="https://example.com/a">来源 A</a>')
 
 
 # ---- 备用模型 ----

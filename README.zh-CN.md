@@ -237,20 +237,29 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
 配置：
 
 1. 运行 bot 的地方要装 omp。Docker 镜像会自动安装（版本由构建参数 `OMP_VERSION` 固定，`--build-arg OMP_VERSION=` 可跳过）。
-2. 给 omp 配好模型的接口和 key。Docker 部署时 `./omp` 挂载为 omp 的配置目录，新建 `./omp/agent/models.yml`，例如：
+2. 给 omp 配好模型的接口和 key。Docker 部署时 `./omp` 挂载为 omp 的配置目录，新建 `./omp/agent/models.yml`。
+   每个模型用它自己的原生协议：Claude 用 `anthropic-messages`，Gemini 用 `google-generative-ai`（地址写到 `/v1beta`），
+   不要让 Gemini 走 Claude 格式的转换。例如：
 
    ```yaml
    providers:
-     cpa:
-       baseUrl: https://your-relay.example.com
-       apiKey: RESEARCH_API_KEY   # 从这个环境变量读取；在 .env 里写 RESEARCH_API_KEY=...
-       authHeader: true
+     myclaude:
+       baseUrl: https://your-claude-relay.example.com
+       apiKey: LLM_API_KEY        # 写环境变量名：从 .env 里读取，key 不用写进这个文件
        api: anthropic-messages
-       discovery:
-         type: openai-models-list
+       auth: apiKey
+       models:
+         - id: claude-opus-5-5
+     mygemini:
+       baseUrl: https://your-gemini-relay.example.com/v1beta
+       apiKey: GEMINI_API_KEY
+       api: google-generative-ai
+       models:
+         - id: gemini-3.8-flash-high
    ```
 
-3. 设置 `RESEARCH_MODELS=cpa/claude-opus-5-5,cpa/gemini-3.8-flash-high`（omp 的模型名，可用 `omp models` 查看）。
+3. 设置 `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygemini/gemini-3.8-flash-high`（「接口名/模型名」，可用 `omp models` 查看）。
+   想要备用接口就再配一组 provider，写进 `RESEARCH_FALLBACK_MODELS`，按位置对应：某个研究员失败时换成对应的备选再跑一次。
 
 安全：研究员只开放 omp 的 `web_search` 和 `read`，并由 hook（`tgrok/tools/research_hook.ts`）把 `read` 限制在公网 http(s) 网页，
 群友用提示词注入也读不到本地文件、omp 自己的凭据和内网地址。研究员在空的临时目录里运行，超时或回复被取消时会被结束。

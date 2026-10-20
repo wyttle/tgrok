@@ -250,20 +250,30 @@ Setup:
 1. omp must be installed where the bot runs. The Docker image installs it (pinned by the `OMP_VERSION` build arg;
    `--build-arg OMP_VERSION=` skips it).
 2. Give omp the models' endpoint and key. With Docker, `./omp` is mounted as omp's config directory; create
-   `./omp/agent/models.yml`, for example:
+   `./omp/agent/models.yml`. Use each model's native protocol: `anthropic-messages` for Claude and
+   `google-generative-ai` for Gemini (base URL ending in `/v1beta`), rather than routing Gemini through a Claude-format
+   translation. For example:
 
    ```yaml
    providers:
-     cpa:
-       baseUrl: https://your-relay.example.com
-       apiKey: RESEARCH_API_KEY   # read from this environment variable; put RESEARCH_API_KEY=... in .env
-       authHeader: true
+     myclaude:
+       baseUrl: https://your-claude-relay.example.com
+       apiKey: LLM_API_KEY        # an environment variable name, read from .env; the key stays out of this file
        api: anthropic-messages
-       discovery:
-         type: openai-models-list
+       auth: apiKey
+       models:
+         - id: claude-opus-5-5
+     mygemini:
+       baseUrl: https://your-gemini-relay.example.com/v1beta
+       apiKey: GEMINI_API_KEY
+       api: google-generative-ai
+       models:
+         - id: gemini-3.8-flash-high
    ```
 
-3. Set `RESEARCH_MODELS=cpa/claude-opus-5-5,cpa/gemini-3.8-flash-high` (omp model names, see `omp models`).
+3. Set `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygemini/gemini-3.8-flash-high` ("provider/model", see `omp models`).
+   For backup endpoints, add another set of providers and list them in `RESEARCH_FALLBACK_MODELS` by position: a
+   researcher that fails is rerun once on its backup.
 
 Safety: researchers only get omp's `web_search` and `read` tools, and a hook (`tgrok/tools/research_hook.ts`) blocks
 `read` on anything but public http(s) pages, so prompt injection can't make them read local files, omp's own

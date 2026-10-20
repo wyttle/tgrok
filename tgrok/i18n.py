@@ -100,6 +100,20 @@ STRINGS = {
         ),
         "tool_slang": "记住: {term}",
         "res_saved": "已记住",
+        "tool_research": "深入调研: {task}",
+        "res_reports": "{n} 份报告",
+        "research_report": "【研究员 {label}（{model}，用时 {secs:.0f} 秒）的报告】",
+        "research_member_failed": "【研究员 {label}（{model}）没有交回报告：{reason}】",
+        "research_failed": "（深入调研失败：{reason}。改用 web_search 和 open_url 自己查，或说明没查到。）",
+        "research_system_prompt": (
+            "research 工具会把一个调研任务同时交给两个互相独立的研究员（不同的模型），它们各自搜索、打开网页读原文后"
+            "交回事实要点和读过的来源，一次大约 30 秒到 2 分钟。遇到要认真查证的问题再用它：不认识的梗、小众圈子的黑话、"
+            "有争议或容易传错的说法、需要准确数字和日期的事实、web_search 查了还拿不准的事。闲聊和一搜就有答案的事别用。"
+            "task 要写全背景：原话、出自哪个圈子或平台、群友到底想知道什么，研究员看不到群聊。"
+            "两份报告由你来判断：说法一致又有一手来源的可以采信；有分歧时信来源更权威、更具体、更新的那份，"
+            "拿不准就说明有不同说法；只有一份交回时按那一份，并对它多一分保留。"
+            "回答时用自己的话直接讲结论，不要提「研究员」「报告」「调研」这些词。"
+        ),
         "slang_saved": "已记下「{term}」的这种用法，以后它出现时会作为参考附上。",
         "slang_bad_args": "（没记住：词要 {min}~{max} 个字，释义不能为空）",
         "slang_header": (
@@ -321,6 +335,24 @@ STRINGS = {
         ),
         "tool_slang": "Remember: {term}",
         "res_saved": "saved",
+        "tool_research": "Research: {task}",
+        "res_reports": "{n} reports",
+        "research_report": "[Report from researcher {label} ({model}, took {secs:.0f}s)]",
+        "research_member_failed": "[Researcher {label} ({model}) returned no report: {reason}]",
+        "research_failed": "(research failed: {reason}. Look it up yourself with web_search and open_url, or say you couldn't find it.)",
+        "research_system_prompt": (
+            "The research tool hands one research task to two independent researchers (different models) at once; "
+            "each searches, reads the actual pages, and returns key facts plus the sources it read. One call takes "
+            "about 30 seconds to 2 minutes. Use it for questions that need real checking: memes you don't know, niche "
+            "community jargon, disputed or commonly garbled claims, facts that need exact numbers or dates, and "
+            "things web_search left you unsure about. Don't use it for small talk or anything one search answers. "
+            "Write the task with full background (the exact wording, which community or platform it comes from, what "
+            "the person actually wants to know); the researchers can't see the chat. You judge the two reports: "
+            "accept what they agree on and back with primary sources; when they disagree, trust the one with more "
+            "authoritative, specific, and recent sources, or say there are different accounts; if only one came "
+            "back, use it with a bit more caution. Answer in your own words and never mention researchers, reports, "
+            "or research."
+        ),
         "slang_saved": "Saved this usage of \"{term}\"; it will be attached as a reference whenever the term comes up.",
         "slang_bad_args": "(not saved: the term must be {min}-{max} characters and the meaning can't be empty)",
         "slang_header": (

@@ -1,6 +1,9 @@
 """应用入口：组装 python-telegram-bot 应用、注册处理函数和命令菜单、打印启动配置。"""
 
 import logging
+import os
+import shlex
+import shutil
 
 from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.error import TelegramError
@@ -66,6 +69,12 @@ def _log_startup() -> None:
     if skipped:
         logger.warning("搜索源 %s 配置不完整或名称不识别（tavily 需 TAVILY_API_KEY，searxng 需 SEARXNG_BASE_URL），已跳过",
                        ",".join(skipped))
+    if config.RESEARCH_MODELS:
+        logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒）",
+                    ",".join(config.RESEARCH_MODELS), config.RESEARCH_TIMEOUT)
+        omp = shlex.split(config.OMP_BIN, posix=os.name != "nt")[:1]
+        if not omp or shutil.which(omp[0]) is None:
+            logger.warning("找不到 omp 可执行文件（OMP_BIN=%s），深入调研会一直失败", config.OMP_BIN)
 
 
 def main() -> None:

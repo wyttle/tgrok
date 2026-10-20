@@ -12,3 +12,5 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
+      # omp 的配置目录（深入调研用）：在 ./omp/agent/models.yml 里配研究员模型的接口和 key
+      - ./omp:/root/.omp

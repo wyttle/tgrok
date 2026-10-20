@@ -26,7 +26,9 @@ tgrok/
 |   |-- __init__.py    Tool 基类、REGISTRY、schemas()/prompt_notes()、plan_round() 进度与并发执行
 |   |-- calculate.py   calculate
 |   |-- remember_slang.py  remember_slang
-|   `-- web.py         web_search（grounding 模式下同轮合并）、open_url
+|   |-- web.py         web_search（grounding 模式下同轮合并）、open_url
+|   |-- research.py    research：同一任务并发交给 RESEARCH_MODELS 里的每个 omp 研究员，报告一起交回
+|   `-- research_hook.ts  研究员进程加载的 omp hook：read 只准读公网 http(s) 网页
 |-- calc.py            calculate 的求值器：白名单 AST 的算术、比较与日期推算
 |-- web.py             多搜索源聚合、Gemini grounding、网页抓取和 Jina 兜底；失败抛 WebError
 |-- memory.py          按聊天保存的长期记忆：注入块、问答记录、静默旁听缓冲、后台摘要整理
@@ -95,6 +97,8 @@ Telegram update
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
            -> calculate、remember_slang、web_search（grounding 模式同轮合并）、open_url
+           -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
+              超时或回复被取消时整组结束；报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
         -> Gemini 原生返回的引用附到正文末尾
      -> Bubble.finish 定稿（MarkdownV2，失败回退纯文本）；终轮空手时回用最后一版草稿
@@ -121,6 +125,7 @@ Telegram update
 
 - `llm.adapter`、`llm.fallback_adapter`：主模型和备用模型的适配器，各自记着自己的降级状态。`config.fallback_endpoint()` 里留空的协议、地址和 key 沿用主模型，额外参数不继承。
 - `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
+- `tools.research._slots`：限制同时进行的调研任务数（`RESEARCH_CONCURRENCY`）的信号量，换事件循环时重建。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
 - `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
@@ -137,5 +142,5 @@ Telegram update
 
 ## 测试与部署
 
-- `pip install -r requirements-dev.txt` 后运行 `python -m pytest`。用例按模块分文件：回复流程（test_reply）、工具（test_tools）、适配器（test_adapters）、消息拼装（test_messages）、记忆（test_memory）、梗词典（test_slang）、显示格式（test_render）、联网（test_web）、配置和向导（test_config、test_configure）。
+- `pip install -r requirements-dev.txt` 后运行 `python -m pytest`。用例按模块分文件：回复流程（test_reply）、工具（test_tools）、深入调研（test_research，用 tests/fake_omp.py 代替真 omp，覆盖多份报告、部分失败、超时和取消时结束进程）、适配器（test_adapters）、消息拼装（test_messages）、记忆（test_memory）、梗词典（test_slang）、显示格式（test_render）、联网（test_web）、配置和向导（test_config、test_configure）。
 - 部署不属于测试。修改后先在本地跑通测试，再按项目部署方式重建服务。

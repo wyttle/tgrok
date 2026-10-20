@@ -15,6 +15,7 @@ os.environ.update({
     "TELEGRAM_BOT_TOKEN": "x",
     "LLM_PROTOCOL": "openai",
     "LLM_FALLBACK_MODEL": "",
+    "RESEARCH_MODELS": "",
     "GEMINI_SEARCH_MODEL": "",
     "SEARCH_PROVIDER": "",
     "ADMIN_USER_IDS": "999",

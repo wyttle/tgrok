@@ -155,7 +155,9 @@ class Bubble:
         已有部分正文时正文在上、进度在下。在调度时取快照，后台执行时状态可能已前进。"""
         lines = []
         for line in self.progress[-5:]:
-            lines.append(line.text)
+            # 工具还在执行（没有底部状态行时）：省略号挂在没出结果的工具行上，长时间的调研也看得出没卡住
+            pending = line.result is None and not self.stage
+            lines.append(line.text + (suffix if pending else ""))
             if line.result:
                 lines.append(f"  {line.result}")
         if self.stage:

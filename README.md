@@ -107,6 +107,11 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `FETCH_CHAR_LIMIT` | page-text characters fed back per `open_url` call | `3500` |
 | `JINA_FALLBACK` | use Jina Reader when direct page extraction fails | `true` |
 | `JINA_API_KEY` | optional Jina API key for higher rate limits | (empty) |
+| `RESEARCH_MODELS` | omp model names (comma-separated) for the `research` tool; each becomes one researcher; empty = off | (empty) |
+| `RESEARCH_TIMEOUT` | seconds each researcher may run | `150` |
+| `RESEARCH_THINKING` | researcher thinking level (`omp --thinking`) | `low` |
+| `RESEARCH_CONCURRENCY` | research tasks running at the same time | `2` |
+| `OMP_BIN` | omp executable | `omp` |
 | `ADMIN_USER_IDS` | super admin IDs (comma-separated) | (empty) |
 | `ALLOWED_USER_IDS` | initial whitelist, first start only | (empty) |
 
@@ -199,6 +204,39 @@ Notes:
   backend rejects tools, the bot automatically falls back to plain chat.
 - An answer uses at most 3 tool rounds (`SEARCH_MAX_ROUNDS`, shared by search and `calculate`),
   i.e. up to 4 model calls, so tool-assisted answers are a bit slower.
+
+## Deep research (omp)
+
+For questions that need real checking (memes and niche jargon, disputed claims, exact numbers and dates), the
+model can call a `research` tool. The task goes to every model in `RESEARCH_MODELS` at once; each runs as a headless
+[omp](https://omp.sh) process that may only search and read public web pages, reads the actual pages, and returns key
+facts with the sources it read. All reports go back to the reply model, which compares them and decides what to
+trust. One call takes about 30 s to 2 min; the reply model keeps using `web_search` for quick lookups.
+
+Setup:
+
+1. omp must be installed where the bot runs. The Docker image installs it (pinned by the `OMP_VERSION` build arg;
+   `--build-arg OMP_VERSION=` skips it).
+2. Give omp the models' endpoint and key. With Docker, `./omp` is mounted as omp's config directory; create
+   `./omp/agent/models.yml`, for example:
+
+   ```yaml
+   providers:
+     cpa:
+       baseUrl: https://your-relay.example.com
+       apiKey: RESEARCH_API_KEY   # read from this environment variable; put RESEARCH_API_KEY=... in .env
+       authHeader: true
+       api: anthropic-messages
+       discovery:
+         type: openai-models-list
+   ```
+
+3. Set `RESEARCH_MODELS=cpa/claude-opus-5-5,cpa/gemini-3.8-flash-high` (omp model names, see `omp models`).
+
+Safety: researchers only get omp's `web_search` and `read` tools, and a hook (`tgrok/tools/research_hook.ts`) blocks
+`read` on anything but public http(s) pages, so prompt injection can't make them read local files, omp's own
+credentials, or internal addresses. They run in an empty temporary directory and are killed on timeout or when the
+reply is cancelled. Hostnames that resolve to private IPs (DNS rebinding) are not caught.
 
 ## Deployment (long-running)
 

@@ -104,6 +104,11 @@ python bot.py
 | `FETCH_CHAR_LIMIT` | 单次 `open_url` 回灌给模型的网页正文字数上限 | `3500` |
 | `JINA_FALLBACK` | 直接提取网页失败时使用 Jina Reader 兜底 | `true` |
 | `JINA_API_KEY` | 可选 Jina API key，用于提高速率限制 | （空） |
+| `RESEARCH_MODELS` | `research` 工具用的 omp 模型名（逗号分隔），每个模型一个研究员；留空关闭 | （空） |
+| `RESEARCH_TIMEOUT` | 单个研究员最多跑多少秒 | `150` |
+| `RESEARCH_THINKING` | 研究员的思考强度（`omp --thinking`） | `low` |
+| `RESEARCH_CONCURRENCY` | 同时最多几个调研任务 | `2` |
+| `OMP_BIN` | omp 可执行文件 | `omp` |
 | `ADMIN_USER_IDS` | 超级管理员 ID（逗号分隔），可用命令管理白名单 | （空） |
 | `ALLOWED_USER_IDS` | 白名单初始值，仅首次启动生效 | （空） |
 
@@ -189,6 +194,35 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
 - 需要模型/后端支持 **function calling**（工具调用）。主流云端模型和 LM Studio / vLLM /
   llama.cpp（需 `--jinja`）加载的较新开源模型均支持；后端不支持时 bot 自动退化为普通对话，不影响使用。
 - 单次回答最多进行 3 轮工具调用（`SEARCH_MAX_ROUNDS` 可调，搜索和 `calculate` 共用），即最多 4 次模型调用，需要用工具的回答会稍慢。
+
+## 深入调研（omp）
+
+遇到要认真查证的问题（不认识的梗和小众黑话、有争议的说法、需要准确数字和日期的事实），模型可以调用 `research` 工具。
+调研任务会同时交给 `RESEARCH_MODELS` 里的每个模型：每个模型起一个 [omp](https://omp.sh) 无界面进程，只能搜索和读公网网页，
+读原文后交回事实要点和读过的来源。所有报告一起交给回复用的模型，由它对比、决定信谁的。一次约 30 秒到 2 分钟；
+查个时间、价格这种快问题模型仍然用 `web_search`。
+
+配置：
+
+1. 运行 bot 的地方要装 omp。Docker 镜像会自动安装（版本由构建参数 `OMP_VERSION` 固定，`--build-arg OMP_VERSION=` 可跳过）。
+2. 给 omp 配好模型的接口和 key。Docker 部署时 `./omp` 挂载为 omp 的配置目录，新建 `./omp/agent/models.yml`，例如：
+
+   ```yaml
+   providers:
+     cpa:
+       baseUrl: https://your-relay.example.com
+       apiKey: RESEARCH_API_KEY   # 从这个环境变量读取；在 .env 里写 RESEARCH_API_KEY=...
+       authHeader: true
+       api: anthropic-messages
+       discovery:
+         type: openai-models-list
+   ```
+
+3. 设置 `RESEARCH_MODELS=cpa/claude-opus-5-5,cpa/gemini-3.8-flash-high`（omp 的模型名，可用 `omp models` 查看）。
+
+安全：研究员只开放 omp 的 `web_search` 和 `read`，并由 hook（`tgrok/tools/research_hook.ts`）把 `read` 限制在公网 http(s) 网页，
+群友用提示词注入也读不到本地文件、omp 自己的凭据和内网地址。研究员在空的临时目录里运行，超时或回复被取消时会被结束。
+解析到内网 IP 的域名（DNS rebinding）拦不住。
 
 ## 部署（长期运行）
 

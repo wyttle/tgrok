@@ -171,11 +171,11 @@ def fallback_endpoint() -> LLMEndpoint | None:
 
 # ---- 提速：Gemini 帮手模型（额度宽裕时可以放开用）----
 # 后台杂活（记忆整理）和抢答用的 Gemini 模型，走 GEMINI_BASE_URL / GEMINI_API_KEY；留空沿用 GEMINI_MEDIA_MODEL，
-# 两个都空就不启用（记忆整理用主模型，不抢答）
+# 两个都空就不启用（记忆整理用主模型，不抢答）。抢答要的是快，适合填 flash 这类首字快的模型
 GEMINI_HELPER_MODEL = _str("GEMINI_HELPER_MODEL") or GEMINI_MEDIA_MODEL
 # 抢答：主模型这么多秒还没出字、也没开始调工具，就同时让帮手模型（Gemini 原生，自带 Google 搜索）作答，
 # 谁先出字用谁，另一个取消。0 = 关闭
-HEDGE_AFTER = _float("HEDGE_AFTER", 12)
+HEDGE_AFTER = _float("HEDGE_AFTER", 8)
 # 媒体预读：群里一出现视频、语音等，就先让 GEMINI_MEDIA_MODEL 在后台完整转述，有人问到时直接用
 MEDIA_PREFETCH = _bool("MEDIA_PREFETCH", True)
 # 最近群聊：bot 收到的群消息在内存里每群留一小段，提问时把这段时间内最近几条附上作背景。0 = 关闭

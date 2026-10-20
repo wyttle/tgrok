@@ -99,6 +99,11 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `SLANG_MAX_ENTRIES` | max glossary entries; the least recently used are dropped | `500` |
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `GEMINI_MEDIA_MODEL` | Gemini model that watches videos and listens to voice messages; also views images when vision is off. Uses `GEMINI_BASE_URL` / `GEMINI_API_KEY` | (empty) |
+| `MEDIA_PREFETCH` | transcribe videos and voice messages in the background as soon as they appear | `true` |
+| `GEMINI_HELPER_MODEL` | Gemini model for memory consolidation and racing; empty = reuse `GEMINI_MEDIA_MODEL` | (empty) |
+| `HEDGE_AFTER` | seconds without text or a tool call from the main model before the helper answers in parallel (first to produce text wins); `0` = off | `8` |
+| `RECENT_CHAT_COUNT` | recent group messages attached to a question; `0` = off | `15` |
+| `RECENT_CHAT_MINUTES` | only recent messages from this many minutes back | `60` |
 | `MAX_IMAGES` | images attached per request | `4` |
 | `SEARCH_PROVIDER` | comma-separated providers: `tavily`, `duckduckgo`, `searxng`, `serper`; empty = off | (empty) |
 | `TAVILY_API_KEY` | Tavily API key | (empty) |
@@ -195,6 +200,17 @@ a cloud API, images leave your server.
 - with `LLM_PROTOCOL=gemini` there is no bot tool loop, so this doesn't apply
 - without `GEMINI_MEDIA_MODEL` the main model is told plainly that it can't see or hear the media, so it doesn't make up the content
 - media are sent to the Gemini service; after a bot restart, media in old messages must be sent again to be viewed
+- **Prefetch**: every video, voice message, etc. the bot receives (including group messages that don't mention it) is transcribed in the background right away, once per file and at most 4 at a time. When someone later quotes it or asks "what did he just say in that voice message", the transcript is already in the question and the main model needs no tool round; if it isn't ready yet, `watch_media` waits for that same job instead of asking again. Voice and video messages in observed groups are logged with their transcript
+
+**Recent group chat.** People often ask the bot about what was just said. Every group message the bot receives (all of them once privacy mode is off) is kept in memory per group, along with the bot's own replies; a question gets the latest `RECENT_CHAT_COUNT` messages from the last `RECENT_CHAT_MINUTES` minutes attached, each line as "time who replying to whom: text", with transcripts for voice and video. Follow-ups to the bot only get the messages since that reply. Memory-only; cleared on restart.
+
+**Keeping speakers straight.** When someone replies to another person's message and mentions the bot, the quoted message is labeled "[Quoted message] sent by: Li (not the person asking)" and the asker's words "[Question] Qiang replied to the message above and asks you: …"; the system prompt tells the model to attribute words to whoever actually said them ("I" in the quoted message means its author). Forwards name the original author (the forwarder only forwarded it), channel and anonymous-admin posts are labeled by the channel, a partial quote is shown, and quoting your own message is marked as such. In the chat log, the quoted words are stored as a separate line under their real author (deduplicated by Telegram message id) and the question only as "(replying to a message from Li) is this true", so later recall and memory consolidation don't pin someone else's words on the asker.
+
+**Speed.** With `GEMINI_HELPER_MODEL` (or just `GEMINI_MEDIA_MODEL`) set:
+
+- **Racing**: if the main model has produced neither text nor a tool call after `HEDGE_AFTER` seconds (reasoning models often think for 10+ seconds), the helper (native Gemini with built-in Google Search) answers in parallel; whichever produces text first is used, the other is cancelled, and the reply notes who answered. Only the first round races; rounds after tool results stay on the main model. Measured: gpt-6.1-sol (reasoning effort high) alone took 17.6 s; with `HEDGE_AFTER=5` and `gemini-3-flash` the answer came in 6.8 s. Pick a helper with a fast first token (`gemini-3-flash` 1.4 s vs `gemini-3.8-flash-high` 4.9 s on the same question)
+- **Memory consolidation** runs on the helper instead of the main model, falling back to the main model if it fails
+- Display updates never hold up generation: slow or rate-limited Telegram edits don't stall the model or tools, and a rate-limited placeholder is retried instead of dropping the reply
 
 ## Web search
 

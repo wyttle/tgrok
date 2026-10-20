@@ -63,6 +63,11 @@ def _log_startup() -> None:
     elif config.GEMINI_SEARCH_MODEL:
         logger.info("混合搜索模式：web_search 由 %s + google_search grounding 执行（失败回退自带搜索源）",
                     config.GEMINI_SEARCH_MODEL)
+    if config.GEMINI_HELPER_MODEL:
+        logger.info("Gemini 帮手模型 %s：记忆整理%s", config.GEMINI_HELPER_MODEL,
+                    f"，主模型 {config.HEDGE_AFTER:g} 秒没输出就同时抢答" if config.HEDGE_AFTER > 0 else "")
+    if config.GEMINI_MEDIA_MODEL and config.MEDIA_PREFETCH:
+        logger.info("媒体预读已开启：视频语音一出现就由 %s 在后台转述", config.GEMINI_MEDIA_MODEL)
     if config.SEARCH_ENABLED:
         logger.info("联网搜索已开启：provider=%s（web_search + open_url）", ",".join(config.ACTIVE_PROVIDERS))
     skipped = [p for p in config.SEARCH_PROVIDERS if p not in config.ACTIVE_PROVIDERS]

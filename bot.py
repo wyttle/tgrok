@@ -7,7 +7,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("trafilatura").setLevel(logging.ERROR)  # "discarding data" 等内部告警无诊断价值
 
-from tgrok.tg import main  # noqa: E402
+from tgrok.app import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

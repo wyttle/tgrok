@@ -1,0 +1,170 @@
+"""斜杠命令。COMMANDS 是唯一的命令表：注册处理函数和 Telegram 命令菜单都从这里生成。"""
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from . import config, memory, slang
+from .i18n import t
+from .prompt import person_label
+from .tg_auth import allowed_users, is_admin, is_authorized, save_allowed_users
+
+Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+
+
+def _authorized(update: Update) -> bool:
+    user = update.effective_user
+    return user is not None and is_authorized(user.id)
+
+
+def _admin(update: Update) -> bool:
+    user = update.effective_user
+    return user is not None and is_admin(user.id)
+
+
+def _manages_memory(update: Update) -> bool:
+    """管理员在任何聊天都能看/清记忆和梗词典；私聊里白名单用户可以管自己的。"""
+    chat = update.effective_chat
+    return chat is not None and (_admin(update) or (chat.type == "private" and _authorized(update)))
+
+
+async def _reply(update: Update, text: str) -> None:
+    await update.effective_message.reply_text(text)
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _reply(update, t("start", username=context.bot.username, user_id=update.effective_user.id))
+
+
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not config.MEMORY_ENABLED:
+        await _reply(update, t("memory_disabled"))
+        return
+    chat_id = update.effective_chat.id
+    block = memory.memory_block(chat_id)
+    lines = [t("memory_show", block=block) if block else t("memory_empty")]
+    pending = memory.pending_observed(chat_id)
+    if pending:
+        lines.append(t("memory_pending", n=pending))
+    lines.append(t("memory_chat_id", chat_id=chat_id))
+    await _reply(update, "\n\n".join(lines))
+
+
+async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cleared = memory.clear(update.effective_chat.id)
+    await _reply(update, t("memory_cleared") if cleared else t("memory_empty"))
+
+
+async def cmd_slang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not config.SLANG_ENABLED:
+        await _reply(update, t("slang_disabled"))
+        return
+    items = slang.entries_for(update.effective_chat.id)
+    if not items:
+        await _reply(update, t("slang_none"))
+        return
+    lines = "\n".join(slang.describe(v) for v in items)
+    await _reply(update, t("slang_list", n=len(items), lines=lines)[:4000])
+
+
+_GLOBAL_WORDS = ("通用", "global")
+
+
+async def cmd_learn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """白名单用户都能教：/learn 词=解释|语境（本群），/learn 通用 词=解释（所有群）。"""
+    parts = (update.effective_message.text or "").split(maxsplit=1)
+    raw = parts[1] if len(parts) > 1 else ""
+    scope = "chat"
+    head, _, rest = raw.partition(" ")
+    if head.lower() in _GLOBAL_WORDS:
+        scope, raw = slang.GLOBAL, rest
+    term, sep, rest = raw.replace("＝", "=").partition("=")
+    meaning, _, usage = rest.replace("｜", "|").partition("|")
+    saved = slang.learn(term, meaning, update.effective_chat.id, scope=scope, context=usage,
+                        by=person_label(update.effective_user)) if sep else None
+    await _reply(update, t("slang_learned", term=saved) if saved else t("slang_usage"))
+
+
+async def cmd_unlearn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    term = " ".join(context.args or [])
+    if not term:
+        await _reply(update, t("slang_usage"))
+        return
+    removed = slang.forget(term, update.effective_chat.id)
+    await _reply(update, t("slang_forgotten" if removed else "slang_not_found", term=term))
+
+
+def _target_user_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[set[int], str | None]:
+    """管理命令的目标用户：优先取命令参数里的 ID，否则取被回复消息的发送者。"""
+    ids = set()
+    for arg in context.args or []:
+        try:
+            ids.add(int(arg.strip().rstrip(",，")))
+        except ValueError:
+            return set(), t("invalid_id", arg=arg)
+    if not ids:
+        replied = update.effective_message.reply_to_message
+        if replied and replied.from_user:
+            ids.add(replied.from_user.id)
+    if not ids:
+        return set(), t("admin_usage")
+    return ids, None
+
+
+async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ids, err = _target_user_ids(update, context)
+    if err:
+        await _reply(update, err)
+        return
+    allowed_users.update(ids)
+    save_allowed_users()
+    await _reply(update, t("added", ids=", ".join(map(str, sorted(ids))), n=len(allowed_users)))
+
+
+async def cmd_deluser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ids, err = _target_user_ids(update, context)
+    if err:
+        await _reply(update, err)
+        return
+    removed = ids & allowed_users
+    allowed_users.difference_update(ids)
+    save_allowed_users()
+    await _reply(update, t("removed", ids=", ".join(map(str, sorted(removed))) if removed else t("no_match"),
+                           n=len(allowed_users)))
+
+
+async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = [t("admins", ids=", ".join(map(str, sorted(config.ADMIN_USER_IDS))) or t("not_configured"))]
+    if allowed_users:
+        lines.append(t("whitelist", n=len(allowed_users), ids="\n".join(map(str, sorted(allowed_users)))))
+    else:
+        lines.append(t("whitelist_empty_controlled") if config.ADMIN_USER_IDS else t("whitelist_empty_open"))
+    await _reply(update, "\n".join(lines))
+
+
+@dataclass(frozen=True)
+class Command:
+    names: tuple[str, ...]
+    handler: Handler
+    allowed: Callable[[Update], bool]  # 不满足时静默忽略
+    menu: str  # 菜单里的说明（i18n key）
+    admin_menu_only: bool  # True：只出现在管理员私聊的命令菜单里
+
+    async def __call__(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self.allowed(update):
+            await self.handler(update, context)
+
+
+COMMANDS = [
+    Command(("help", "start"), cmd_start, _authorized, "cmd_help", False),
+    Command(("learn",), cmd_learn, _authorized, "cmd_learn", False),
+    Command(("adduser",), cmd_adduser, _admin, "cmd_adduser", True),
+    Command(("deluser",), cmd_deluser, _admin, "cmd_deluser", True),
+    Command(("listusers",), cmd_listusers, _admin, "cmd_listusers", True),
+    Command(("memory",), cmd_memory, _manages_memory, "cmd_memory", True),
+    Command(("forget",), cmd_forget, _manages_memory, "cmd_forget", True),
+    Command(("slang",), cmd_slang, _manages_memory, "cmd_slang", True),
+    Command(("unlearn",), cmd_unlearn, _manages_memory, "cmd_unlearn", True),
+]

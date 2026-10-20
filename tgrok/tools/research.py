@@ -14,12 +14,13 @@ import shutil
 import signal
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import config, logs, usage
 from ..i18n import t
-from . import Outcome, Tool, failed
+from . import Outcome, Tool, failed, show_detail
 
 logger = logging.getLogger(__name__)
 
@@ -114,26 +115,74 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def run_researcher(model: str, task: str) -> Report:
-    """跑一个研究员。永不抛异常（取消除外）：失败时 Report.error 说明原因。"""
+_STREAM_LIMIT = 32 * 1024 * 1024  # omp 一行一个事件，读网页的结果可能很长
+_PROGRESS_TYPES = ("agent_start", "tool_execution_start", "tool_execution_end")
+
+Step = Callable[[str, int], None]  # （在做什么, 第几步）
+
+
+def _short_url(url: str) -> str:
+    url = re.sub(r"^https?://(www\.)?", "", str(url or "")).rstrip("/")
+    return url if len(url) <= 40 else url[:39] + "…"
+
+
+def _doing(event: dict) -> str | None:
+    """进度里一句话说研究员在做什么；和进度无关的事件返回 None。"""
+    kind = event.get("type")
+    if kind != "tool_execution_start":
+        return t("research_doing_think") if kind in ("agent_start", "tool_execution_end") else None
+    args = event.get("args")
+    args = args if isinstance(args, dict) else {}
+    if event.get("toolName") == "web_search":
+        query = " ".join(str(args.get("query", "")).split())
+        return t("research_doing_search", q=query if len(query) <= 30 else query[:29] + "…")
+    if event.get("toolName") == "read":
+        return t("research_doing_read", what=_short_url(args.get("path", "")))
+    return str(event.get("toolName") or "?")
+
+
+async def run_researcher(model: str, task: str, on_step: Step | None = None) -> Report:
+    """跑一个研究员。永不抛异常（取消除外）：失败时 Report.error 说明原因。
+    omp 边跑边一行一个事件地输出；每开始一次搜索或读网页，on_step 收到（在做什么, 第几步）。"""
     workdir = tempfile.mkdtemp(prefix="tgrok-research-")
     t0 = time.monotonic()
     report = Report(model)
     try:
         proc = await asyncio.create_subprocess_exec(
             *_command(model, task), cwd=workdir, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=os.name == "posix")
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=os.name == "posix",
+            limit=_STREAM_LIMIT)
     except OSError as e:
         report.error = f"cannot start omp ({type(e).__name__})"
         shutil.rmtree(workdir, ignore_errors=True)
         return report
+    out_lines: list[str] = []
+    steps = 0
+
+    async def read_events() -> None:
+        nonlocal steps
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace")
+            out_lines.append(line)
+            if on_step is None or not any(k in line[:80] for k in _PROGRESS_TYPES):
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            doing = _doing(event) if isinstance(event, dict) else None
+            if doing is not None:
+                steps += event.get("type") == "tool_execution_start"
+                on_step(doing, steps)
+
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), config.RESEARCH_TIMEOUT + KILL_GRACE)
+        _, err, _ = await asyncio.wait_for(asyncio.gather(read_events(), proc.stderr.read(), proc.wait()),
+                                           config.RESEARCH_TIMEOUT + KILL_GRACE)
     except asyncio.TimeoutError:
         _kill(proc)
         await proc.wait()
         report.error = "timed out"
-        out = err = b""
+        err = b""
     except BaseException:
         # 回复被取消：不留下还在花钱的进程；等它真正退出再删工作目录、关管道
         _kill(proc)
@@ -142,14 +191,14 @@ async def run_researcher(model: str, task: str) -> Report:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     report.secs = time.monotonic() - t0
-    report.text, report.usage, failure = parse_events(out.decode("utf-8", "replace"))
+    report.text, report.usage, failure = parse_events("".join(out_lines))
     if not report.text and not report.error:
         tail = err.decode("utf-8", "replace").strip().splitlines()
         report.error = failure or (tail[-1][:200] if tail else "") or f"no answer (exit code {proc.returncode})"
     if not report.text and report.secs >= config.RESEARCH_TIMEOUT:
         report.error = "timed out"  # 时间已经用完，不管 omp 报的是什么：再换备选只会让大家再等一轮
-    logger.info("研究员 %s %s：%.0fs，%d 字，token 输入 %s / 输出 %s", model,
-                "完成" if report.text else f"失败（{report.error}）", report.secs, len(report.text),
+    logger.info("研究员 %s %s：%.0fs，%d 步，%d 字，token 输入 %s / 输出 %s", model,
+                "完成" if report.text else f"失败（{report.error}）", report.secs, steps, len(report.text),
                 logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))
     usage.record("research", model, report.tokens_in, report.usage.get("output", 0), report.secs, ok=bool(report.text))
     return report
@@ -163,18 +212,55 @@ def _backup(i: int) -> str | None:
     return backups[i] if i < len(backups) else backups[-1]
 
 
-async def run_with_backup(i: int, model: str, task: str) -> Report:
+class _Board:
+    """进度里调研那一行下面的明细：每个研究员一行，写明在用哪个模型、在做什么、第几步。"""
+
+    def __init__(self, models: list[str]):
+        self.rows = [t("research_row", label=_label(i), model=_name(m), doing=t("research_doing_start"))
+                     for i, m in enumerate(models)]
+        show_detail(self.rows)
+
+    def set(self, i: int, text: str) -> None:
+        self.rows[i] = text
+        show_detail(self.rows)
+
+    def stepper(self, i: int, model: str, backup: bool) -> Step:
+        key = "research_row_backup" if backup else "research_row"
+
+        def step(doing: str, n: int) -> None:
+            if n:
+                doing = t("research_step", doing=doing, n=n)
+            self.set(i, t(key, label=_label(i), model=_name(model), doing=doing))
+        return step
+
+
+def _label(i: int) -> str:
+    return chr(ord("A") + i)
+
+
+def _name(model: str) -> str:
+    return model.rsplit("/", 1)[-1]
+
+
+async def run_with_backup(i: int, model: str, task: str, board: _Board | None = None) -> Report:
     """跑第 i 个研究员；失败（超时除外：时间已经花完了，再跑备选就是让群友再等一整轮）就用它的备选模型再跑一次。
     几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
-    report = await run_researcher(model, task)
+    report = await run_researcher(model, task, board.stepper(i, model, False) if board else None)
     backup = _backup(i)
-    if report.text or not backup or backup == model or report.error == "timed out":
-        return report
-    logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
-    second = await run_researcher(backup, task)
-    if not second.text:
-        second.error = f"{model}: {report.error}; {backup}: {second.error}"
-    return second
+    if not report.text and backup and backup != model and report.error != "timed out":
+        logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
+        step = board.stepper(i, backup, True) if board else None
+        if step is not None:
+            step(t("research_doing_start"), 0)
+        second = await run_researcher(backup, task, step)
+        if not second.text:
+            second.error = f"{model}: {report.error}; {backup}: {second.error}"
+        report = second
+    if board is not None:
+        reason = t("research_reason_timeout") if report.error.endswith("timed out") else report.error.rsplit(": ", 1)[-1][:40]
+        board.set(i, t("research_row_done" if report.text else "research_row_failed", label=_label(i),
+                       model=_name(report.model), reason=reason))
+    return report
 
 
 _slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
@@ -226,10 +312,12 @@ class ResearchTool(Tool):
         if not task:
             return failed(t("research_failed", reason="empty task"))
         async with _slot():
-            reports = await asyncio.gather(*(run_with_backup(i, m, task) for i, m in enumerate(config.RESEARCH_MODELS)))
+            board = _Board(config.RESEARCH_MODELS)
+            reports = await asyncio.gather(*(run_with_backup(i, m, task, board)
+                                             for i, m in enumerate(config.RESEARCH_MODELS)))
         blocks = []
         for i, r in enumerate(reports):
-            label, model = chr(ord("A") + i), r.model.rsplit("/", 1)[-1]
+            label, model = _label(i), _name(r.model)
             if r.text:
                 blocks.append(t("research_report", label=label, model=model, secs=r.secs) + "\n"
                               + r.text[:REPORT_CHARS])

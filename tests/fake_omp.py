@@ -1,6 +1,6 @@
 """测试用的假 omp：按 --model 的值决定行为，输出和 omp -p --mode json 同样格式的事件。
 
-  ok-*     交回一份报告（内容带上模型名和任务）
+  ok-*     搜索一次、读一个网页，再交回一份报告（内容带上模型名和任务）
   fail*    stderr 报错并以 1 退出
   blocked  接口返回网关的 HTML 错误页（stopReason=error），stderr 只有一行没用的日志路径
   aborted  到了 --max-time 被 omp 自己中止（stopReason=aborted）
@@ -33,6 +33,11 @@ if model == "slow":
         time.sleep(0.1)
 
 print(json.dumps({"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": task}]}}))
+print(json.dumps({"type": "agent_start"}))
+print(json.dumps({"type": "tool_execution_start", "toolName": "web_search", "args": {"query": task}}))
+print(json.dumps({"type": "tool_execution_end", "toolName": "web_search", "result": {}}))
+print(json.dumps({"type": "tool_execution_start", "toolName": "read", "args": {"path": "https://www.example.com/a/"}}))
+print(json.dumps({"type": "tool_execution_end", "toolName": "read", "result": {"content": "x" * 200_000}}))
 print("not json")
 print(json.dumps({"type": "message_end", "message": {
     "role": "assistant", "content": [{"type": "text", "text": f"{model} 的报告：{task}"}],

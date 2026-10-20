@@ -48,6 +48,21 @@ def test_all_reports_come_back_labelled():
     assert "研究员 B（ok-gemini" in outcome.content and "ok-gemini 的报告：哈基米是什么梗" in outcome.content
 
 
+def test_researcher_reports_each_step_as_it_happens():
+    steps = []
+    report = run(research.run_researcher("cpa/ok-opus", "哈基米是什么梗", lambda doing, n: steps.append((doing, n))))
+    assert report.text == "cpa/ok-opus 的报告：哈基米是什么梗"  # 20 万字的一行事件也读得下
+    assert steps == [("思考中", 0), ("搜「哈基米是什么梗」", 1), ("思考中", 1), ("读 example.com/a", 2), ("思考中", 2)]
+
+
+def test_progress_line_shows_each_researcher_and_backup_outcome():
+    config.RESEARCH_MODELS = ["cpa/ok-opus", "blocked"]
+    config.RESEARCH_FALLBACK_MODELS = ["fail-backup"]
+    plan = tools.plan_round([{"id": "c1", "function": {"name": "research", "arguments": '{"task": "x"}'}}], None)
+    run(plan.execute())
+    assert plan.lines[0].detail == ["A ok-opus：已交回报告", "B fail-backup：没交回（no credentials）"]
+
+
 def test_one_failing_researcher_is_reported_but_not_fatal():
     config.RESEARCH_MODELS = ["cpa/ok-opus", "fail"]
     outcome = _research()

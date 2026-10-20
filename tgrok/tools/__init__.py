@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextvars
 import time
 from dataclasses import dataclass, field
 
@@ -59,8 +60,34 @@ class Tool:
         raise NotImplementedError
 
     async def run_batch(self, args_list: list[dict], chat_id: int | None) -> list[Outcome]:
-        """同一轮里这个工具的全部调用，默认并发执行。"""
-        return list(await asyncio.gather(*(self.run(a, chat_id) for a in args_list)))
+        """同一轮里这个工具的全部调用，默认并发执行；每个调用在自己的任务里，show_detail 写到它自己的进度行。"""
+        lines = _batch_lines.get()
+
+        async def one(i: int, args: dict) -> Outcome:
+            if lines is not None:
+                _line.set(lines[i])
+            return await self.run(args, chat_id)
+
+        return list(await asyncio.gather(*(one(i, a) for i, a in enumerate(args_list))))
+
+
+@dataclass
+class ProgressLine:
+    text: str
+    result: str | None = None
+    started: float = field(default_factory=time.monotonic)  # 进度里给还在执行的工具计时
+    detail: list[str] = field(default_factory=list)  # 执行中的实时明细（如每个研究员在做什么），出结果后不再显示
+
+
+_batch_lines: contextvars.ContextVar[list[ProgressLine] | None] = contextvars.ContextVar("tool_batch_lines", default=None)
+_line: contextvars.ContextVar[ProgressLine | None] = contextvars.ContextVar("tool_line", default=None)
+
+
+def show_detail(rows: list[str]) -> None:
+    """工具执行期间更新自己那一行下面的实时明细；气泡下一次刷新进度时显示。不在工具调用里时什么也不做。"""
+    line = _line.get()
+    if line is not None:
+        line.detail = list(rows)
 
 
 def _registry() -> dict[str, Tool]:
@@ -93,13 +120,6 @@ def prompt_notes() -> list[str]:
 
 
 @dataclass
-class ProgressLine:
-    text: str
-    result: str | None = None
-    started: float = field(default_factory=time.monotonic)  # 进度里给还在执行的工具计时
-
-
-@dataclass
 class RoundPlan:
     """一轮工具调用：先拿 lines 显示进度，再 execute() 执行并把结果行填进 lines。"""
     calls: list[dict]
@@ -122,6 +142,7 @@ class RoundPlan:
                 groups.setdefault(name, []).append(i)
 
         async def run_group(name: str, idxs: list[int]) -> None:
+            _batch_lines.set([self._line_of[i] for i in idxs])
             results = await REGISTRY[name].run_batch([self._args[i] for i in idxs], self.chat_id)
             for i, outcome in zip(idxs, results):
                 outcomes[i] = outcome

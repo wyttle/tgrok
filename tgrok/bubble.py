@@ -186,6 +186,7 @@ class Bubble:
         for line in self.progress[-5:]:
             if line.result is None and not self.stage:  # 没有底部状态行时就是工具还在执行
                 lines.append(line.text + "…" + self._since(line.started, now))
+                lines.extend(f"  {row}" for row in line.detail)
             else:
                 lines.append(line.text)
             if line.result:

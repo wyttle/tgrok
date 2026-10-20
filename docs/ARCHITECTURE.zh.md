@@ -117,7 +117,8 @@ Telegram update
            -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
               超时或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
               每个研究员的主→备先后跑）；超时（包括 omp 自己的 --max-time 中止）不换备选；失败原因取 omp 事件流里
-              接口报的错误（网关 HTML 错误页只取标题）；
+              接口报的错误（网关 HTML 错误页只取标题）；omp 的输出边跑边逐行读：每次开始搜索或读网页，
+              研究员那一行的进度明细（ProgressLine.detail，经 tools.show_detail）就更新成「在做什么、第几步」；
               报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。系统提示词要求问出处、辨真假、
               不认识的梗一律先用 research（开了 research 时，查梗的说明也指向它而不是 web_search）
         -> 工具结果追加到这次调用自己的 working history，进入下一轮

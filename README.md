@@ -280,6 +280,12 @@ Safety: researchers only get omp's `web_search` and `read` tools, and a hook (`t
 credentials, or internal addresses. They run in an empty temporary directory and are killed on timeout or when the
 reply is cancelled. Hostnames that resolve to private IPs (DNS rebinding) are not caught.
 
+While research runs, the progress line shows one row per researcher with what it is doing right now and which step
+it is on ("A claude-opus-5-5: reading reuters.com/… (step 5)"), when it switches to its backup endpoint, and whether it
+handed in a report; there is no percentage, because nobody knows in advance how many steps a task takes.
+On a server without local model engines, add `disabledProviders: [ollama, llama.cpp, lm-studio]` to
+`./omp/agent/config.yml` so omp doesn't probe them at every start.
+
 ## Deployment (long-running)
 
 The bot uses **long polling** (it pulls updates from Telegram), so no public IP or domain is

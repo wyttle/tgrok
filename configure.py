@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Windows 下管道/重定向时默认用本地代码页，强制 UTF-8 以正确处理中文
@@ -556,6 +557,8 @@ def validate_extra_params(raw: str):
 
 # 备用模型可选的协议，顺序即向导里的序号
 FALLBACK_PROTOCOLS = ["openai", "responses", "claude", "gemini"]
+# Gemini 官方的 OpenAI 兼容地址：Gemini 后端的回复和模型列表走这里
+GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 
 
 def load_extra(raw: str) -> dict:
@@ -764,22 +767,50 @@ def sync_profile(env_path: Path, name: str | None) -> None:
         print(T["p_synced"].format(name=name))
 
 
-def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile: bool = False) -> None:
-    print("=" * 52)
-    print(T["banner_title"])
-    print(T["banner_sub"])
-    print("=" * 52 + "\n")
-    if old:
-        print(T["existing"].format(path=env_path))
+@dataclass
+class Wizard:
+    """一次向导的状态：old 是现有配置（回车保留的默认值），cfg 是要写出的新配置。"""
+    old: dict
+    cfg: dict
+    can_check: bool
+    old_protocol: str = ""  # 现有配置的主模型协议
+    backend: str = ""  # 1 = OpenAI 兼容，2 = Gemini，3 = Claude 原生
+    base_url: str = ""  # 拉模型列表用的地址
+    gmode: str = ""  # Gemini 后端的搜索方式：1 原生，2 混合，3 不用 Gemini 搜索
 
-    cfg = {"BOT_LANG": lang}
 
-    # ---- 1. Bot Token ----
+def _truthy(v: str) -> bool:
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _choice(valid, error_key: str):
+    def validate(raw: str):
+        return (True, "") if raw.strip() in valid else (False, T[error_key])
+    return validate
+
+
+_validate_route = _choice(("1", "2"), "gemini_route_invalid")
+
+
+def _existing_protocol(old: dict) -> str:
+    """现有配置的主模型协议。bot 已不再接受布尔开关时代的 CLAUDE_NATIVE / GEMINI_NATIVE_SEARCH，
+    向导读到它们时换算成 LLM_PROTOCOL 写回，旧配置重跑一遍向导就能迁移。"""
+    protocol = old.get("LLM_PROTOCOL", "").strip().lower()
+    if protocol:
+        return protocol
+    if _truthy(old.get("CLAUDE_NATIVE", "")):
+        return "claude"
+    if _truthy(old.get("GEMINI_NATIVE_SEARCH", "")):
+        return "gemini"
+    return ""
+
+
+def _step_token(w: Wizard) -> None:
     print(T["s1"])
     while True:
-        token = ask(T["token"], default=old.get("TELEGRAM_BOT_TOKEN", ""), required=True,
+        token = ask(T["token"], default=w.old.get("TELEGRAM_BOT_TOKEN", ""), required=True,
                     validate=validate_token, secret=True)
-        if not can_check:
+        if not w.can_check:
             break
         try:
             username = check_telegram_token(token)
@@ -792,227 +823,201 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         print(T["token_bad"])
         if confirm(T["token_use_anyway"]):
             break
-    cfg["TELEGRAM_BOT_TOKEN"] = token
+    w.cfg["TELEGRAM_BOT_TOKEN"] = token
     print()
 
-    # ---- 2. Admins ----
+
+def _step_users(w: Wizard) -> None:
     print(T["s2a"])
     print(T["s2b"])
-    cfg["ADMIN_USER_IDS"] = ask(T["admin_ids"], default=old.get("ADMIN_USER_IDS", ""), validate=validate_ids)
+    w.cfg["ADMIN_USER_IDS"] = ask(T["admin_ids"], default=w.old.get("ADMIN_USER_IDS", ""), validate=validate_ids)
     print()
-
-    # ---- 3. Whitelist seed ----
     print(T["s3"])
-    cfg["ALLOWED_USER_IDS"] = ask(T["allowed_ids"], default=old.get("ALLOWED_USER_IDS", ""), validate=validate_ids)
+    w.cfg["ALLOWED_USER_IDS"] = ask(T["allowed_ids"], default=w.old.get("ALLOWED_USER_IDS", ""),
+                                    validate=validate_ids)
     print()
 
-    # ---- 4. Backend ----
+
+def _step_backend(w: Wizard) -> None:
+    old, cfg = w.old, w.cfg
     print(T["s4a"])
     print(T["s4b"])
-    gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai"
-
-    def validate_backend(raw: str):
-        return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["backend_invalid"])
-
-    def _truthy(v: str) -> bool:
-        return v.strip().lower() in ("1", "true", "yes", "on")
-
-    # 现有配置的协议（兼容布尔开关时代的旧键）
-    old_protocol = old.get("LLM_PROTOCOL", "").strip().lower()
-    if not old_protocol:
-        if _truthy(old.get("CLAUDE_NATIVE", "")):
-            old_protocol = "claude"
-        elif _truthy(old.get("GEMINI_NATIVE_SEARCH", "")):
-            old_protocol = "gemini"
-    if old_protocol == "claude":
+    w.old_protocol = _existing_protocol(old)
+    if w.old_protocol == "claude":
         backend_default = "3"
-    elif old_protocol == "gemini" or "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", ""):
+    elif w.old_protocol == "gemini" or "generativelanguage.googleapis.com" in old.get("LLM_BASE_URL", ""):
         backend_default = "2"
     else:
         backend_default = "1"
-    backend = ask(T["backend_pick"], default=backend_default, validate=validate_backend).strip()
-
-    def validate_route(raw: str):
-        return (True, "") if raw.strip() in ("1", "2") else (False, T["gemini_route_invalid"])
-
-    # 协议由 LLM_PROTOCOL 单键指定（openai 为默认、不写入）；布尔开关时代的旧键一并清掉
+    w.backend = ask(T["backend_pick"], default=backend_default,
+                    validate=_choice(("1", "2", "3"), "backend_invalid")).strip()
+    # 协议由 LLM_PROTOCOL 单键指定（openai 为默认、不写入）；旧开关一并清掉
     cfg["LLM_PROTOCOL"] = ""
     cfg["CLAUDE_NATIVE"] = ""
     cfg["CLAUDE_BASE_URL"] = ""
     cfg["GEMINI_NATIVE_SEARCH"] = ""
-    if backend == "3":
+    if w.backend == "3":
         # Claude 原生：官方直连或走支持 /v1/messages 转发的中转站；地址统一用
         # LLM_BASE_URL（留空 = Anthropic 官方）；UA 无意义，置空
         old_base = old.get("LLM_BASE_URL", "")
-        route_default = "2" if old_protocol == "claude" and old_base else "1"
-        route = ask(T["claude_route_pick"], default=route_default, validate=validate_route).strip()
-        if route == "2":
-            cfg["LLM_BASE_URL"] = ask(T["relay_addr"], default=old_base,
-                                      required=True).strip().rstrip("/")
-        else:
-            cfg["LLM_BASE_URL"] = ""
+        route_default = "2" if w.old_protocol == "claude" and old_base else "1"
+        route = ask(T["claude_route_pick"], default=route_default, validate=_validate_route).strip()
+        cfg["LLM_BASE_URL"] = ask(T["relay_addr"], default=old_base, required=True).strip().rstrip("/") \
+            if route == "2" else ""
         cfg["LLM_PROTOCOL"] = "claude"
-        cfg["LLM_API_KEY"] = ask(T["claude_key"], default=old.get("LLM_API_KEY", ""),
-                                 required=True, secret=True)
+        cfg["LLM_API_KEY"] = ask(T["claude_key"], default=old.get("LLM_API_KEY", ""), required=True, secret=True)
         cfg["LLM_USER_AGENT"] = ""
-        base_url = cfg["LLM_BASE_URL"]
-    elif backend == "2":
+        w.base_url = cfg["LLM_BASE_URL"]
+    elif w.backend == "2":
         # Gemini：官方直连或走支持原生格式转发的中转站；UA 无意义，置空
         route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
-        route = ask(T["gemini_route_pick"], default=route_default, validate=validate_route).strip()
+        route = ask(T["gemini_route_pick"], default=route_default, validate=_validate_route).strip()
         if route == "2":
-            addr = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
-                       required=True).strip().rstrip("/")
+            addr = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""), required=True).strip().rstrip("/")
             cfg["GEMINI_BASE_URL"] = addr  # 原生模式与 grounding 走中转站根地址
-            base_url = addr + "/v1"  # 回复走中转站的 OpenAI 兼容路径
-            print(T["note_relay_compat"].format(url=base_url))
+            w.base_url = addr + "/v1"  # 回复走中转站的 OpenAI 兼容路径
+            print(T["note_relay_compat"].format(url=w.base_url))
         else:
             cfg["GEMINI_BASE_URL"] = ""
-            base_url = gemini_base
-        cfg["LLM_BASE_URL"] = base_url
-        cfg["LLM_API_KEY"] = ask(T["gemini_key"], default=old.get("LLM_API_KEY", ""),
-                                 required=True, secret=True)
+            w.base_url = GEMINI_OPENAI_BASE
+        cfg["LLM_BASE_URL"] = w.base_url
+        cfg["LLM_API_KEY"] = ask(T["gemini_key"], default=old.get("LLM_API_KEY", ""), required=True, secret=True)
         cfg["LLM_USER_AGENT"] = ""
     else:
-        base_url = ask(T["base_url"], default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
-        cfg["LLM_BASE_URL"] = base_url
+        w.base_url = ask(T["base_url"], default=old.get("LLM_BASE_URL", "http://localhost:1234/v1"), required=True)
+        cfg["LLM_BASE_URL"] = w.base_url
         cfg["LLM_API_KEY"] = ask(T["api_key"], default=old.get("LLM_API_KEY", "not-needed"))
         cfg["LLM_USER_AGENT"] = ask(T["ua"], default=old.get("LLM_USER_AGENT", ""))
     print()
 
-    # ---- 5. Model ----
+
+def _step_model(w: Wizard) -> None:
+    cfg = w.cfg
     print(T["s5"])
     # 换后端时，旧的异族模型名不再是合理默认值
-    model_default = old.get("LLM_MODEL", "")
-    if backend == "2" and not model_default.lower().startswith("gemini"):
+    model_default = w.old.get("LLM_MODEL", "")
+    if w.backend == "2" and not model_default.lower().startswith("gemini"):
         model_default = "gemini-2.5-flash"
-    if backend == "3" and not model_default.lower().startswith("claude"):
+    if w.backend == "3" and not model_default.lower().startswith("claude"):
         model_default = "claude-opus-4-8"
     # Claude 原生走 Anthropic 的模型列表接口；Gemini 后端回复走 OpenAI 兼容路径，用 /models 即可
-    list_protocol = "claude" if backend == "3" else "openai"
-    model = pick_model(list_protocol, base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"],
-                       model_default, can_check)
+    list_protocol = "claude" if w.backend == "3" else "openai"
+    model = pick_model(list_protocol, w.base_url, cfg["LLM_API_KEY"], cfg["LLM_USER_AGENT"],
+                       model_default, w.can_check)
     cfg["LLM_MODEL"] = model
-    if backend == "1" and not model.lower().startswith("gemini"):
+    if w.backend == "1" and not model.lower().startswith("gemini"):
         # OpenAI 兼容后端可选 Responses 接口：GPT-6.1 Sol 等模型只在 /responses 上支持工具调用
-        api_default = "2" if old_protocol == "responses" or model.lower().startswith("gpt-6") else "1"
-        api = ask(T["api_pick"], default=api_default, validate=validate_route).strip()
+        api_default = "2" if w.old_protocol == "responses" or model.lower().startswith("gpt-6") else "1"
+        api = ask(T["api_pick"], default=api_default, validate=_validate_route).strip()
         cfg["LLM_PROTOCOL"] = "responses" if api == "2" else ""
     print()
 
-    # ---- 6. Vision ----
+
+def _step_vision(w: Wizard) -> None:
     print(T["s6a"])
     print(T["s6b"])
-    vision_default = old.get("ENABLE_VISION", "false").lower() == "true"
-    cfg["ENABLE_VISION"] = "true" if confirm(T["vision_ask"], default_yes=vision_default) else "false"
+    vision_default = w.old.get("ENABLE_VISION", "false").lower() == "true"
+    w.cfg["ENABLE_VISION"] = "true" if confirm(T["vision_ask"], default_yes=vision_default) else "false"
     print()
 
-    # ---- 6.5 Gemini 搜索方式（仅当端点/模型指向 Gemini 时询问）----
-    is_gemini = "generativelanguage.googleapis.com" in base_url or model.lower().startswith("gemini")
-    gmode = ""
-    if is_gemini:
-        print(T["s_gmode_a"])
-        print(T["s_gmode_b"])
-        if old_protocol == "gemini":
-            gmode_default = "1"
-        elif old.get("GEMINI_SEARCH_MODEL", "").strip():
-            gmode_default = "2"
-        else:
-            gmode_default = "2"  # 免费档 grounding 通常只在 2.5 系列可用，混合是最稳default
 
-        def validate_gmode(raw: str):
-            return (True, "") if raw.strip() in ("1", "2", "3") else (False, T["gmode_invalid"])
-
-        gmode = ask(T["gmode_pick"], default=gmode_default, validate=validate_gmode).strip()
-        cfg["LLM_PROTOCOL"] = "gemini" if gmode == "1" else ""
-        cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
-        if gmode == "2":
-            cfg["GEMINI_SEARCH_MODEL"] = ask(
-                T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
-                required=True)
-        else:
-            cfg["GEMINI_SEARCH_MODEL"] = ""
-        print()
-    else:
-        # 非 Gemini 端点：显式置空，防止切换配置后残留的搜索模型引发启动错误
+def _step_gemini_search(w: Wizard) -> None:
+    """端点或模型指向 Gemini 时问搜索方式；否则清掉残留的搜索模型，防止切换配置后启动报错。"""
+    cfg = w.cfg
+    if not ("generativelanguage.googleapis.com" in w.base_url or cfg["LLM_MODEL"].lower().startswith("gemini")):
         cfg["GEMINI_SEARCH_MODEL"] = ""
+        return
+    print(T["s_gmode_a"])
+    print(T["s_gmode_b"])
+    # 免费档 grounding 通常只在 2.5 系列可用，混合模式是最稳的默认
+    gmode_default = "1" if w.old_protocol == "gemini" else "2"
+    w.gmode = ask(T["gmode_pick"], default=gmode_default, validate=_choice(("1", "2", "3"), "gmode_invalid")).strip()
+    cfg["LLM_PROTOCOL"] = "gemini" if w.gmode == "1" else ""
+    cfg["GEMINI_API_KEY"] = ""  # Gemini 后端 grounding 直接复用 LLM_API_KEY
+    cfg["GEMINI_SEARCH_MODEL"] = ask(
+        T["gsearch_model"], default=w.old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"), required=True,
+    ) if w.gmode == "2" else ""
+    print()
 
-    # ---- 7. Web search ----
-    if gmode in ("1", "2"):
+
+_PROVIDER_ALIAS = {"1": "tavily", "2": "duckduckgo", "3": "searxng", "4": "serper"}
+_KNOWN_PROVIDERS = ("tavily", "duckduckgo", "searxng", "serper")
+
+
+def parse_providers(raw: str) -> list[str] | None:
+    """解析搜索源多选（序号或名称，逗号分隔）。None 表示无法解析。"""
+    parts = [p.strip().lower() for p in raw.replace("，", ",").split(",") if p.strip()]
+    if not parts:
+        return []
+    if any(p in ("0", "none", "off") for p in parts):
+        return [] if len(parts) == 1 else None
+    out = []
+    for p in parts:
+        p = _PROVIDER_ALIAS.get(p, p)
+        if p not in _KNOWN_PROVIDERS:
+            return None
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _validate_providers(raw: str):
+    return (False, T["search_invalid"]) if parse_providers(raw) is None else (True, "")
+
+
+def _step_web_search(w: Wizard) -> None:
+    old, cfg = w.old, w.cfg
+    if w.gmode in ("1", "2"):
         print(T["gmode_skip_search"])
         print()
-    else:
-        print(T["s_search_a"])
-        print(T["s_search_b"])
-        provider_alias = {"1": "tavily", "2": "duckduckgo", "3": "searxng", "4": "serper"}
-        off_values = ("0", "none", "off")
-        known = ("tavily", "duckduckgo", "searxng", "serper")
-
-        def parse_providers(raw: str) -> list[str] | None:
-            """解析多选输入（序号或名称，逗号分隔）。None 表示无法解析。"""
-            parts = [p.strip().lower() for p in raw.replace("，", ",").split(",") if p.strip()]
-            if not parts:
-                return []
-            if any(p in off_values for p in parts):
-                return [] if len(parts) == 1 else None
-            out = []
-            for p in parts:
-                p = provider_alias.get(p, p)
-                if p not in known:
-                    return None
-                if p not in out:
-                    out.append(p)
-            return out
-
-        def validate_provider(raw: str):
-            if parse_providers(raw) is None:
-                return False, T["search_invalid"]
-            return True, ""
-
-        raw_provider = ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""), validate=validate_provider)
-        providers = parse_providers(raw_provider) or []
-        cfg["SEARCH_PROVIDER"] = ",".join(providers)
-        if "tavily" in providers:
-            cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""),
-                                        required=True, secret=True)
-        if "serper" in providers:
-            cfg["SERPER_API_KEY"] = ask(T["serper_key"], default=old.get("SERPER_API_KEY", ""),
-                                        required=True, secret=True)
-        if "searxng" in providers:
-            cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""),
-                                          required=True)
-        if providers:
-            # open_url 直取失败时的 Jina Reader 兜底（bot 默认开启，仅在用户关闭时写入 false）
-            jina_default = old.get("JINA_FALLBACK", "true").strip().lower() not in ("0", "false", "no", "off")
-            if confirm(T["jina_ask"], default_yes=jina_default):
-                cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
-            else:
-                cfg["JINA_FALLBACK"] = "false"
-        if backend != "2":
-            # 任意后端都可叠加 Gemini grounding：搜索由 Gemini + Google 官方搜索执行，
-            # 失败自动回退上面配置的搜索源
-            print()
-            print(T["s_genhance"])
-            if confirm(T["genhance_ask"], default_yes=bool(old.get("GEMINI_SEARCH_MODEL", "").strip())):
-                cfg["GEMINI_API_KEY"] = ask(T["gemini_key"], default=old.get("GEMINI_API_KEY", ""),
-                                            required=True, secret=True)
-                cfg["GEMINI_SEARCH_MODEL"] = ask(
-                    T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"),
-                    required=True)
-                route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
-                route = ask(T["gemini_route_pick"], default=route_default, validate=validate_route).strip()
-                if route == "2":
-                    cfg["GEMINI_BASE_URL"] = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
-                                                 required=True).strip().rstrip("/")
-                else:
-                    cfg["GEMINI_BASE_URL"] = ""
-            else:
-                cfg["GEMINI_API_KEY"] = ""
-                cfg["GEMINI_SEARCH_MODEL"] = ""
-                cfg["GEMINI_BASE_URL"] = ""
+        return
+    print(T["s_search_a"])
+    print(T["s_search_b"])
+    providers = parse_providers(ask(T["search_pick"], default=old.get("SEARCH_PROVIDER", ""),
+                                    validate=_validate_providers)) or []
+    cfg["SEARCH_PROVIDER"] = ",".join(providers)
+    if "tavily" in providers:
+        cfg["TAVILY_API_KEY"] = ask(T["tavily_key"], default=old.get("TAVILY_API_KEY", ""), required=True, secret=True)
+    if "serper" in providers:
+        cfg["SERPER_API_KEY"] = ask(T["serper_key"], default=old.get("SERPER_API_KEY", ""), required=True, secret=True)
+    if "searxng" in providers:
+        cfg["SEARXNG_BASE_URL"] = ask(T["searxng_url"], default=old.get("SEARXNG_BASE_URL", ""), required=True)
+    if providers:
+        # open_url 直取失败时的 Jina Reader 兜底（bot 默认开启，仅在用户关闭时写入 false）
+        jina_default = old.get("JINA_FALLBACK", "true").strip().lower() not in ("0", "false", "no", "off")
+        if confirm(T["jina_ask"], default_yes=jina_default):
+            cfg["JINA_API_KEY"] = ask(T["jina_key"], default=old.get("JINA_API_KEY", ""), secret=True)
+        else:
+            cfg["JINA_FALLBACK"] = "false"
+    if w.backend != "2":
+        # 任意后端都可叠加 Gemini grounding：搜索由 Gemini + Google 官方搜索执行，失败自动回退上面的搜索源
         print()
+        print(T["s_genhance"])
+        if confirm(T["genhance_ask"], default_yes=bool(old.get("GEMINI_SEARCH_MODEL", "").strip())):
+            cfg["GEMINI_API_KEY"] = ask(T["gemini_key"], default=old.get("GEMINI_API_KEY", ""),
+                                        required=True, secret=True)
+            cfg["GEMINI_SEARCH_MODEL"] = ask(
+                T["gsearch_model"], default=old.get("GEMINI_SEARCH_MODEL", "gemini-2.5-flash"), required=True)
+            route_default = "2" if old.get("GEMINI_BASE_URL", "").strip() else "1"
+            route = ask(T["gemini_route_pick"], default=route_default, validate=_validate_route).strip()
+            cfg["GEMINI_BASE_URL"] = ask(T["relay_addr"], default=old.get("GEMINI_BASE_URL", ""),
+                                         required=True).strip().rstrip("/") if route == "2" else ""
+        else:
+            cfg["GEMINI_API_KEY"] = ""
+            cfg["GEMINI_SEARCH_MODEL"] = ""
+            cfg["GEMINI_BASE_URL"] = ""
+    print()
 
-    # ---- 8. Generation params & timezone ----
+
+def _ask_sampling(old: dict, cfg: dict) -> None:
+    raw_t = ask(T["temperature"], default=old.get("LLM_TEMPERATURE", ""), validate=validate_opt_float)
+    cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
+    raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
+    cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
+
+
+def _step_generation(w: Wizard) -> None:
+    old, cfg = w.old, w.cfg
     print(T["s7"])
     protocol = cfg.get("LLM_PROTOCOL", "")
     reasoning_gpt = protocol in ("", "responses") and is_reasoning_gpt(cfg["LLM_MODEL"])
@@ -1022,82 +1027,77 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
         print(T["max_tokens_reasoning"])
         old_max = "4096"
     cfg["MAX_TOKENS"] = ask(T["max_tokens"], default=old_max, validate=validate_int)
-
     extra = load_extra(old.get("LLM_EXTRA_BODY", ""))
     effort = ask_effort(cfg["LLM_MODEL"], extra) if reasoning_gpt else ""
-
     if reasoning_gpt and effort != "none":
         # 推理档位不是 none 时，GPT 推理模型不接受 temperature/top_p
         print(T["sampling_skipped"])
         cfg["LLM_TEMPERATURE"] = ""
         cfg["LLM_TOP_P"] = ""
     else:
-        raw_t = ask(T["temperature"], default=old.get("LLM_TEMPERATURE", ""), validate=validate_opt_float)
-        cfg["LLM_TEMPERATURE"] = "" if raw_t == "-" else raw_t
-        raw_p = ask(T["top_p"], default=old.get("LLM_TOP_P", ""), validate=validate_opt_float)
-        cfg["LLM_TOP_P"] = "" if raw_p == "-" else raw_p
-
+        _ask_sampling(old, cfg)
     cfg["LLM_EXTRA_BODY"] = ask_extra_params(extra, effort, protocol, managed_effort=reasoning_gpt)
     cfg["MAX_HISTORY"] = ask(T["max_history"], default=old.get("MAX_HISTORY", "20"), validate=validate_int)
     cfg["BOT_TZ"] = ask(T["tz"], default=old.get("BOT_TZ", "Asia/Shanghai"))
     print()
 
-    # ---- 8.5 Fallback model ----
+
+_FALLBACK_KEYS = ("LLM_FALLBACK_MODEL", "LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL",
+                  "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_EXTRA_BODY")
+
+
+def _step_fallback(w: Wizard) -> None:
+    old, cfg = w.old, w.cfg
     print(T["s_fb_a"])
     print(T["s_fb_b"])
-    fb_keys = ("LLM_FALLBACK_MODEL", "LLM_FALLBACK_PROTOCOL", "LLM_FALLBACK_BASE_URL",
-               "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_EXTRA_BODY")
     if not confirm(T["fb_enable"], default_yes=bool(old.get("LLM_FALLBACK_MODEL", "").strip())):
-        for key in fb_keys:
+        for key in _FALLBACK_KEYS:
             cfg[key] = ""
+        print()
+        return
+    primary_protocol = cfg.get("LLM_PROTOCOL") or "openai"
+    fb_default = old.get("LLM_FALLBACK_PROTOCOL", "").strip().lower() or primary_protocol
+    fb_default = fb_default if fb_default in FALLBACK_PROTOCOLS else primary_protocol
+    raw_proto = ask(T["fb_protocol_pick"], default=str(FALLBACK_PROTOCOLS.index(fb_default) + 1),
+                    validate=_choice([str(i) for i in range(1, len(FALLBACK_PROTOCOLS) + 1)],
+                                     "fb_protocol_invalid")).strip()
+    fb_protocol = FALLBACK_PROTOCOLS[int(raw_proto) - 1]
+    # 和主模型同协议时不写，跟随主模型
+    cfg["LLM_FALLBACK_PROTOCOL"] = "" if fb_protocol == primary_protocol else fb_protocol
+    raw_base = ask(T["fb_base_url"], default=old.get("LLM_FALLBACK_BASE_URL", "")).strip().rstrip("/")
+    cfg["LLM_FALLBACK_BASE_URL"] = "" if raw_base == "-" else raw_base
+    raw_key = ask(T["fb_key"], default=old.get("LLM_FALLBACK_API_KEY", ""), secret=True).strip()
+    cfg["LLM_FALLBACK_API_KEY"] = "" if raw_key == "-" else raw_key
+    # 留空的地址和 key 按 bot 运行时的规则沿用主模型，拉模型列表时也用同样的值
+    if fb_protocol == "gemini":
+        list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg.get("GEMINI_BASE_URL", "")
+        list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg.get("GEMINI_API_KEY", "") or cfg["LLM_API_KEY"]
     else:
-        primary_protocol = cfg.get("LLM_PROTOCOL") or "openai"
-        fb_default = old.get("LLM_FALLBACK_PROTOCOL", "").strip().lower() or primary_protocol
-        fb_default = fb_default if fb_default in FALLBACK_PROTOCOLS else primary_protocol
-
-        def validate_fb_protocol(raw: str):
-            ok = raw.strip() in [str(i) for i in range(1, len(FALLBACK_PROTOCOLS) + 1)]
-            return (True, "") if ok else (False, T["fb_protocol_invalid"])
-
-        raw_proto = ask(T["fb_protocol_pick"], default=str(FALLBACK_PROTOCOLS.index(fb_default) + 1),
-                        validate=validate_fb_protocol).strip()
-        fb_protocol = FALLBACK_PROTOCOLS[int(raw_proto) - 1]
-        # 和主模型同协议时不写，跟随主模型
-        cfg["LLM_FALLBACK_PROTOCOL"] = "" if fb_protocol == primary_protocol else fb_protocol
-        raw_base = ask(T["fb_base_url"], default=old.get("LLM_FALLBACK_BASE_URL", "")).strip().rstrip("/")
-        cfg["LLM_FALLBACK_BASE_URL"] = "" if raw_base == "-" else raw_base
-        raw_key = ask(T["fb_key"], default=old.get("LLM_FALLBACK_API_KEY", ""), secret=True).strip()
-        cfg["LLM_FALLBACK_API_KEY"] = "" if raw_key == "-" else raw_key
-        # 留空的地址和 key 按 bot 运行时的规则沿用主模型，拉模型列表时也用同样的值
-        if fb_protocol == "gemini":
-            list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg.get("GEMINI_BASE_URL", "")
-            list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg.get("GEMINI_API_KEY", "") or cfg["LLM_API_KEY"]
-        else:
-            list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg["LLM_BASE_URL"] or (
-                "" if fb_protocol == "claude" else "http://localhost:1234/v1")
-            list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg["LLM_API_KEY"]
-        ua = cfg.get("LLM_USER_AGENT", "") if fb_protocol in ("openai", "responses") else ""
-        fb_model = pick_model(fb_protocol, list_base, list_key, ua,
-                              old.get("LLM_FALLBACK_MODEL", ""), can_check)
-        cfg["LLM_FALLBACK_MODEL"] = fb_model
-        fb_extra = load_extra(old.get("LLM_FALLBACK_EXTRA_BODY", ""))
-        fb_reasoning = fb_protocol in ("openai", "responses") and is_reasoning_gpt(fb_model)
-        fb_effort = ask_effort(fb_model, fb_extra) if fb_reasoning else ""
-        cfg["LLM_FALLBACK_EXTRA_BODY"] = ask_extra_params(
-            fb_extra, fb_effort, "" if fb_protocol == "openai" else fb_protocol, managed_effort=fb_reasoning)
+        list_base = cfg["LLM_FALLBACK_BASE_URL"] or cfg["LLM_BASE_URL"] or (
+            "" if fb_protocol == "claude" else "http://localhost:1234/v1")
+        list_key = cfg["LLM_FALLBACK_API_KEY"] or cfg["LLM_API_KEY"]
+    ua = cfg.get("LLM_USER_AGENT", "") if fb_protocol in ("openai", "responses") else ""
+    fb_model = pick_model(fb_protocol, list_base, list_key, ua, old.get("LLM_FALLBACK_MODEL", ""), w.can_check)
+    cfg["LLM_FALLBACK_MODEL"] = fb_model
+    fb_extra = load_extra(old.get("LLM_FALLBACK_EXTRA_BODY", ""))
+    fb_reasoning = fb_protocol in ("openai", "responses") and is_reasoning_gpt(fb_model)
+    fb_effort = ask_effort(fb_model, fb_extra) if fb_reasoning else ""
+    cfg["LLM_FALLBACK_EXTRA_BODY"] = ask_extra_params(
+        fb_extra, fb_effort, "" if fb_protocol == "openai" else fb_protocol, managed_effort=fb_reasoning)
     print()
 
-    # ---- 9. System prompt ----
+
+def _step_system_prompt(w: Wizard) -> None:
     print(T["s8"])
-    cfg["SYSTEM_PROMPT"] = ask_multiline(T["sys_prompt"], default=old.get("SYSTEM_PROMPT", ""))
+    w.cfg["SYSTEM_PROMPT"] = ask_multiline(T["sys_prompt"], default=w.old.get("SYSTEM_PROMPT", ""))
     print()
 
-    # 向导未覆盖的自定义配置项（如 SEARCH_MAX_RESULTS、FETCH_CHAR_LIMIT 等）原样保留
-    for key, val in old.items():
-        if key not in cfg and val:
-            cfg[key] = val
 
-    # ---- Summary ----
+_STEPS = (_step_token, _step_users, _step_backend, _step_model, _step_vision, _step_gemini_search,
+          _step_web_search, _step_generation, _step_fallback, _step_system_prompt)
+
+
+def _confirm_and_write(env_path: Path, cfg: dict, is_profile: bool) -> None:
     print("=" * 52)
     print(T["summary"])
     for key, val in cfg.items():
@@ -1110,13 +1110,28 @@ def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile
     if not confirm(T["write_confirm"].format(path=env_path), default_yes=True):
         print(T["cancelled"])
         return
-
-    lines = [T["header"], ""]
-    lines += [env_line(k, v) for k, v in cfg.items() if v]
+    lines = [T["header"], ""] + [env_line(k, v) for k, v in cfg.items() if v]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(T["written"].format(path=env_path))
     if not is_profile:
         print(T["next"])
+
+
+def run_wizard(env_path: Path, old: dict, can_check: bool, lang: str, is_profile: bool = False) -> None:
+    print("=" * 52)
+    print(T["banner_title"])
+    print(T["banner_sub"])
+    print("=" * 52 + "\n")
+    if old:
+        print(T["existing"].format(path=env_path))
+    w = Wizard(old=old, cfg={"BOT_LANG": lang}, can_check=can_check)
+    for step in _STEPS:
+        step(w)
+    # 向导未覆盖的自定义配置项（如 SEARCH_MAX_RESULTS、MEMORY_* 等）原样保留
+    for key, val in old.items():
+        if key not in w.cfg and val:
+            w.cfg[key] = val
+    _confirm_and_write(env_path, w.cfg, is_profile)
 
 
 def main() -> None:

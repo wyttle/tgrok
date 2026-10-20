@@ -165,9 +165,12 @@ def _slot() -> asyncio.Semaphore:
 class ResearchTool(Tool):
     name = "research"
     description = (
-        "Hand one research task to independent research agents (different models) that search the web and read "
-        "the actual pages, and get all their reports back to compare. Slow (30 s to 2 min): use it only when an "
-        "answer needs real checking, such as unknown memes or niche jargon, disputed claims, or exact numbers and dates."
+        "Hand one research task to independent research agents (different models) that search the web, read the "
+        "actual pages, and return verified facts with sources. Use it whenever someone asks where something comes "
+        "from (the origin of a meme, quote, line, image, or rumor; who said it first), whether a claim, quote "
+        "attribution, screenshot, or rumor is true, or what an unfamiliar meme or jargon means, even if you think "
+        "you know. Also use it when web_search results conflict or don't settle the question. Not for live data "
+        "(weather, prices), small talk, or textbook facts."
     )
     parameters = {
         "type": "object",

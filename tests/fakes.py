@@ -42,6 +42,7 @@ class FakeMsg:
         self.sent: list[FakeSent] = []
         self.log: list[str] = []
         self.actions: list[str] = []
+        self.media: list[tuple] = []  # bot 随回复发出的图片：(类型, 内容, 说明)
         self.chat_id = -100
         self.from_user = ns(id=uid)
 
@@ -55,6 +56,18 @@ class FakeMsg:
 
     async def reply_chat_action(self, action):
         self.actions.append(action)
+
+    async def reply_photo(self, photo, caption=None):
+        self.media.append(("photo", photo, caption))
+
+    async def reply_animation(self, animation, caption=None):
+        self.media.append(("animation", animation, caption))
+
+    async def reply_document(self, document, filename=None, caption=None):
+        self.media.append(("document", document, caption))
+
+    async def reply_media_group(self, media):
+        self.media.append(("group", [m.media for m in media], [m.caption for m in media]))
 
 
 def chunk_text(text):

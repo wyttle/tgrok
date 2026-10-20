@@ -31,6 +31,7 @@ tgrok/
 |   |-- remember.py    memory：增改删本聊天的群笔记和个人档案
 |   |-- recall.py      recall：按关键词、说话人、时间查本聊天的原始记录
 |   |-- watch.py       watch_media：把视频、GIF、语音、音频（没开视觉时也包括图片）交给 GEMINI_MEDIA_MODEL 看/听
+|   |-- send_image.py  send_image：按直链或关键词准备图片，攒进本次回复的 outbox，正文定稿后由 Bubble.send_images 发出
 |   |-- web.py         web_search（grounding 模式下同轮合并）、open_url
 |   |-- research.py    research：同一任务并发交给 RESEARCH_MODELS 里的每个 omp 研究员，报告一起交回
 |   `-- research_hook.ts  研究员进程加载的 omp hook：read 只准读公网 http(s) 网页
@@ -109,9 +110,11 @@ Telegram update
            零输出就出错：配了备用模型就整条换成备用模型（去掉厂商扩展字段；两边工具能力不同时
            连系统提示词的工具说明一起换），否则重试一次；429 不重试；已有正文则按完成处理
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
-           -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url
+           -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
            -> research：每个研究员起一个 omp -p 子进程（只开 web_search 和 read，加载 hook，空的临时目录），
-              超时或回复被取消时整组结束；报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查
+              超时或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次；
+              报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。系统提示词要求问出处、辨真假、
+              不认识的梗一律先用 research（开了 research 时，查梗的说明也指向它而不是 web_search）
         -> 工具结果追加到这次调用自己的 working history，进入下一轮
         -> Gemini 原生返回的引用附到正文末尾
      -> Bubble.finish 定稿（MarkdownV2，失败回退纯文本）；终轮空手时回用最后一版草稿
@@ -144,6 +147,7 @@ Telegram update
 - `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
 - `tools.research._slots`：限制同时进行的调研任务数（`RESEARCH_CONCURRENCY`）的信号量，换事件循环时重建。
 - `chat.active_generations`：正在生成的任务，供取消按钮定位。
+- `tools.send_image.outbox`：contextvar，`chat.stream_reply` 为每次回复放一个空列表，send_image 把图片攒进去；回复成功定稿后才发，被取消或失败时不发。发出去的图在返回的回复文本末尾记一句，追问时模型知道自己发过什么。
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
 - `conversations._cache`、`_sizes`、`_total`：追问用的对话历史和字符量计数。
 - `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。

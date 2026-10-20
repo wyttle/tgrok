@@ -8,7 +8,7 @@ import multiprocessing
 import os
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -377,7 +377,104 @@ async def _fetch_local(url: str) -> tuple[str | None, str]:
         # 正文过少：多半是 JS 渲染的空壳页，交给 Jina Reader 兜底
         return None, t("fetch_empty")
     header = f"{title}\n{resp.url}" if title else str(resp.url)
-    return f"{header}\n\n{text}"[:config.FETCH_CHAR_LIMIT], ""
+    images = _page_images(resp.text[:400_000], str(resp.url)) if is_html else []
+    block = ("\n\n" + t("page_images") + "\n" + "\n".join(f"- {u}" for u in images)) if images else ""
+    return f"{header}\n\n{text}"[:config.FETCH_CHAR_LIMIT - len(block)] + block, ""
+
+
+_META_IMAGE_RE = re.compile(
+    r"<meta\b[^>]*(?:property|name)\s*=\s*[\"'](?:og:image|og:image:url|twitter:image)[\"'][^>]*>", re.I)
+_IMG_RE = re.compile(r"<img\b[^>]*>", re.I)
+_ATTR_RE = re.compile(r"\b(content|src|data-src|data-original)\s*=\s*[\"']([^\"']+)[\"']", re.I)
+_SKIP_IMAGE_RE = re.compile(r"(?:^data:|\.svg(?:$|\?)|sprite|icon|logo|avatar|blank|spacer|pixel|1x1)", re.I)
+PAGE_IMAGES = 5
+
+
+def _page_images(page: str, base: str) -> list[str]:
+    """网页里能直接发的图片地址：先取 og:image / twitter:image（页面主图），再取正文里的 <img>，跳过图标和占位图。"""
+    found: list[str] = []
+    for tag in _META_IMAGE_RE.findall(page) + _IMG_RE.findall(page):
+        attrs = {k.lower(): v for k, v in _ATTR_RE.findall(tag)}
+        src = attrs.get("content") or attrs.get("data-original") or attrs.get("data-src") or attrs.get("src") or ""
+        src = urljoin(base, html.unescape(src.strip()))
+        if src and not _SKIP_IMAGE_RE.search(src) and _is_public_http_url(src) and src not in found:
+            found.append(src)
+        if len(found) >= PAGE_IMAGES:
+            break
+    return found
+
+
+IMAGE_MAX_BYTES = 10 * 1024 * 1024  # Telegram 照片上限 10MB
+IMAGE_REDIRECTS = 5
+
+
+async def fetch_image(url: str) -> tuple[bytes, str]:
+    """下载一张公网图片，返回（内容, Content-Type）。每次重定向都重新校验地址（不让跳转把请求带到内网），
+    边下边数大小，超过上限就停；不是图片、太大或下载失败时抛 WebError。"""
+    url = (url or "").strip()
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; tgrok-bot/1.0)"}
+    for _ in range(IMAGE_REDIRECTS + 1):
+        if not _is_public_http_url(url):
+            raise WebError(t("fetch_bad_url"))
+        try:
+            async with asyncio.timeout(config.SEARCH_TIMEOUT + 10):
+                async with _http.stream("GET", url, headers=headers, timeout=config.SEARCH_TIMEOUT,
+                                        follow_redirects=False) as resp:
+                    if resp.is_redirect and resp.headers.get("location"):
+                        url = urljoin(url, resp.headers["location"])
+                        continue
+                    resp.raise_for_status()
+                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                    if ctype and not ctype.startswith("image/"):
+                        raise WebError(t("image_not_image", ctype=ctype))
+                    data = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        data += chunk
+                        if len(data) > IMAGE_MAX_BYTES:
+                            raise WebError(t("image_too_large"))
+                    return bytes(data), ctype
+        except WebError:
+            raise
+        except Exception as e:
+            logger.warning("下载图片失败 %s: %s", url, type(e).__name__)
+            raise WebError(t("image_fetch_error", error=type(e).__name__)) from None
+    raise WebError(t("image_fetch_error", error="too many redirects"))
+
+
+async def _images_duckduckgo(query: str, n: int) -> list[str]:
+    from ddgs import DDGS
+
+    def _run() -> list[dict]:
+        with DDGS(timeout=config.SEARCH_TIMEOUT) as ddgs:
+            return list(ddgs.images(query, max_results=n, safesearch="moderate"))
+
+    return [r.get("image") or "" for r in await asyncio.to_thread(_run)]
+
+
+async def _images_serper(query: str, n: int) -> list[str]:
+    resp = await _http.post("https://google.serper.dev/images",
+                            headers={"X-API-KEY": config.SERPER_API_KEY, "Content-Type": "application/json"},
+                            json={"q": query, "num": n}, timeout=config.SEARCH_TIMEOUT)
+    resp.raise_for_status()
+    return [r.get("imageUrl") or "" for r in resp.json().get("images") or []]
+
+
+async def search_images(query: str, n: int = 8) -> list[str]:
+    """按关键词找图片直链：Serper（配了 key 时）和 DuckDuckGo 并发，结果交替合并、去重。"""
+    sources = [_images_duckduckgo(query, n)] + ([_images_serper(query, n)] if config.SERPER_API_KEY else [])
+    results = await asyncio.gather(*sources, return_exceptions=True)
+    lists = []
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.warning("图片搜索失败（%s）：%s", query, type(r).__name__)
+        else:
+            lists.append([u for u in r if _is_public_http_url(u)])
+    merged: list[str] = []
+    for i in range(max(map(len, lists), default=0)):  # 各来源轮流取一条
+        for row in lists:
+            if i < len(row) and row[i] not in merged:
+                merged.append(row[i])
+    return merged[:n]
 
 
 _MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")

@@ -56,7 +56,8 @@ class WebSearchTool(Tool):
         note = t("search_system_prompt")
         if config.GEMINI_SEARCH_MODEL:
             note += t("search_agent_note")
-        return note + "\n\n" + t("slang_search_prompt")
+        # 开了深入调研时，查梗的出处交给 research，不让 web_search 的说明把它抢走
+        return note + "\n\n" + t("slang_research_prompt" if config.RESEARCH_MODELS else "slang_search_prompt")
 
     def label(self, args: dict) -> str:
         return t("tool_search", q=self._query(args)[:48] or "?")

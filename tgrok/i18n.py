@@ -168,6 +168,28 @@ STRINGS = {
         "calc_error": "（计算失败：{error}。检查表达式写法后重试，或说明这一步没算出来。）",
         "tool_unknown": "（没有名为 {name} 的工具）",
         "tool_watch": "查看媒体: {q}",
+        "tool_send_image": "找图: {what}",
+        "send_image_prompt": (
+            "需要给人看图时就发图：对方要图、问某样东西长什么样，或者一张照片、地图、图表、表情包比文字说得更清楚时，"
+            "调用 send_image。给 url（图片文件本身的直链，比如 open_url 结果里「页面里的图片」列出的地址，不要自己编链接），"
+            "或者给 query（想要什么样的图），bot 会去搜、挑一张对题的。图片跟在你的回复后面发出：正文照常写，"
+            "别在正文里贴图片链接，也别说「我没法发图」。一条回复最多 {n} 张；工具报失败就如实说没找到合适的图。"
+        ),
+        "image_kind": "图片",
+        "image_check_system": "你在帮人挑图。看图回答问题：只回答一个字「是」或「否」，不要解释。",
+        "image_check": "这张图是否符合「{query}」？",
+        "image_queued": "（图片已准备好，会在你的回复后面发出，这是第 {n} 张。正文里不用再贴链接，也别说没法发图。）",
+        "image_no_reply": "（现在不在回复里，发不了图）",
+        "image_limit": "（一条回复最多发 {n} 张图，这张没加上）",
+        "image_need_source": "（send_image 需要 url 或 query 其中一个）",
+        "image_failed": "（这张图发不了：{error}。可以换一个链接，或者改用 query 搜一张。）",
+        "image_not_found": "（没找到符合「{query}」的图片；跟对方说明没找到，不要编造。）",
+        "image_not_image": "这个链接不是图片（{ctype}）",
+        "image_too_large": "图片超过 10MB",
+        "image_fetch_error": "下载失败（{error}）",
+        "images_only_reply": "图来了：",
+        "images_sent_note": "（随这条回复发了 {n} 张图：{captions}）",
+        "res_image": "图片已准备",
         "watch_system_prompt": (
             "消息里标了 media_id 的视频、GIF、语音、音频或图片，你自己看不到也听不到。回答要用到它的内容时，"
             "先调用 watch_media，带上具体想知道的问题（说了什么、发生了什么、这是哪里），不要凭文字说明猜。"
@@ -200,13 +222,18 @@ STRINGS = {
         "research_member_failed": "【研究员 {label}（{model}）没有交回报告：{reason}】",
         "research_failed": "（深入调研失败：{reason}。改用 web_search 和 open_url 自己查，或说明没查到。）",
         "research_system_prompt": (
-            "research 工具会把一个调研任务同时交给两个互相独立的研究员（不同的模型），它们各自搜索、打开网页读原文后"
-            "交回事实要点和读过的来源，一次大约 30 秒到 2 分钟。遇到要认真查证的问题再用它：不认识的梗、小众圈子的黑话、"
-            "有争议或容易传错的说法、需要准确数字和日期的事实、web_search 查了还拿不准的事。闲聊和一搜就有答案的事别用。"
+            "research 工具把一个调研任务同时交给两个互相独立的研究员（不同的模型），它们各自搜索、打开网页读原文，"
+            "交回查证过的事实和读过的来源。下面这些情况一律先用 research，哪怕你觉得自己知道——这类事最容易记混、以讹传讹：\n"
+            "- 问出处、来源：梗、名言、台词、诗句、段子、图片、谣言最早出自哪里，谁先说的、在什么场合\n"
+            "- 辨真假：某句话是不是某人说的，截图、传闻、新闻靠不靠谱，有争议或流传很广的说法\n"
+            "- 不认识或拿不准的梗、圈子黑话、新词\n"
+            "web_search（包括它背后的 Gemini 检索）只适合拿个概况；结果互相矛盾或说不清时也换 research。"
+            "可以在同一轮同时调 web_search 先看一眼。天气、价格、比分这类实时数据，闲聊和课本常识不用 research。"
+            "等待期间 bot 会显示进度，不用担心慢。\n"
             "task 要写全背景：原话、出自哪个圈子或平台、群友到底想知道什么，研究员看不到群聊。"
             "两份报告由你来判断：说法一致又有一手来源的可以采信；有分歧时信来源更权威、更具体、更新的那份，"
             "拿不准就说明有不同说法；只有一份交回时按那一份，并对它多一分保留。"
-            "回答时用自己的话直接讲结论，不要提「研究员」「报告」「调研」这些词。"
+            "回答时用自己的话直接讲结论，需要时附一两个关键来源，不要提「研究员」「报告」「调研」这些词。"
         ),
         "slang_saved": "已记下「{term}」的这种用法，以后它出现时会作为参考附上。",
         "slang_bad_args": "（没记住：词要 {min}~{max} 个字，释义不能为空）",
@@ -235,6 +262,10 @@ STRINGS = {
             "打开一两篇专门讲这个梗的页面（萌娘百科、知乎、百度百科、B 站或小红书的解读）读正文；"
             "弄清它的出处、讽刺或反讽的那一层、现在实际怎么用，再对照消息原文判断这里用的是哪层意思。"
             "几个来源说法不一样，就以出处和多数人的实际用法为准。"
+        ),
+        "slang_research_prompt": (
+            "查梗、黑话、隐喻的出处和意思时交给 research（task 里写清原话、出自哪个圈子、想知道什么），"
+            "别凭印象或搜索摘要下结论；拿到结果后再对照消息原文判断这里用的是哪层意思。"
         ),
         "slang_usage": (
             "用法：/learn 词=解释|什么语境下是这个意思（语境可省略；本群专属），"
@@ -276,6 +307,7 @@ STRINGS = {
         "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
         "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
         "fetch_empty": "（该网页没有可提取的正文）",
+        "page_images": "页面里的图片（可以用 send_image 直接发）：",
         "search_system_prompt": (
             "你可以用 web_search 工具联网搜索，用 open_url 工具读取网页正文（例如搜索结果里的链接）。"
             "涉及时事、最新动态或你拿不准的事实时，先查再答，必要时打开网页核实。"
@@ -516,6 +548,31 @@ STRINGS = {
         "calc_error": "(calculation failed: {error}. Fix the expression and retry, or say this step could not be computed.)",
         "tool_unknown": "(there is no tool named {name})",
         "tool_watch": "Viewing media: {q}",
+        "tool_send_image": "Finding image: {what}",
+        "send_image_prompt": (
+            "Send a picture when showing helps: someone asks for one or what something looks like, or a photo, map, "
+            "chart, or meme image says it better than words. Call send_image with url (a direct link to the image "
+            "file, such as one listed under the page's images in an open_url result; never invent one) or query (what "
+            "the image should show) and the bot finds a fitting one. The image goes out right after your reply: write "
+            "the reply as usual, don't paste the image link, and don't say you can't send images. At most {n} per "
+            "reply; if the tool fails, say plainly that no suitable image was found."
+        ),
+        "image_kind": "image",
+        "image_check_system": "You are helping pick an image. Look at it and answer with exactly one word, yes or no.",
+        "image_check": "Does this image match \"{query}\"?",
+        "image_queued": "(Image ready; it will be sent right after your reply, image {n}. Don't paste the link or say "
+                        "you can't send images.)",
+        "image_no_reply": "(not inside a reply, can't send images now)",
+        "image_limit": "(at most {n} images per reply; this one was not added)",
+        "image_need_source": "(send_image needs either url or query)",
+        "image_failed": "(can't send this image: {error}. Try another link, or use query to search for one.)",
+        "image_not_found": "(no image matching \"{query}\" was found; tell them so, don't make anything up.)",
+        "image_not_image": "the link is not an image ({ctype})",
+        "image_too_large": "the image is larger than 10 MB",
+        "image_fetch_error": "download failed ({error})",
+        "images_only_reply": "Here you go:",
+        "images_sent_note": "(sent {n} image(s) with this reply: {captions})",
+        "res_image": "image ready",
         "watch_system_prompt": (
             "You can't see or hear videos, GIFs, voice messages, audio, or images marked with a media_id in a "
             "message. When your answer depends on one, call watch_media first with a specific question (what is "
@@ -557,17 +614,24 @@ STRINGS = {
         "research_member_failed": "[Researcher {label} ({model}) returned no report: {reason}]",
         "research_failed": "(research failed: {reason}. Look it up yourself with web_search and open_url, or say you couldn't find it.)",
         "research_system_prompt": (
-            "The research tool hands one research task to two independent researchers (different models) at once; "
-            "each searches, reads the actual pages, and returns key facts plus the sources it read. One call takes "
-            "about 30 seconds to 2 minutes. Use it for questions that need real checking: memes you don't know, niche "
-            "community jargon, disputed or commonly garbled claims, facts that need exact numbers or dates, and "
-            "things web_search left you unsure about. Don't use it for small talk or anything one search answers. "
+            "The research tool hands one task to two independent researchers (different models) at once; each "
+            "searches, reads the actual pages, and returns verified facts plus the sources it read. Use research first "
+            "in these cases, even if you think you know, because they are exactly what people misremember:\n"
+            "- where something comes from: the origin of a meme, quote, line, poem, joke, image, or rumor; who said it "
+            "first and where\n"
+            "- whether it's true: whether someone really said something, whether a screenshot, rumor, or news item "
+            "holds up, widely repeated or disputed claims\n"
+            "- memes, community jargon, or new words you don't know or aren't sure about\n"
+            "web_search (including the Gemini lookup behind it) is for a quick overview; when its results conflict "
+            "or don't settle it, switch to research. You may call web_search in the same turn for a first look. Live "
+            "data like weather, prices, or scores, small talk, and textbook facts don't need research. The bot shows "
+            "progress while it runs, so don't worry about the wait.\n"
             "Write the task with full background (the exact wording, which community or platform it comes from, what "
             "the person actually wants to know); the researchers can't see the chat. You judge the two reports: "
             "accept what they agree on and back with primary sources; when they disagree, trust the one with more "
             "authoritative, specific, and recent sources, or say there are different accounts; if only one came "
-            "back, use it with a bit more caution. Answer in your own words and never mention researchers, reports, "
-            "or research."
+            "back, use it with a bit more caution. Answer in your own words, adding one or two key sources when "
+            "useful, and never mention researchers, reports, or research."
         ),
         "slang_saved": "Saved this usage of \"{term}\"; it will be attached as a reference whenever the term comes up.",
         "slang_bad_args": "(not saved: the term must be {min}-{max} characters and the meaning can't be empty)",
@@ -599,6 +663,11 @@ STRINGS = {
             "Baidu Baike) and read them; work out its origin, the ironic or hidden layer, and how it's actually used now, "
             "then check which layer the message is using. If sources disagree, go with the origin and how most people "
             "use it."
+        ),
+        "slang_research_prompt": (
+            "To find out where a meme, slang term, or metaphor comes from and what it means, hand it to research (put "
+            "the exact wording, the community it comes from, and what you want to know in the task) instead of going "
+            "by memory or search snippets; then check which reading the message is using."
         ),
         "slang_usage": (
             "Usage: /learn term=meaning|when it means this (the context part is optional; this chat only), "
@@ -640,6 +709,7 @@ STRINGS = {
         "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",
         "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
         "fetch_empty": "(no readable text on that page)",
+        "page_images": "Images on the page (send_image can send these directly):",
         "search_system_prompt": (
             "You can call the web_search tool to search the internet and the open_url tool to read the "
             "text of a web page (e.g. a link from search results). For current events, recent news, or "

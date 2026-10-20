@@ -57,6 +57,31 @@ async def look_at(fetch: Fetch, what: str, question: str) -> str:
         return await look(data, mime, what, question)
 
 
+
+async def check(data: bytes, mime: str, question: str) -> bool | None:
+    """快速判断题：图里是不是某样东西。只要一个「是/否」，思考压到最低、输出很短（完整转述要 20~30 秒，
+    这个几秒）；模型不支持 thinking_level 时去掉再试。回答看不懂返回 None。"""
+    from .llm import gemini as llm_gemini
+
+    g = llm_gemini.gtypes
+    contents = [g.Part.from_bytes(data=data, mime_type=mime), question]
+    options = dict(system_instruction=t("image_check_system"), max_output_tokens=256)
+    for thinking in (g.ThinkingConfig(thinking_level=g.ThinkingLevel.LOW), None):
+        try:
+            resp = await llm_gemini.gemini_client.aio.models.generate_content(
+                model=config.GEMINI_MEDIA_MODEL, contents=contents,
+                config=g.GenerateContentConfig(**options, thinking_config=thinking))
+            break
+        except Exception as e:
+            if thinking is None or "thinking" not in str(e).lower():
+                raise
+    answer = (getattr(resp, "text", None) or "").strip().lower()
+    if answer.startswith(("是", "yes")):
+        return True
+    if answer.startswith(("否", "no", "不")):
+        return False
+    return None
+
 async def _prefetch(fetch: Fetch, what: str) -> str:
     async with _semaphore():
         try:

@@ -13,6 +13,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from . import config, llm, prompt, tools
+from .tools import send_image
 from .bubble import Bubble
 from .i18n import phrases, t
 from .tg_auth import is_admin
@@ -266,6 +267,8 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
     bubble = Bubble(msg, _cancel_markup(gen_id), abort=task.cancel if task is not None else (lambda: None))
     bubble.open(_stage_line(0))
     models = _Models()
+    images: list[send_image.Image] = []
+    token = send_image.outbox.set(images)  # send_image 工具把要发的图攒到这里，正文定稿后再发
     try:
         try:
             draft = await _generate(history, bubble, msg.chat_id, models)
@@ -286,9 +289,18 @@ async def stream_reply(msg: Message, history: list[dict]) -> tuple[list[int], st
             return [], ""
         finally:
             bubble.stop_ticker()
+        if images and not draft:
+            draft = t("images_only_reply")  # 模型只发了图没写字：气泡里留一句，别显示成空回复
         # 换了备用模型或被帮手模型抢答，就在回复末尾注明；提示只用于显示，不进对话历史
-        return await bubble.finish(models.note, draft)
+        ids, answer = await bubble.finish(models.note, draft)
+        if ids and images:
+            sent = await bubble.send_images(images)
+            if sent:  # 记进对话历史：追问时模型知道自己发过哪些图
+                answer += "\n\n" + t("images_sent_note", n=sent, captions="；".join(
+                    i.caption or i.source for i in images[:sent]))
+        return ids, answer
     finally:
+        send_image.outbox.reset(token)
         active_generations.pop(gen_id, None)
 
 

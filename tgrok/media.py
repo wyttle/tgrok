@@ -132,7 +132,7 @@ async def download(entry: dict) -> tuple[bytes, str]:
     """下载登记过的媒体，返回（内容, MIME）；图片按文件头纠正 MIME。"""
     file = await entry["bot"].get_file(entry["file_id"])
     data = bytes(await file.download_as_bytearray())
-    mime = _sniff_mime(data, entry["mime"]) if entry["kind"] == "image" else entry["mime"]
+    mime = sniff_mime(data, entry["mime"]) if entry["kind"] == "image" else entry["mime"]
     return data, mime
 
 
@@ -153,7 +153,7 @@ def image_entry(m: Message) -> dict | None:
     return None
 
 
-def _sniff_mime(data: bytes, fallback: str) -> str:
+def sniff_mime(data: bytes, fallback: str) -> str:
     """按文件头识别图片格式：贴纸缩略图可能是 webp 也可能是 jpeg，
     声明的 MIME 和实际内容不符时 Claude 等接口会直接拒绝请求。"""
     if data.startswith(b"\xff\xd8\xff"):
@@ -213,7 +213,7 @@ async def image_data_urls(bot, *messages: Message | None) -> list[str]:
         except Exception:
             logger.exception("下载图片失败 file_id=%s", entry["file_id"])
             return None
-        return f"data:{_sniff_mime(data, entry['mime'])};base64," + base64.b64encode(data).decode()
+        return f"data:{sniff_mime(data, entry['mime'])};base64," + base64.b64encode(data).decode()
 
     # 相册多图并发下载：每张图都是 get_file + 下载两次往返，串行时首字延迟随图片数线性增长
     urls = await asyncio.gather(*(fetch(entry) for entry in refs[:config.MAX_IMAGES]))

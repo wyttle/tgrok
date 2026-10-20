@@ -61,6 +61,23 @@ def test_all_failing_tells_model_to_fall_back():
     assert not outcome.ok and "web_search" in outcome.content
 
 
+def test_failing_researcher_is_rerun_on_its_backup_model():
+    config.RESEARCH_MODELS = ["fail", "server/ok-gemini"]
+    config.RESEARCH_FALLBACK_MODELS = ["cpa/ok-opus", "cpa/ok-flash"]
+    outcome = _research()
+    assert outcome.ok and outcome.summary == "2 份报告"
+    assert "研究员 A（ok-opus" in outcome.content and "研究员 B（ok-gemini" in outcome.content  # 成功的不换
+    assert "ok-flash" not in outcome.content
+
+
+def test_backup_failing_too_reports_both_errors():
+    config.RESEARCH_MODELS = ["fail", "cpa/ok-opus"]
+    config.RESEARCH_FALLBACK_MODELS = ["fail-backup"]  # 只写一个：所有研究员共用
+    outcome = _research()
+    assert outcome.ok and "fail: boom: no credentials; fail-backup:" in outcome.content
+
+
+
 def test_missing_omp_binary_is_a_failure_not_a_crash():
     config.RESEARCH_MODELS = ["cpa/ok-opus"]
     config.OMP_BIN = "definitely-not-omp-binary"

@@ -207,6 +207,8 @@ JINA_API_KEY = _str("JINA_API_KEY")
 # 深入调研：research 工具把任务同时交给这些模型（omp 的模型名，逗号分隔），每个模型起一个 omp 无界面进程，
 # 只开放搜索和读网页；各自的报告一起交给主模型判断。留空关闭
 RESEARCH_MODELS = _csv("RESEARCH_MODELS")
+# 研究员的备选模型：某个研究员失败（超时除外）就用对应位置的备选再跑一次；只写一个则所有研究员共用。留空不备选
+RESEARCH_FALLBACK_MODELS = _csv("RESEARCH_FALLBACK_MODELS")
 OMP_BIN = _str("OMP_BIN", "omp")  # omp 可执行文件（可带参数，按 shell 规则拆分）
 RESEARCH_TIMEOUT = _int("RESEARCH_TIMEOUT", 150)  # 单个研究员最多跑多少秒，超时强制结束
 RESEARCH_THINKING = _str("RESEARCH_THINKING", "low")  # 研究员的思考强度（omp --thinking）

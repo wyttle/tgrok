@@ -75,8 +75,9 @@ def _log_startup() -> None:
         logger.warning("搜索源 %s 配置不完整或名称不识别（tavily 需 TAVILY_API_KEY，searxng 需 SEARXNG_BASE_URL），已跳过",
                        ",".join(skipped))
     if config.RESEARCH_MODELS:
-        logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒）",
-                    ",".join(config.RESEARCH_MODELS), config.RESEARCH_TIMEOUT)
+        logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒）%s",
+                    ",".join(config.RESEARCH_MODELS), config.RESEARCH_TIMEOUT,
+                    f"，失败时改用 {','.join(config.RESEARCH_FALLBACK_MODELS)}" if config.RESEARCH_FALLBACK_MODELS else "")
         omp = shlex.split(config.OMP_BIN, posix=os.name != "nt")[:1]
         if not omp or shutil.which(omp[0]) is None:
             logger.warning("找不到 omp 可执行文件（OMP_BIN=%s），深入调研会一直失败", config.OMP_BIN)

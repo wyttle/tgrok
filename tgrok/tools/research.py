@@ -129,6 +129,27 @@ async def run_researcher(model: str, task: str) -> Report:
     return report
 
 
+def _backup(i: int) -> str | None:
+    """第 i 个研究员的备选模型：RESEARCH_FALLBACK_MODELS 按位置对应，只写一个就所有人共用。"""
+    backups = config.RESEARCH_FALLBACK_MODELS
+    if not backups:
+        return None
+    return backups[i] if i < len(backups) else backups[-1]
+
+
+async def run_with_backup(i: int, model: str, task: str) -> Report:
+    """跑第 i 个研究员；失败（超时除外：时间已经花完了）就用它的备选模型再跑一次。"""
+    report = await run_researcher(model, task)
+    backup = _backup(i)
+    if report.text or not backup or backup == model or report.error == "timed out":
+        return report
+    logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
+    second = await run_researcher(backup, task)
+    if not second.text:
+        second.error = f"{model}: {report.error}; {backup}: {second.error}"
+    return second
+
+
 _slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
 
@@ -174,7 +195,7 @@ class ResearchTool(Tool):
         if not task:
             return failed(t("research_failed", reason="empty task"))
         async with _slot():
-            reports = await asyncio.gather(*(run_researcher(m, task) for m in config.RESEARCH_MODELS))
+            reports = await asyncio.gather(*(run_with_backup(i, m, task) for i, m in enumerate(config.RESEARCH_MODELS)))
         blocks = []
         for i, r in enumerate(reports):
             label, model = chr(ord("A") + i), r.model.rsplit("/", 1)[-1]

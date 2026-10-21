@@ -15,7 +15,7 @@ from . import config, media, prompt, viewer
 from .db import db, schema
 from .i18n import t
 
-LINE_CHARS = 300
+LINE_CHARS = 600
 BOT_LINE_CHARS = 800  # bot 自己的回复截短了，群友追问「你刚才说的」时模型就只记得开头
 BOT_KEEP = 3  # 不管群里多热闹，都带上 bot 自己最近几条回复
 

@@ -26,7 +26,7 @@ from . import Outcome, Tool, failed, show_detail
 logger = logging.getLogger(__name__)
 
 HOOK = Path(__file__).with_name("research_hook.ts")
-REPORT_CHARS = 6000  # 单份报告回灌给主模型的字数上限
+REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
 

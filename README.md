@@ -93,8 +93,8 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `MEMORY_DB` | SQLite database for memory, follow-up history, recent group chat, and usage stats | `memory.db` next to the whitelist file |
 | `LOG_DIR` / `LOG_KEEP_DAYS` | daily log files and how many days to keep; `0` days = console only | `logs/` next to the whitelist file / `14` |
 | `MEMORY_ENABLED` | per-chat long-term memory: curated entries plus a searchable chat log | `true` |
-| `MEMORY_GROUP_CHARS` | character limit of a chat's group notes | `1500` |
-| `MEMORY_PROFILE_CHARS` | character limit of each person's profile in a chat | `500` |
+| `MEMORY_GROUP_CHARS` | character limit of a chat's group notes | `4500` |
+| `MEMORY_PROFILE_CHARS` | character limit of each person's profile in a chat | `1500` |
 | `MEMORY_ARCHIVE_DAYS` | days to keep the chat log | `90` |
 | `MEMORY_CONSOLIDATE_INTERVAL` | minutes between background passes per chat | `60` |
 | `MEMORY_CONSOLIDATE_MIN` | new log messages needed before a background pass (or a day passing) | `10` |
@@ -115,7 +115,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `GEMINI_SEARCH_MODEL` | dedicated Gemini grounding model for hybrid search | (empty) |
 | `GEMINI_API_KEY` | Gemini/grounding key; empty = reuse `LLM_API_KEY` | (empty) |
 | `SEARCH_MAX_RESULTS` | search results fed back to the model per query | `5` |
-| `FETCH_CHAR_LIMIT` | page-text characters fed back per `open_url` call | `3500` |
+| `FETCH_CHAR_LIMIT` | page-text characters fed back per `open_url` call | `10500` |
 | `JINA_FALLBACK` | use Jina Reader when direct page extraction fails | `true` |
 | `JINA_API_KEY` | optional Jina API key for higher rate limits | (empty) |
 | `RESEARCH_MODELS` | omp model names (comma-separated) for the `research` tool; each becomes one researcher; empty = off | (empty) |

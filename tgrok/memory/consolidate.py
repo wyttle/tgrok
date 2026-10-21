@@ -16,7 +16,7 @@ from . import notes, store
 logger = logging.getLogger(__name__)
 
 BATCH_CHARS = 12000  # 一次交给模型的原始记录字数上限
-REPLY_CHARS = 300  # bot 回答在整理输入里截到这么长：只用来看懂上下文
+REPLY_CHARS = 900  # bot 回答在整理输入里截到这么长：只用来看懂上下文
 STALE_SECONDS = 86400  # 新记录不够 MEMORY_CONSOLIDATE_MIN 条，但最早一条已经放了这么久，也整理
 
 _running: set[int] = set()

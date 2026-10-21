@@ -9,7 +9,7 @@ from ..memory import store
 from . import Outcome, Tool, failed
 
 MAX_LIMIT = 30
-TEXT_CHARS = 400  # 单条记录回灌给模型的字数上限
+TEXT_CHARS = 1200  # 单条记录回灌给模型的字数上限
 
 
 class RecallTool(Tool):

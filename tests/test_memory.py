@@ -32,7 +32,7 @@ def test_entries_render_with_number_age_and_capacity():
     _add("做外贸，爱吃辣", "user", 5)
     _add("在找工作", "user", 5, days=30)
     block = notes.render(CHAT, [5])
-    assert "群笔记 [10/1500 字]" in block and "#1 群里约定周五晚上开黑（刚才）" in block
+    assert f"群笔记 [10/{config.MEMORY_GROUP_CHARS} 字]" in block and "#1 群里约定周五晚上开黑（刚才）" in block
     assert "人5（id 5） 的档案" in block and "做外贸，爱吃辣（刚才）" in block and "在找工作（刚才，还剩 30 天）" in block
 
 
@@ -69,7 +69,8 @@ def test_update_remove_duplicates_and_other_chats():
     assert store.notes(CHAT)[0].expires is None  # days=0 改成长期
     with pytest.raises(notes.NoteError):
         notes.apply(-200, [{"action": "remove", "id": note_id}], "tool")  # 别的聊天的条目动不了
-    for bad in ({"action": "add", "target": "user", "text": "x"}, {"action": "add", "target": "group", "text": "x" * 201},
+    for bad in ({"action": "add", "target": "user", "text": "x"},
+                {"action": "add", "target": "group", "text": "x" * (notes.NOTE_CHARS + 1)},
                 {"action": "update", "id": 999}, {"action": "drop", "id": note_id}):
         with pytest.raises(notes.NoteError):
             notes.apply(CHAT, [bad], "tool")

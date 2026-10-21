@@ -13,7 +13,7 @@ from .. import config
 from ..i18n import t
 from . import store
 
-NOTE_CHARS = 200  # 单条上限
+NOTE_CHARS = 600  # 单条上限
 _INVISIBLE_RE = re.compile("[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 
 

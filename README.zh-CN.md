@@ -90,8 +90,8 @@ python bot.py
 | `MEMORY_DB` | SQLite 数据库：记忆、追问用的对话历史、最近群聊和用量统计 | 白名单文件旁的 `memory.db` |
 | `LOG_DIR` / `LOG_KEEP_DAYS` | 日志文件目录（每天一个文件）和保留天数；天数为 `0` 只输出到控制台 | 白名单文件旁的 `logs/` / `14` |
 | `MEMORY_ENABLED` | 按聊天保存的长期记忆：精选条目 + 可检索的原始记录 | `true` |
-| `MEMORY_GROUP_CHARS` | 每个聊天的群笔记字数上限 | `1500` |
-| `MEMORY_PROFILE_CHARS` | 每个人在每个聊天的档案字数上限 | `500` |
+| `MEMORY_GROUP_CHARS` | 每个聊天的群笔记字数上限 | `4500` |
+| `MEMORY_PROFILE_CHARS` | 每个人在每个聊天的档案字数上限 | `1500` |
 | `MEMORY_ARCHIVE_DAYS` | 原始记录保留天数 | `90` |
 | `MEMORY_CONSOLIDATE_INTERVAL` | 每个聊天后台整理的最短间隔（分钟） | `60` |
 | `MEMORY_CONSOLIDATE_MIN` | 攒够多少条新记录才整理（放了一天也整理） | `10` |
@@ -112,7 +112,7 @@ python bot.py
 | `GEMINI_SEARCH_MODEL` | 混合搜索使用的 Gemini grounding 模型 | （空） |
 | `GEMINI_API_KEY` | Gemini/grounding key；留空复用 `LLM_API_KEY` | （空） |
 | `SEARCH_MAX_RESULTS` | 单次搜索回灌给模型的结果条数 | `5` |
-| `FETCH_CHAR_LIMIT` | 单次 `open_url` 回灌给模型的网页正文字数上限 | `3500` |
+| `FETCH_CHAR_LIMIT` | 单次 `open_url` 回灌给模型的网页正文字数上限 | `10500` |
 | `JINA_FALLBACK` | 直接提取网页失败时使用 Jina Reader 兜底 | `true` |
 | `JINA_API_KEY` | 可选 Jina API key，用于提高速率限制 | （空） |
 | `RESEARCH_MODELS` | `research` 工具用的 omp 模型名（逗号分隔），每个模型一个研究员；留空关闭 | （空） |

@@ -21,8 +21,8 @@ from . import consolidate, notes, store
 
 logger = logging.getLogger(__name__)
 
-ASK_CHARS = 1000  # 存进原始记录的单条提问/群消息上限
-REPLY_CHARS = 1500  # 存进原始记录的 bot 回答上限
+ASK_CHARS = 3000  # 存进原始记录的单条提问/群消息上限
+REPLY_CHARS = 4500  # 存进原始记录的 bot 回答上限
 RECENT_SECONDS = 3 * 86400  # 注入「最近的提问」只看这么久以内的
 RECENT_COUNT = 5
 TICK = 60  # 后台维护间隔（秒）

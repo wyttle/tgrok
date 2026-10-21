@@ -23,16 +23,11 @@ class WebSearchTool(Tool):
 
     @property
     def description(self) -> str:
-        research = (" For anything serious or that needs real checking (why something happened, money, health, "
-                    "law, politics, safety, origins, true-or-false), use research instead."
-                    if config.RESEARCH_MODELS else "")
+        research = " For anything serious or that needs real checking, use research instead." if config.RESEARCH_MODELS else ""
         if config.GEMINI_SEARCH_MODEL:
             return ("Quick Google lookup run by Gemini: give it one question in natural language and it returns a "
-                    "short fact summary with sources. Good for simple lookups with one clear answer (weather, "
-                    "current prices or rates, scores, schedules, a date). Don't split one round into many narrow "
-                    "queries." + research)
-        return ("Search the web for up-to-date information: simple lookups, recent events, time-sensitive facts."
-                + research)
+                    "short fact summary with sources. For simple lookups with one clear answer." + research)
+        return "Search the web for up-to-date information: simple lookups, recent events, time-sensitive facts." + research
 
     @property
     def parameters(self) -> dict:
@@ -42,7 +37,7 @@ class WebSearchTool(Tool):
                 "query": {
                     "type": "string",
                     "description": (
-                        "The research task or question, in the language most likely to find good results."
+                        "The question to look up, in the language most likely to find good results."
                         if config.GEMINI_SEARCH_MODEL
                         else "The search query, in the language most likely to find good results."
                     ),
@@ -58,8 +53,9 @@ class WebSearchTool(Tool):
         note = t("search_system_prompt")
         if config.GEMINI_SEARCH_MODEL:
             note += t("search_agent_note")
-        # 开了深入调研时，查梗的出处交给 research，不让 web_search 的说明把它抢走
-        return note + "\n\n" + t("slang_research_prompt" if config.RESEARCH_MODELS else "slang_search_prompt")
+        if config.RESEARCH_MODELS:
+            return note  # 什么时候查、查梗的出处都由 research 的说明统一讲，这里不再重复
+        return note + t("search_when_prompt") + "\n\n" + t("slang_search_prompt")
 
     def label(self, args: dict) -> str:
         return t("tool_search", q=self._query(args)[:48] or "?")

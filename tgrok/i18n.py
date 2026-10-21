@@ -47,7 +47,8 @@ STRINGS = {
             "- 短回复（三句以内）不加任何标签。\n"
             "- 长回复先用一两句话给结论，细节放进一个 <blockquote expandable>…</blockquote>（默认折叠，点开才看到；"
             "里面只放文字和行内格式，代码块放在它外面）。\n"
-            "- 链接放在回复末尾，只用真实查到的地址，不要编造 URL。"
+            "- 查到的东西用自己的话讲，别写成搜索报告：不说「根据搜索结果」，不用 [1][2] 编号；值得给出处时在末尾附一两个"
+            "真实查到的链接，不要编造 URL。"
         ),
         "prev_reply": "（对方在接着你之前的这条回复聊：「{content}」）",
         "memory_header": (
@@ -241,23 +242,16 @@ STRINGS = {
         "research_member_failed": "【研究员 {label}（{model}）没有交回报告：{reason}】",
         "research_failed": "（深入调研失败：{reason}。改用 web_search 和 open_url 自己查，或说明没查到。）",
         "research_system_prompt": (
-            "research 工具把一个调研任务同时交给两个互相独立的研究员（不同的模型），它们各自搜索、打开网页读原文，"
-            "交回查证过的事实和读过的来源。下面这些情况一律先用 research，哪怕你觉得自己知道——这类事最容易记混、以讹传讹：\n"
-            "- 问出处、来源：梗、名言、台词、诗句、段子、图片、谣言最早出自哪里，谁先说的、在什么场合\n"
-            "- 辨真假：某句话是不是某人说的，截图、传闻、新闻靠不靠谱，有争议或流传很广的说法\n"
-            "- 不认识或拿不准的梗、圈子黑话、新词\n"
-            "- 问原因、来龙去脉、怎么回事：某只股票或某个市场为什么涨跌、某件事是怎么发生的、现在局势怎样、会有什么影响\n"
-            "- 严肃的事：钱和投资、健康和用药、法律和维权、政治、安全、人身财产，以及群友要据此做决定的事。"
-            "这类问题哪怕看起来是常识也要查：药品说明、法规和政策会更新，也因人因地而异，凭记忆答错会害人\n"
-            "- 需要准确数字、日期、出处才能答对的事实，或者 web_search 查完还说不清、互相矛盾的\n"
-            "web_search（包括它背后的 Gemini 检索）只是快速检索，只用于一搜就有确定答案的简单查询：天气、现价和汇率、"
-            "比分、时刻表、某个日期。拿不准一个问题算不算简单查询，就当作严肃问题用 research。"
-            "可以在同一轮同时调 web_search 先看一眼。闲聊和不会变的课本知识（数学、历史年代、基本科学原理）不用 research。"
-            "等待期间 bot 会显示进度，不用担心慢。\n"
-            "task 要写全背景：原话、出自哪个圈子或平台、群友到底想知道什么，研究员看不到群聊。"
-            "两份报告由你来判断：说法一致又有一手来源的可以采信；有分歧时信来源更权威、更具体、更新的那份，"
-            "拿不准就说明有不同说法；只有一份交回时按那一份，并对它多一分保留。"
-            "回答时用自己的话直接讲结论，需要时附一两个关键来源，不要提「研究员」「报告」「调研」这些词。"
+            "查资料用 research 还是 web_search：\n"
+            "- research 把一个任务同时交给两个独立的研究员（不同的模型），各自搜索、读原文，交回查证过的事实和来源。"
+            "下面这些一律先用它，哪怕你觉得自己知道：梗、名言、图片、谣言的出处；某句话、截图、传闻是真是假；"
+            "不认识或拿不准的梗和圈子黑话；为什么涨跌、怎么回事、局势如何；严肃的事（钱、健康和用药、法律、政治、安全、"
+            "群友要据此做决定的事，看着像常识也要查，这些会更新、因人因地而异）；需要准确数字、日期、出处的事实。\n"
+            "- web_search 只用于一搜就有确定答案的简单查询（天气、现价汇率、比分、时刻表、某个日期），"
+            "也可以在同一轮先用它看一眼。拿不准算哪种就用 research。闲聊、观点和不会变的课本知识不用查。等待时 bot 会显示进度。\n"
+            "- 研究员看不到群聊：task 里写清原话、出自哪个圈子或平台、群友到底想知道什么。"
+            "两份报告由你判断：一致且有一手来源的采信；有分歧时信来源更权威、更具体、更新的那份，或说明有不同说法。"
+            "不要提「研究员」「报告」「调研」这些词。"
         ),
         "slang_saved": "已记下「{term}」的这种用法，以后它出现时会作为参考附上。",
         "slang_bad_args": "（没记住：词要 {min}~{max} 个字，释义不能为空）",
@@ -274,11 +268,9 @@ STRINGS = {
         "slang_sense_plain": "  · {meaning}",
         "slang_system_prompt": (
             "中文里的梗、黑话、缩写、谐音和隐喻，意思跟语境走：同一个词换个句子、换个人说、换个场合，"
-            "可能是字面意思，也可能是反讽、自嘲、阴阳或者另一个梗。理解时先看整句话、谁在说、在接谁的话、"
-            "群里在聊什么，再决定取哪层意思；拿不准就按最贴合这句话的读法，必要时搜索。"
-            "你查清了一个以前不懂或理解错的说法，或者群友纠正、解释了某个说法，就用 remember_slang 记下这种用法，"
-            "同时写清楚在什么语境下是这个意思、附上当时的原句，不要只记一个干巴巴的释义。"
-            "群友说你理解错了，以他的解释为准再记一次。"
+            "可能是字面意思，也可能是反讽、自嘲、阴阳或者另一个梗。先看整句话、谁在说、在接谁的话、群里在聊什么，"
+            "再决定取哪层意思。你查清了一个以前不懂或理解错的说法，或者群友纠正、解释了某个说法，就用 remember_slang "
+            "记下这种用法，写清楚在什么语境下是这个意思、附上当时的原句；群友说你理解错了，以他的解释为准再记一次。"
         ),
         "slang_search_prompt": (
             "查梗、黑话、隐喻时别停在搜索摘要上，摘要和字面解释多半是错的："
@@ -286,10 +278,6 @@ STRINGS = {
             "打开一两篇专门讲这个梗的页面（萌娘百科、知乎、百度百科、B 站或小红书的解读）读正文；"
             "弄清它的出处、讽刺或反讽的那一层、现在实际怎么用，再对照消息原文判断这里用的是哪层意思。"
             "几个来源说法不一样，就以出处和多数人的实际用法为准。"
-        ),
-        "slang_research_prompt": (
-            "查梗、黑话、隐喻的出处和意思时交给 research（task 里写清原话、出自哪个圈子、想知道什么），"
-            "别凭印象或搜索摘要下结论；拿到结果后再对照消息原文判断这里用的是哪层意思。"
         ),
         "slang_usage": (
             "用法：/learn 词=解释|什么语境下是这个意思（语境可省略；本群专属），"
@@ -322,20 +310,15 @@ STRINGS = {
         "search_bad_args": "（工具调用参数无法解析，请用合法的 JSON 参数重新调用工具）",
         "search_merged": "（本轮多个 web_search 已合并为一次检索执行，结果见第一条 web_search 返回）",
         "search_agent_note": (
-            "注意：web_search 由 Gemini 执行，一次调用内部会跑几次 Google 搜索并汇总，但它只是快速检索，不是深入调研。"
-            "把一轮要查的内容合并成一个问题提交，不要拆成多个小查询。"
+            "web_search 由 Gemini 执行，一次会跑几次 Google 搜索并汇总；把一轮要查的合并成一个问题提交，不要拆成多个小查询。"
         ),
         "fetch_bad_url": "（无法读取该地址：仅支持公网 http/https 链接）",
         "fetch_error": "（读取网页失败：{error}。可换一条链接重试，或基于搜索摘要回答。）",
         "fetch_unsupported": "（该链接不是文本网页（{ctype}），无法读取）",
         "fetch_empty": "（该网页没有可提取的正文）",
         "page_images": "页面里的图片（可以用 send_image 直接发）：",
-        "search_system_prompt": (
-            "你可以用 web_search 工具联网搜索，用 open_url 工具读取网页正文（例如搜索结果里的链接）。"
-            "涉及时事、最新动态或你拿不准的事实时，先查再答，必要时打开网页核实。"
-            "查到的内容用自己的话讲出来，别写成搜索报告：不说「根据搜索结果」，不用 [1][2] 这类编号引用。"
-            "需要给出处时，在末尾附一两个最关键的链接就够了。"
-        ),
+        "search_system_prompt": "web_search 联网搜索，open_url 读取网页正文（例如搜索结果里的链接）。",
+        "search_when_prompt": "涉及时事、最新动态或你拿不准的事实时，先查再答，必要时打开网页核实。",
         "current_time": (
             "系统附注，不是群友说的话：现在是 {time}（{tz}）。涉及今天、现在、最近等时间时以此为准，"
             "问题跟时间无关就别提它；没联网查过的事不要说成已核实。"
@@ -436,7 +419,9 @@ STRINGS = {
             "- For a long reply, give the conclusion in one or two sentences first and put the details in one "
             "<blockquote expandable>…</blockquote> (collapsed until tapped; only text and inline formatting inside, "
             "keep code blocks outside it).\n"
-            "- Put links at the end, use only addresses you actually found, and never make up a URL."
+            "- Put what you found in your own words, not as a search report: don't say \"according to the search "
+            "results\" and don't use [1][2] citations; when a source is worth giving, add one or two links you actually "
+            "found at the end, and never make up a URL."
         ),
         "prev_reply": "(They are following up on this earlier reply of yours: \"{content}\")",
         "memory_header": (
@@ -667,34 +652,22 @@ STRINGS = {
         "research_member_failed": "[Researcher {label} ({model}) returned no report: {reason}]",
         "research_failed": "(research failed: {reason}. Look it up yourself with web_search and open_url, or say you couldn't find it.)",
         "research_system_prompt": (
-            "The research tool hands one task to two independent researchers (different models) at once; each "
-            "searches, reads the actual pages, and returns verified facts plus the sources it read. Use research first "
-            "in these cases, even if you think you know, because they are exactly what people misremember:\n"
-            "- where something comes from: the origin of a meme, quote, line, poem, joke, image, or rumor; who said it "
-            "first and where\n"
-            "- whether it's true: whether someone really said something, whether a screenshot, rumor, or news item "
-            "holds up, widely repeated or disputed claims\n"
-            "- memes, community jargon, or new words you don't know or aren't sure about\n"
-            "- why or how something happened: why a stock or market moved, how an event came about, where a situation "
-            "stands now, what it will lead to\n"
-            "- anything serious: money and investing, health and medication, law and people's rights, politics, safety, "
-            "people's lives and property, and anything someone will base a decision on. Research these even when "
-            "they look like common knowledge: drug labels, laws, and policies change and depend on the person and "
-            "place, and a wrong answer from memory can hurt someone\n"
-            "- facts that need exact numbers, dates, or sources to get right, or that web_search left unclear or "
-            "contradictory\n"
-            "web_search (including the Gemini lookup behind it) is only a quick lookup, for simple questions with one "
-            "clear answer: weather, current prices and exchange rates, scores, schedules, a date. If you're not sure "
-            "whether a question is that simple, treat it as serious and use research. You may call web_search in the "
-            "same turn for a first look. Small talk and knowledge that doesn't change (math, historical dates, basic "
-            "science) don't need research. The bot shows "
-            "progress while it runs, so don't worry about the wait.\n"
-            "Write the task with full background (the exact wording, which community or platform it comes from, what "
-            "the person actually wants to know); the researchers can't see the chat. You judge the two reports: "
-            "accept what they agree on and back with primary sources; when they disagree, trust the one with more "
-            "authoritative, specific, and recent sources, or say there are different accounts; if only one came "
-            "back, use it with a bit more caution. Answer in your own words, adding one or two key sources when "
-            "useful, and never mention researchers, reports, or research."
+            "Looking things up, research or web_search:\n"
+            "- research hands one task to two independent researchers (different models) that search, read the actual "
+            "pages, and return verified facts with sources. Use it first, even if you think you know, for: where a meme, "
+            "quote, image, or rumor comes from; whether a claim, quote, screenshot, or rumor is true; memes or jargon you "
+            "don't know well; why or how something happened and where a situation stands; anything serious (money, "
+            "health and medication, law, politics, safety, anything someone will act on; check even if it looks like "
+            "common knowledge, since these change and depend on person and place); facts that need exact numbers, "
+            "dates, or sources.\n"
+            "- web_search is only for quick lookups with one clear answer (weather, prices and exchange rates, scores, "
+            "schedules, a date); you may also use it in the same turn for a first look. If unsure which applies, use "
+            "research. Small talk, opinions, and knowledge that doesn't change need no lookup. The bot shows progress "
+            "during the wait.\n"
+            "- The researchers can't see the chat: write the task with the exact wording, which community or platform "
+            "it comes from, and what the person wants to know. Judge the reports: accept what they agree on with "
+            "primary sources; when they disagree, trust the more authoritative, specific, and recent one, or say "
+            "accounts differ. Never mention researchers, reports, or research."
         ),
         "slang_saved": "Saved this usage of \"{term}\"; it will be attached as a reference whenever the term comes up.",
         "slang_bad_args": "(not saved: the term must be {min}-{max} characters and the meaning can't be empty)",
@@ -714,8 +687,8 @@ STRINGS = {
             "Memes, slang, abbreviations, puns, and metaphors depend on context: the same word in another sentence, "
             "from another person, or in another setting can be literal, ironic, self-deprecating, sarcastic, or a "
             "different meme. Read the whole sentence, who's saying it, what it replies to, and what the chat is about "
-            "before deciding which reading applies; if unsure, take the reading that fits this sentence best and search "
-            "if needed. When you work out an expression you didn't know or had wrong, or someone corrects or explains one, "
+            "before deciding which reading applies. When you work out an expression you didn't know or had wrong, or "
+            "someone corrects or explains one, "
             "save that usage with remember_slang, including when it means this and the original message, not just a bare "
             "definition. If someone says you got it wrong, go with their explanation and save it again."
         ),
@@ -726,11 +699,6 @@ STRINGS = {
             "Baidu Baike) and read them; work out its origin, the ironic or hidden layer, and how it's actually used now, "
             "then check which layer the message is using. If sources disagree, go with the origin and how most people "
             "use it."
-        ),
-        "slang_research_prompt": (
-            "To find out where a meme, slang term, or metaphor comes from and what it means, hand it to research (put "
-            "the exact wording, the community it comes from, and what you want to know in the task) instead of going "
-            "by memory or search snippets; then check which reading the message is using."
         ),
         "slang_usage": (
             "Usage: /learn term=meaning|when it means this (the context part is optional; this chat only), "
@@ -763,21 +731,18 @@ STRINGS = {
         "search_bad_args": "(could not parse the tool arguments; call the tool again with valid JSON arguments)",
         "search_merged": "(multiple web_search calls this round were merged into one lookup; see the first web_search result)",
         "search_agent_note": (
-            "Note: web_search is run by Gemini and does a few Google searches per call, but it is a quick lookup, "
-            "not in-depth research. Submit ONE combined question per round instead of many narrow queries."
+            " web_search is run by Gemini and does a few Google searches per call; submit ONE combined question per "
+            "round instead of many narrow queries."
         ),
         "fetch_bad_url": "(cannot fetch this address: only public http/https URLs are supported)",
         "fetch_error": "(failed to fetch the page: {error}. Try another link or answer from the search snippets.)",
         "fetch_unsupported": "(the link is not a text page ({ctype}), cannot read it)",
         "fetch_empty": "(no readable text on that page)",
         "page_images": "Images on the page (send_image can send these directly):",
-        "search_system_prompt": (
-            "You can call the web_search tool to search the internet and the open_url tool to read the "
-            "text of a web page (e.g. a link from search results). For current events, recent news, or "
-            "facts you are unsure about, search first and open pages to verify when needed. Put what you "
-            "find in your own words instead of writing a search report: don't say \"according to the "
-            "search results\" and don't use [1][2]-style numbered citations. When a source is worth "
-            "giving, add one or two key links at the end."
+        "search_system_prompt": "web_search searches the web; open_url reads a page's text (e.g. a link from the results).",
+        "search_when_prompt": (
+            "For current events, recent news, or facts you are unsure about, search first and open pages to verify "
+            "when needed."
         ),
         "current_time": (
             "System note, not part of the user's message: it is now {time} ({tz}). Use this for anything "

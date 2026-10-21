@@ -435,12 +435,8 @@ class ResearchTool(Tool):
     name = "research"
     description = (
         "Hand one research task to independent research agents (different models) that search the web, read the "
-        "actual pages, and return verified facts with sources. Use it for anything serious or that needs real "
-        "checking: why or how something happened (e.g. why a stock moved, how an event unfolded, where a situation "
-        "stands), money, health, law, politics, or safety questions, where something comes from (origin of a meme, "
-        "quote, image, or rumor), whether a claim, quote, screenshot, or rumor is true, and unfamiliar memes or "
-        "jargon, even if you think you know. web_search is only for simple lookups with one clear answer (weather, "
-        "prices, scores, dates). Not for small talk or textbook facts."
+        "actual pages, and return verified facts with sources. For anything serious (why something happened, money, "
+        "health, law, politics, safety), origins, true-or-false checks, and unfamiliar memes, even if you think you know."
     )
     parameters = {
         "type": "object",

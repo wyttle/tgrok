@@ -193,18 +193,20 @@ def _image_refs(m: Message) -> list[dict]:
     return [entry] if entry else []
 
 
-async def image_data_urls(bot, *messages: Message | None) -> list[str]:
-    """提取消息中的图片（相册自动展开为整组），转为 base64 data URL；未开启视觉时返回空列表。"""
+async def image_data_urls(bot, *messages: Message | None) -> list[list[str]]:
+    """提取每条消息里的图片（相册自动展开为整组），转为 base64 data URL，按传入的消息分别返回，
+    调用方才说得清每张图是谁发的。同一张图只取一次（算在先传入的消息上），总数不超过 MAX_IMAGES；
+    未开启视觉时每条都是空列表。"""
     if not config.ENABLE_VISION:
-        return []
+        return [[] for _ in messages]
     refs, seen = [], set()
-    for m in messages:
+    for owner, m in enumerate(messages):
         if m is None:
             continue
         for entry in _image_refs(m):
             if entry["file_id"] not in seen:
                 seen.add(entry["file_id"])
-                refs.append(entry)
+                refs.append((owner, entry))
 
     async def fetch(entry: dict) -> str | None:
         try:
@@ -216,8 +218,13 @@ async def image_data_urls(bot, *messages: Message | None) -> list[str]:
         return f"data:{sniff_mime(data, entry['mime'])};base64," + base64.b64encode(data).decode()
 
     # 相册多图并发下载：每张图都是 get_file + 下载两次往返，串行时首字延迟随图片数线性增长
-    urls = await asyncio.gather(*(fetch(entry) for entry in refs[:config.MAX_IMAGES]))
-    return [u for u in urls if u]
+    refs = refs[:config.MAX_IMAGES]
+    urls = await asyncio.gather(*(fetch(entry) for _, entry in refs))
+    out: list[list[str]] = [[] for _ in messages]
+    for (owner, _), url in zip(refs, urls):
+        if url:
+            out[owner].append(url)
+    return out
 
 
 def build_content(text: str, images: list[str]):

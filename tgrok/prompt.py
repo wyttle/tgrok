@@ -97,7 +97,10 @@ def asked_by(msg: Message, text: str) -> str:
 def quoted_context(replied: Message, asker=None, quote: str | None = None) -> str | None:
     """被引用的那条消息给模型的描述：写明发送者（是不是提问者本人）、转发的原作者、
     文字和媒体说明，以及提问者特意引用的片段；什么内容都没有时返回 None。"""
-    content = "\n".join(p for p in (replied.text or replied.caption, media.media_note(replied)) if p)
+    note = media.media_note(replied)
+    if note is None and media.image_entry(replied):
+        note = t("observed_image")  # 只有图的消息也要写明是谁发的，图本身另外附上
+    content = "\n".join(p for p in (replied.text or replied.caption, note) if p)
     if not content and not quote:
         return None
     who = sender_label(replied)
@@ -110,6 +113,19 @@ def quoted_context(replied: Message, asker=None, quote: str | None = None) -> st
     if quote:
         lines.append(t("quoted_part", quote=quote))
     return "\n".join(lines)
+
+
+def image_note(asker, own: int, replied: Message | None = None, quoted: int = 0) -> str | None:
+    """附图的来源：几张是提问者随这条消息发的，几张来自被引用的消息、是谁发的。
+    图片都挂在 user 消息末尾，不写明的话模型会凭上下文猜（线上把提问者自己发的图当成了别人的）。"""
+    name = person_label(asker)
+    if own and quoted:
+        return t("images_both", total=own + quoted, own=own, quoted=quoted, name=name, author=sender_label(replied))
+    if own:
+        return t("images_own", n=own, name=name)
+    if quoted:
+        return t("images_quoted", n=quoted, author=sender_label(replied))
+    return None
 
 
 def external_context(info, quote: str | None) -> str | None:

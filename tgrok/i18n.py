@@ -25,6 +25,10 @@ STRINGS = {
         "question_about_quote": "【提问】{name} 回复了上面这条消息，问你：{question}",
         "forwarded_by_asker": "（下面这段是 {origin} 的消息，由提问者转发过来，不是提问者自己说的）\n{text}",
         "question_from": "{name} 的提问：{question}",
+        "images_own": "（附的 {n} 张图是 {name} 随这条提问自己发的）",
+        "images_quoted": "（附的 {n} 张图来自被引用的那条消息，是 {author} 发的）",
+        "images_both": "（附了 {total} 张图：前 {own} 张是 {name} 随这条提问自己发的，后 {quoted} 张来自被引用的那条消息，"
+                       "是 {author} 发的）",
         "person_label": "{name}（id {uid}）",
         "person_label_handle": "{name}（@{username}，id {uid}）",
         "chat_label": "{title}（频道或群，id {cid}）",
@@ -405,6 +409,10 @@ STRINGS = {
         "forwarded_by_asker": "(The following is a message from {origin}, forwarded by the asker; the asker did not "
                               "write it)\n{text}",
         "question_from": "{name} asks: {question}",
+        "images_own": "(The {n} attached image(s) were sent by {name} with this question)",
+        "images_quoted": "(The {n} attached image(s) come from the quoted message, sent by {author})",
+        "images_both": "({total} images attached: the first {own} were sent by {name} with this question; the last "
+                       "{quoted} come from the quoted message, sent by {author})",
         "person_label": "{name} (id {uid})",
         "person_label_handle": "{name} (@{username}, id {uid})",
         "chat_label": "{title} (channel or group, id {cid})",

@@ -87,6 +87,34 @@ def test_reply_to_bot_with_sticker_or_wordless_photo_still_gets_answered(monkeyp
     assert t("media_unseen", what="图片") in captured[-1][-1]["content"]
 
 
+def test_attached_images_are_credited_to_whoever_sent_them(monkeypatch):
+    # 线上：Bocchi 自己发图配「@bot 这谁」，模型却说「你回复的是 xCoFe 发的图」——图挂在消息末尾，没写是谁发的
+    captured = capture_replies(monkeypatch)
+    config.ENABLE_VISION = True
+    tg_auth.allowed_users.add(5)
+    chat, bocchi, xcofe = group(), user(5, "Bocchi"), user(6, "xCoFe")
+    tag = [MessageEntity(MessageEntity.MENTION, 0, 4)]
+    own = Message(1, NOW, chat, from_user=bocchi, caption="@bot 这谁", caption_entities=tag,
+                  photo=[PhotoSize("mine", "mine-u", 512, 512)])
+    run(handlers.handle_message(update_of(own), CTX))
+    text = captured[-1][-1]["content"][0]["text"]
+    assert t("images_own", n=1, name="Bocchi（id 5）") in text and "xCoFe" not in text
+
+    theirs = Message(2, NOW, chat, from_user=xcofe, photo=[PhotoSize("its", "its-u", 512, 512)])
+    ask = Message(3, NOW, chat, from_user=bocchi, text="@bot 这谁", entities=tag, reply_to_message=theirs)
+    run(handlers.handle_message(update_of(ask), CTX))
+    text = captured[-1][-1]["content"][0]["text"]
+    assert t("quoted_other", author="xCoFe（id 6）") in text  # 只有图的被引用消息也写明发送者
+    assert t("images_quoted", n=1, author="xCoFe（id 6）") in text
+
+    both = Message(4, NOW, chat, from_user=bocchi, caption="@bot 哪个好看", caption_entities=tag,
+                   photo=[PhotoSize("mine2", "mine2-u", 512, 512)], reply_to_message=theirs)
+    run(handlers.handle_message(update_of(both), CTX))
+    content = captured[-1][-1]["content"]
+    assert t("images_both", total=2, own=1, quoted=1, name="Bocchi（id 5）", author="xCoFe（id 6）") in content[0]["text"]
+    assert len(content) == 3  # 文字 + 自己的图在前 + 被引用的图在后
+
+
 def test_same_name_users_are_told_apart_by_id(monkeypatch):
     captured = capture_replies(monkeypatch)
     tg_auth.allowed_users.update({1001, 1002})

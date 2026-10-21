@@ -111,10 +111,11 @@ def _since(m: Message) -> float:
 async def _follow_up(msg: Message, bot, question: str, note: str | None) -> list[dict] | None:
     """回复 bot 的消息（带不带 @ 都算）：接上那条回复对应的对话历史，附上那之后群里新聊的内容。"""
     replied = msg.reply_to_message
-    images = await media.image_data_urls(bot, msg)
+    [images] = await media.image_data_urls(bot, msg)
     if not question and not images and not note:
         return None
-    text = prompt.asked_by(msg, _join(question, note) or t("look_image"))
+    text = _join(prompt.asked_by(msg, _join(question, note) or t("look_image")),
+                 prompt.image_note(msg.from_user, len(images)))
     chat_since = recent.block(msg.chat_id, msg.message_id, since=_since(replied), skip={replied.message_id})
     history = conversations.get(msg.chat_id, replied.message_id)
     if history is not None:
@@ -142,16 +143,17 @@ async def _new_question(msg: Message, bot, question: str, note: str | None) -> l
     """新对话：群里 @bot（可以引用别人的消息）或私聊直接提问。"""
     replied = msg.reply_to_message
     quoted = _quoted(msg, replied)
-    images = await media.image_data_urls(bot, msg, replied)
+    own, theirs = await media.image_data_urls(bot, msg, replied)
+    images = own + theirs
     if not question and not quoted and not images and not note:
         await rich.send_rich(msg, render.plain_to_html(t("nudge")), t("nudge"))
         return None
-    own_image = bool(images) and not quoted
-    text = _join(question, note) or (t("look_image") if own_image else t("comment_default"))
+    text = _join(question, note) or (t("look_image") if own else t("comment_default"))
     if quoted:
         text = quoted + "\n\n" + t("question_about_quote", name=prompt.person_label(msg.from_user), question=text)
     else:
         text = prompt.asked_by(msg, text)
+    text = _join(text, prompt.image_note(msg.from_user, len(own), replied, len(theirs)))
     quoted_text = (replied.text or replied.caption or "") if replied else ""
     # 档案附上提问者，以及被引用消息的真正作者（不是 bot 自己、不是频道时）
     author = (_author_id(replied) if quoted and replied is not None and replied.from_user is not None

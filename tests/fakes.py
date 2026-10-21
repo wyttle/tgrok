@@ -89,7 +89,7 @@ class FakeMsg:
     def get_bot(self):
         return _RichApi(self)
 
-    async def reply_text(self, text, parse_mode=None, reply_markup=None):
+    async def reply_text(self, text, parse_mode=None, reply_markup=None, do_quote=True):
         fs = FakeSent(self.log)
         fs.text = text
         fs.message_id = len(self.sent) + 1

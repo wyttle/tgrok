@@ -1,6 +1,7 @@
-"""关键词直接回复：管理员用 /kv 增删，群友叫到 bot 时正好发了关键词就直接回，不调模型、不记忆。"""
+"""关键词直接回复：管理员用 /kv 增删；谁发了一整条正好是关键词的消息就直接发回复，不调模型、不记忆。"""
 
-from fakes import CTX, FakeMsg, capture_replies, group, mention, ns, run, update_of, user
+from fakes import CTX, NOW, FakeMsg, capture_replies, group, mention, ns, run, update_of, user
+from telegram import Message
 
 from tgrok import autoreply, commands, conversations, handlers, recent, tg_auth
 from tgrok.memory import store
@@ -21,20 +22,23 @@ def test_keyword_is_answered_without_the_model_or_memory(monkeypatch):
     asked = capture_replies(monkeypatch)
     tg_auth.allowed_users.add(5)
     assert "群规" in _kv("/kv 群规=第一条：别发广告\n第二条：别刷屏")
-    chat, alice = group(-80), user(5, "Alice")
+    chat, alice, stranger = group(-80), user(5, "Alice"), user(6, "路人")
     sent = []
 
-    async def fake_send(target, html, plain, markup=None):
-        sent.append(plain)
+    async def fake_send(target, html, plain, markup=None, quote=True):
+        sent.append((plain, quote))
         return []
 
     monkeypatch.setattr(handlers.rich, "send_rich", fake_send)
+    reply = ("第一条：别发广告\n第二条：别刷屏", False)  # 直接发在群里，不引用对方那条
     run(handlers.handle_message(update_of(mention(1, chat, alice, "  群规 ")), CTX))
-    assert sent == ["第一条：别发广告\n第二条：别刷屏"] and not asked  # 没调模型
+    run(handlers.handle_message(update_of(Message(2, NOW, chat, from_user=stranger, text="群规")), CTX))
+    assert sent == [reply, reply] and not asked  # 没 @bot、不在白名单也触发；都没调模型
     assert store.search_messages(-80, "") == [] and conversations.get(-80, 1) is None  # 没记忆、没对话历史
     assert "别发广告" not in recent.block(-80, 99, since=0)  # bot 的回复没进最近群聊（群友那句照常记）
-    run(handlers.handle_message(update_of(mention(2, chat, alice, "群规是啥")), CTX))
-    assert len(asked) == 1 and len(sent) == 1  # 不是整句等于关键词：照常交给模型
+    run(handlers.handle_message(update_of(Message(3, NOW, chat, from_user=stranger, text="群规是啥")), CTX))
+    run(handlers.handle_message(update_of(mention(4, chat, alice, "群规是啥")), CTX))
+    assert len(sent) == 2 and len(asked) == 1  # 不是整句等于关键词：没叫 bot 就不理，叫了照常交给模型
 
 
 def test_admin_can_overwrite_delete_and_save_from_a_replied_message():

@@ -179,7 +179,7 @@ def test_slow_telegram_edit_does_not_hold_up_the_next_model_round():
             await super().edit_text(text, parse_mode, reply_markup)
 
     class SlowMsg(FakeMsg):
-        async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        async def reply_text(self, text, parse_mode=None, reply_markup=None, do_quote=True):
             fs = SlowSent(self.log)
             fs.text, fs.message_id = text, 1
             self.sent.append(fs)
@@ -284,7 +284,7 @@ def test_network_error_on_intermediate_edit_does_not_truncate():
             await super().edit_text(text, parse_mode, reply_markup)
 
     class FlakyMsg(FakeMsg):
-        async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        async def reply_text(self, text, parse_mode=None, reply_markup=None, do_quote=True):
             fs = FlakySent(self.log)
             fs.text = text
             self.sent.append(fs)
@@ -313,7 +313,7 @@ def test_final_edit_timing_out_once_is_retried():
             await super().edit_text(text, parse_mode, reply_markup)
 
     class OnceMsg(FakeMsg):
-        async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        async def reply_text(self, text, parse_mode=None, reply_markup=None, do_quote=True):
             fs = OnceSent(self.log)
             fs.text, fs.message_id = text, 1
             self.sent.append(fs)

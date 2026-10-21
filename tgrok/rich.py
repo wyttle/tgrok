@@ -51,11 +51,12 @@ def _markup(markup: InlineKeyboardMarkup | None) -> dict:
 
 
 async def send_rich(target: Message, html: str, plain: str,
-                    markup: InlineKeyboardMarkup | None = None) -> list[Message]:
-    """回复 target 发一条富文本消息；被拒绝时改发纯文本（可能拆成几条）。返回发出的消息。"""
-    payload = {"chat_id": target.chat_id, "rich_message": {"html": html},
-               "reply_parameters": {"message_id": target.message_id, "allow_sending_without_reply": True},
-               **_markup(markup)}
+                    markup: InlineKeyboardMarkup | None = None, quote: bool = True) -> list[Message]:
+    """在 target 所在的聊天发一条富文本消息（quote=True 时作为对它的回复）；被拒绝时改发纯文本（可能拆成几条）。
+    返回发出的消息。"""
+    payload = {"chat_id": target.chat_id, "rich_message": {"html": html}, **_markup(markup)}
+    if quote:
+        payload["reply_parameters"] = {"message_id": target.message_id, "allow_sending_without_reply": True}
     if getattr(target, "is_topic_message", False) and getattr(target, "message_thread_id", None):
         payload["message_thread_id"] = target.message_thread_id
     try:
@@ -65,7 +66,8 @@ async def send_rich(target: Message, html: str, plain: str,
     parts = split_plain(plain)
     sent = []
     for i, part in enumerate(parts):
-        sent.append(await target.reply_text(part, reply_markup=markup if i == len(parts) - 1 else None))
+        sent.append(await target.reply_text(part, reply_markup=markup if i == len(parts) - 1 else None,
+                                            do_quote=quote))
     return sent
 
 

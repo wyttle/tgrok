@@ -351,7 +351,7 @@ STRINGS = {
         "kv_usage": (
             "用法：\n/kv 词=回复（回复可以多行，同一个词再写一次就是覆盖）\n"
             "回复某条消息发 /kv 词：用那条消息的文字当回复\n/kv del 词：删除\n/kv：查看全部\n"
-            "群友叫到 bot 时（私聊、@bot 或回复 bot）发的内容正好是这个词，就直接回存好的内容，不调模型也不记忆。"
+            "有人发的一整条消息正好是这个词（不用 @bot，带 @bot 也行），bot 就直接把回复发到群里，不调模型也不记忆。"
         ),
         "kv_saved": "已保存：「{trigger}」",
         "kv_removed": "已删除：「{trigger}」",
@@ -789,8 +789,8 @@ STRINGS = {
         "kv_usage": (
             "Usage:\n/kv word=reply (the reply can span lines; setting a word again overwrites it)\n"
             "Reply to a message with /kv word to use that message's text as the reply\n/kv del word: delete\n"
-            "/kv: list all\nWhen someone addresses the bot (private chat, @bot, or a reply to the bot) with exactly "
-            "that word, the bot sends the saved reply without calling the model or remembering anything."
+            "/kv: list all\nWhenever a whole message is exactly that word (with or without @bot), the bot posts the "
+            "saved reply in the chat without calling the model or remembering anything."
         ),
         "kv_saved": "Saved: \"{trigger}\"",
         "kv_removed": "Deleted: \"{trigger}\"",

@@ -48,7 +48,7 @@ tgrok/
 |   |-- notes.py       条目的增改删校验、字数上限、到期和渲染
 |   `-- consolidate.py 后台整理：读新记录，让模型提出增改删逐条执行
 |-- slang.py           梗词典：按词保存多种带语境的用法、按消息命中注入参考
-|-- autoreply.py       关键词直接回复（/kv）：叫到 bot 的内容正好是关键词就回存好的文字，不调模型、不记忆
+|-- autoreply.py       关键词直接回复（/kv）：整条消息正好是关键词就发存好的文字，不用 @、不调模型、不记忆
 `-- llm/
     |-- __init__.py    按配置装配主模型、备用模型和 Gemini 帮手模型的 adapter
     |-- base.py        RoundResult、BaseAdapter（共用的降级重试循环）、watch_idle 空闲看门狗、错误分类
@@ -174,7 +174,7 @@ Telegram update
 - 后台维护：`app.post_init` 调用 `memory.start_maintenance`，先迁移旧的 `MEMORY_FILE`，再每分钟跑一次 `consolidate.tick`：每个聊天最多每 `MEMORY_CONSOLIDATE_INTERVAL` 分钟整理一次，攒够 `MEMORY_CONSOLIDATE_MIN` 条新记录（或最早一条放了一天）才整理；同时清掉过期条目和超过 `MEMORY_ARCHIVE_DAYS` 天的记录。整理先用帮手模型，失败再用主模型、备用模型。`consolidate._running` 防止同一聊天并发整理。
 - 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只存进原始记录，不逐条请求模型，由后台整理处理。
 - `slang._entries`：梗词典，按「作用域|词」存，每个词最多 3 种用法，新的在前；本群用法排在通用用法前。只把这条消息和被引用内容里出现了的词附上（最多 5 个，单字词只在 12 字以内的短句里算命中）。写入 `SLANG_FILE`，超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
-- `autoreply` 表（`MEMORY_DB`）：关键词 → 回复，关键词按小写、合并空白匹配。`handlers.handle_message` 鉴权之后、拼对话之前查：去掉 @bot 后整句等于关键词就直接发回复并返回，不进对话历史、最近群聊（群友那句照常记）和长期记忆。管理员用 `/kv` 增删查。
+- `autoreply` 表（`MEMORY_DB`）：关键词 → 回复，关键词按小写、合并空白匹配。`handlers.handle_message` 在记完最近群聊后、判断要不要回之前就查：整条消息（去掉 @bot）正好是关键词就把回复直接发到聊天里（不引用原消息）并返回，不管叫没叫到 bot、在不在白名单；不调模型，不进对话历史、长期记忆和 bot 的最近回复。管理员用 `/kv` 增删查。
 - 找图（`send_image` 的 query）：配了 `GEMINI_MEDIA_MODEL` 时只发 Gemini 确认对题的候选；全部不对题、超时（`CHECK_TIMEOUT`）或回答看不懂就不发，告诉模型没找到。没配 Gemini 没法核对，才用排名第一的。随回复发出的图片消息 id 也记进对话历史，群友回复那张图也能接着聊。
 - 回复格式：系统提示词附 `format_note`（空行分段、只用白名单 HTML 标签、短回复不加标签、长回复细节放进 `<blockquote expandable>`、链接放末尾）。富文本的 html 会把换行压成空格，所以 `render` 把空行分出的段落包成 `<p>`、段内换行变 `<br>`；可折叠引用只能装行内内容，里面的代码块改成行内代码；Telegram 自己的解析器很宽松（未闭合、未知标签都直接吞掉），白名单和转义由 `render` 负责。流式过程中每次编辑都是配平好的富文本，末尾挂光标；正文超过 `rich.RICH_CHARS` 时用 `render.cut` 在段落边界切开另起一条。对话历史留模型原文（带标签），最近群聊和原始记录存纯文本。
 

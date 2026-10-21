@@ -144,7 +144,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `/deluser 123456789` | remove user(s) from the whitelist |
 | `/listusers` | show the current whitelist |
 | `/stats` | model calls and tokens for today and the last 7 days, by feature (replies, research, search, media, memory upkeep) and model |
-| `/kv` | canned replies: `/kv word=reply` adds or overwrites (multi-line replies are fine; or reply to a message with `/kv word` to use its text), `/kv del word` deletes, `/kv` lists. When someone addresses the bot (private chat, @bot, or a reply to the bot) with exactly that word, the bot sends the saved reply without calling the model or remembering anything |
+| `/kv` | canned replies: `/kv word=reply` adds or overwrites (multi-line replies are fine; or reply to a message with `/kv word` to use its text), `/kv del word` deletes, `/kv` lists. Whenever anyone sends a message that is exactly that word (no @ needed), the bot posts the saved reply in the chat (not as a reply) without calling the model or remembering anything |
 | `/memory` | show this chat's memory entries with their numbers (admins; anyone authorized in a private chat) |
 | `/forget [numbers]` | delete the listed entries, or with no numbers clear this chat's memory and log (same permissions) |
 | `/forgetme` | delete your profile and messages in every chat (authorized users) |

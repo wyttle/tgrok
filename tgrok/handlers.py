@@ -188,6 +188,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     job = media.prefetch(bot, msg)
     if msg.from_user.is_bot:
         return
+    canned = autoreply.lookup(extract_question(msg, bot.username))
+    if canned is not None:
+        # 关键词直接回复：整条消息（去掉 @bot）正好是关键词就发，不管叫没叫到 bot、是不是白名单；
+        # 直接发在聊天里，不引用对方那条；不调模型，也不记进对话历史、长期记忆和 bot 的最近回复
+        logger.info("关键词直接回复「%s」：%s（%s）", logs.one_line(msg.text or msg.caption or "", 40),
+                    msg.from_user.full_name, msg.from_user.id)
+        await rich.send_rich(msg, render.plain_to_html(canned), canned, quote=False)
+        return
     if config.ENABLE_VISION:
         # 被动记录相册成员（在任何提前 return 之前），供之后回复相册时取整组图片
         media.remember_album(msg)
@@ -204,12 +212,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     question = extract_question(msg, bot.username)
-    canned = autoreply.lookup(question)
-    if canned is not None:
-        # 关键词直接回复：不调模型，也不记进对话历史、最近群聊和长期记忆
-        logger.info("关键词直接回复「%s」：%s（%s）", logs.one_line(question, 40), msg.from_user.full_name, msg.from_user.id)
-        await rich.send_rich(msg, render.plain_to_html(canned), canned)
-        return
     req = logs.begin()
     where = "私聊" if msg.chat.type == "private" else f"群「{msg.chat.title or ''}」（{msg.chat_id}）"
     logger.info("收到 %s，%s（%s）%s：%s", where, msg.from_user.full_name, msg.from_user.id,

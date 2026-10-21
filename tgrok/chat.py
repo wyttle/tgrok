@@ -258,10 +258,11 @@ async def stream_reply(msg: Message, history: list[dict], keep: Keep | None = No
         # 换了备用模型就在回复末尾注明；提示只用于显示，不进对话历史
         ids, answer = await bubble.finish(models.note, draft)
         if ids and images:
-            sent = await bubble.send_images(images)
-            if sent:  # 记进对话历史：追问时模型知道自己发过哪些图
-                answer += "\n\n" + t("images_sent_note", n=sent, captions="；".join(
-                    i.caption or i.source for i in images[:sent]))
+            photo_ids = await bubble.send_images(images)
+            if photo_ids:  # 记进对话历史：追问时模型知道自己发过哪些图；回复图片那条消息也能接着聊
+                ids = ids + photo_ids
+                answer += "\n\n" + t("images_sent_note", n=len(photo_ids), captions="；".join(
+                    i.caption or i.source for i in images[:len(photo_ids)]))
         return ids, answer
     finally:
         send_image.outbox.reset(token)

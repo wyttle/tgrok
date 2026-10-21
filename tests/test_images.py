@@ -58,6 +58,39 @@ def test_image_by_query_picks_the_first_candidate_gemini_approves(monkeypatch):
     assert msg.media == [("photo", jpg, None)]
 
 
+def test_unverified_candidates_are_not_sent(monkeypatch):
+    # 线上把光头强当成「司凤图」发了出去：没确认对题的候选以前会被当兜底发出
+    config.GEMINI_MEDIA_MODEL = "gemini-x"
+
+    async def search(query, n=8):
+        return ["https://a.com/1.png", "https://b.com/2.png"]
+
+    async def fetch(url):
+        return PNG, "image/png"
+
+    async def unsure(data, mime, question):
+        return None  # 回答看不懂（超时、出错同理）
+
+    monkeypatch.setattr(web, "search_images", search)
+    monkeypatch.setattr(web, "fetch_image", fetch)
+    monkeypatch.setattr(viewer, "check", unsure)
+    rounds = _two_rounds({"query": "司凤版封面"})
+    msg = FakeMsg()
+    run(chat.stream_reply(msg, HIST))
+    assert msg.media == [] and "没找到" in rounds[1][-1]["content"]
+
+
+def test_photo_message_ids_are_returned_so_replies_to_the_photo_keep_context(monkeypatch):
+    async def fetch(url):
+        return PNG, "image/png"
+
+    monkeypatch.setattr(web, "fetch_image", fetch)
+    _two_rounds({"url": "https://example.com/wall.png"})
+    msg = FakeMsg()
+    ids, _ = run(chat.stream_reply(msg, HIST))
+    assert ids == [msg.sent[0].message_id, 901]  # 正文那条和图片那条都记进对话历史
+
+
 def test_fake_image_and_nothing_found_are_reported_to_the_model(monkeypatch):
     async def html_as_image(url):
         return b"<html>hotlink denied</html>", "image/jpeg"

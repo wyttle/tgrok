@@ -49,36 +49,36 @@ async def _download(url: str) -> Image | None:
     return Image(data, mime, "", url) if mime else None
 
 
-CHECK_TIMEOUT = 12  # 对题检查最多等几秒；等不到就当没检查
+CHECK_TIMEOUT = 20  # 对题检查最多等几秒；等不到就算没核对上
 
 
 async def _matches(image: Image, query: str) -> bool | None:
-    """让 Gemini 看一眼这张图是不是对题：True 对题、False 不对题、None 不确定（没配 Gemini、超时或出错）。"""
-    if not config.GEMINI_MEDIA_MODEL:
-        return None
+    """让 Gemini 看一眼这张图是不是对题：True 对题、False 不对题、None 不确定（超时、出错或回答看不懂）。"""
     try:
-        return await asyncio.wait_for(viewer.check(image.data, image.mime, t("image_check", query=query)),
-                                      CHECK_TIMEOUT)
+        verdict = await asyncio.wait_for(viewer.check(image.data, image.mime, t("image_check", query=query)),
+                                         CHECK_TIMEOUT)
     except Exception as e:
         logger.info("图片对题检查失败（%s）：%s", type(e).__name__, image.source)
         return None
+    logger.info("图片对题检查「%s」：%s %s", query, {True: "对题", False: "不对题", None: "看不懂"}[verdict],
+                image.source)
+    return verdict
 
 
 async def _find(query: str) -> Image | None:
-    """按关键词搜图：并发下载前几张候选、并发检查；按搜索排名看结果，排在前面的一确认对题就用它，
-    不等后面的检查。都没法确认时用排名最前、没被判为不对题的那张。"""
+    """按关键词搜图：并发下载前几张候选。配了 GEMINI_MEDIA_MODEL 时并发让它核对，按搜索排名取第一张
+    确认对题的，不等后面的检查；一张都没确认（不对题、超时或出错）就不发，免得发错图。
+    没配 Gemini 没法核对，只能用排名最前的那张。"""
     urls = (await web.search_images(query))[:CANDIDATES]
     images = [i for i in await asyncio.gather(*(_download(u) for u in urls)) if i is not None]
+    if not config.GEMINI_MEDIA_MODEL:
+        return images[0] if images else None
     checks = [asyncio.create_task(_matches(i, query)) for i in images]
-    fallback = None
     try:
         for image, check in zip(images, checks):
-            verdict = await check
-            if verdict:
+            if await check:
                 return image
-            if verdict is None and fallback is None:
-                fallback = image
-        return fallback
+        return None
     finally:
         for check in checks:
             check.cancel()

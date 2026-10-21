@@ -100,17 +100,22 @@ class FakeMsg:
     async def reply_chat_action(self, action):
         self.actions.append(action)
 
+    def _sent_media(self, kind, content, caption):
+        self.media.append((kind, content, caption))
+        return ns(message_id=900 + len(self.media))
+
     async def reply_photo(self, photo, caption=None):
-        self.media.append(("photo", photo, caption))
+        return self._sent_media("photo", photo, caption)
 
     async def reply_animation(self, animation, caption=None):
-        self.media.append(("animation", animation, caption))
+        return self._sent_media("animation", animation, caption)
 
     async def reply_document(self, document, filename=None, caption=None):
-        self.media.append(("document", document, caption))
+        return self._sent_media("document", document, caption)
 
     async def reply_media_group(self, media):
         self.media.append(("group", [m.media for m in media], [m.caption for m in media]))
+        return [ns(message_id=950 + i) for i in range(len(media))]
 
 
 def chunk_text(text):

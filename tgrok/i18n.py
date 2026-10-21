@@ -347,6 +347,18 @@ STRINGS = {
         "cmd_deluser": "移除白名单用户",
         "cmd_listusers": "查看白名单",
         "cmd_stats": "查看模型用量（今天和近 7 天）",
+        "cmd_kv": "关键词直接回复：/kv 词=回复，/kv del 词，/kv 查看",
+        "kv_usage": (
+            "用法：\n/kv 词=回复（回复可以多行，同一个词再写一次就是覆盖）\n"
+            "回复某条消息发 /kv 词：用那条消息的文字当回复\n/kv del 词：删除\n/kv：查看全部\n"
+            "群友叫到 bot 时（私聊、@bot 或回复 bot）发的内容正好是这个词，就直接回存好的内容，不调模型也不记忆。"
+        ),
+        "kv_saved": "已保存：「{trigger}」",
+        "kv_removed": "已删除：「{trigger}」",
+        "kv_not_found": "没有「{trigger}」这个关键词",
+        "kv_empty": "还没有关键词。用 /kv 词=回复 添加。",
+        "kv_list": "关键词（{n} 个）：\n{lines}",
+        "kv_line": "· {trigger} → {reply}",
         "stats_period": "【{name}】{calls} 次调用，输入 {tin} / 输出 {tout} token",
         "stats_periods": {"today": "今天", "week": "近 7 天"},
         "stats_line": "· {feature} {model}：{calls} 次{fails}，输入 {tin} / 输出 {tout}，平均 {secs:.1f} 秒",
@@ -773,6 +785,19 @@ STRINGS = {
         "cmd_deluser": "Remove user from whitelist",
         "cmd_listusers": "Show whitelist",
         "cmd_stats": "Model usage (today and last 7 days)",
+        "cmd_kv": "Canned replies: /kv word=reply, /kv del word, /kv to list",
+        "kv_usage": (
+            "Usage:\n/kv word=reply (the reply can span lines; setting a word again overwrites it)\n"
+            "Reply to a message with /kv word to use that message's text as the reply\n/kv del word: delete\n"
+            "/kv: list all\nWhen someone addresses the bot (private chat, @bot, or a reply to the bot) with exactly "
+            "that word, the bot sends the saved reply without calling the model or remembering anything."
+        ),
+        "kv_saved": "Saved: \"{trigger}\"",
+        "kv_removed": "Deleted: \"{trigger}\"",
+        "kv_not_found": "No keyword \"{trigger}\"",
+        "kv_empty": "No keywords yet. Add one with /kv word=reply.",
+        "kv_list": "Keywords ({n}):\n{lines}",
+        "kv_line": "· {trigger} → {reply}",
         "stats_period": "[{name}] {calls} calls, {tin} in / {tout} out tokens",
         "stats_periods": {"today": "Today", "week": "Last 7 days"},
         "stats_line": "· {feature} {model}: {calls} calls{fails}, {tin} in / {tout} out, avg {secs:.1f}s",

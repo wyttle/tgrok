@@ -303,30 +303,31 @@ class Bubble:
             return [], ""
         return self.answer_ids, self.finalized.strip()
 
-    async def send_images(self, images: list) -> int:
-        """正文定稿后把 send_image 攒下的图片发出去（回复提问那条消息），返回发出了几张。
+    async def send_images(self, images: list) -> list[int]:
+        """正文定稿后把 send_image 攒下的图片发出去（回复提问那条消息），返回发出的消息 id（一张图一个）。
         一张发照片（GIF 发动图），几张发成一组；照片发不出去（尺寸、格式不合 Telegram 要求）时改按文件发。"""
+        ids: list[int] = []
         try:
             if len(images) > 1 and all(i.mime != "image/gif" for i in images):
                 try:
-                    await self.msg.reply_media_group(
+                    sent = await self.msg.reply_media_group(
                         [InputMediaPhoto(i.data, caption=i.caption or None) for i in images])
-                    return len(images)
+                    return [m.message_id for m in sent]
                 except BadRequest as e:
                     logger.warning("相册发送失败，逐张发：%s", e)
-            sent = 0
             for image in images:
                 try:
                     if image.mime == "image/gif":
-                        await self.msg.reply_animation(image.data, caption=image.caption or None)
+                        m = await self.msg.reply_animation(image.data, caption=image.caption or None)
                     else:
-                        await self.msg.reply_photo(image.data, caption=image.caption or None)
+                        m = await self.msg.reply_photo(image.data, caption=image.caption or None)
                 except BadRequest as e:
                     logger.warning("照片发送失败，改按文件发：%s", e)
                     ext = image.mime.split("/")[-1].replace("jpeg", "jpg")
-                    await self.msg.reply_document(image.data, filename=f"image.{ext}", caption=image.caption or None)
-                sent += 1
-            return sent
+                    m = await self.msg.reply_document(image.data, filename=f"image.{ext}",
+                                                      caption=image.caption or None)
+                ids.append(m.message_id)
+            return ids
         except TelegramError as e:
             logger.warning("发送图片失败：%s: %s", type(e).__name__, e)
-            return 0
+            return ids

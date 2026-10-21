@@ -5,7 +5,7 @@ from datetime import datetime
 from fakes import BOT_USER, CTX, NOW, capture_replies, group, mention, ns, run, update_of, user
 from telegram import Message, MessageEntity, MessageOriginUser, PhotoSize, Sticker, Update
 
-from tgrok import app, config, conversations, handlers, media, prompt, tg_auth
+from tgrok import app, config, conversations, handlers, media, prompt, recent, tg_auth
 from tgrok.i18n import t
 
 
@@ -136,6 +136,23 @@ def test_recent_group_chat_is_attached_with_who_said_what(monkeypatch):
     run(handlers.handle_message(update_of(follow), CTX))
     turn = asked[-1][-1]["content"]
     assert "小李（id 6）：那就烧烤吧" in turn and "今晚吃火锅" not in turn
+
+
+def test_bot_keeps_seeing_its_own_recent_replies_in_a_busy_group(monkeypatch):
+    # 线上：群里 28 分钟 99 条消息，最近 15 条只盖住四五分钟，bot 之前的回答又被截到 200 字，接不上自己说过的话
+    asked = capture_replies(monkeypatch)
+    config.RECENT_CHAT_COUNT = 3
+    tg_auth.allowed_users.add(5)
+    chat, li, qiang = group(), user(6, "小李"), user(5, "阿强")
+    long_answer = "开头。" + "中间细节" * 60 + "结尾的关键数字是 42。"
+    recent.add_bot(chat.id, [80], long_answer, "阿强（id 5）", 5)
+    for i in range(81, 87):
+        run(handlers.handle_message(update_of(Message(i, NOW, chat, from_user=li, text=f"闲聊{i}")), CTX))
+    run(handlers.handle_message(update_of(mention(90, chat, qiang, "你刚才说的数字是多少")), CTX))
+    content = asked[-1][-1]["content"]
+    assert "关键数字是 42" in content  # bot 的回答没被挤掉，也没截掉结尾
+    assert "闲聊84" in content and "闲聊83" not in content  # 别人的消息照旧只带最近 3 条
+    assert content.index("关键数字") < content.index("闲聊84")  # 按时间先后排
 
 
 def test_forwarded_message_is_credited_to_its_original_author(monkeypatch):

@@ -35,7 +35,7 @@ os.environ.update({
 })
 os.environ.pop("SYSTEM_PROMPT", None)
 
-from tgrok import chat, config, conversations, llm, logs, media, recent, slang, tg_auth, viewer  # noqa: E402
+from tgrok import autoreply, chat, config, conversations, llm, logs, media, recent, slang, tg_auth, viewer  # noqa: E402
 from tgrok.db import db  # noqa: E402
 from tgrok.memory import consolidate  # noqa: E402
 
@@ -45,6 +45,8 @@ config.STREAM_EDIT_INTERVAL_PRIVATE = 0
 
 def _clear_state() -> None:
     db().executescript("DELETE FROM messages; DELETE FROM notes; DELETE FROM progress; DELETE FROM usage;")
+    for trigger, _ in autoreply.entries():
+        autoreply.remove(trigger)
     logs._current.set(None)
     consolidate._running.clear()
     slang._entries.clear()

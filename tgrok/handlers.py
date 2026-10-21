@@ -7,7 +7,7 @@ from telegram import Message, Update
 from telegram.constants import MessageEntityType
 from telegram.ext import ContextTypes, filters
 
-from . import config, conversations, logs, media, memory, prompt, recent, render, rich, viewer
+from . import autoreply, config, conversations, logs, media, memory, prompt, recent, render, rich, viewer
 from .chat import stream_reply
 from .i18n import t
 from .tg_auth import is_authorized
@@ -204,6 +204,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     question = extract_question(msg, bot.username)
+    canned = autoreply.lookup(question)
+    if canned is not None:
+        # 关键词直接回复：不调模型，也不记进对话历史、最近群聊和长期记忆
+        logger.info("关键词直接回复「%s」：%s（%s）", logs.one_line(question, 40), msg.from_user.full_name, msg.from_user.id)
+        await rich.send_rich(msg, render.plain_to_html(canned), canned)
+        return
     req = logs.begin()
     where = "私聊" if msg.chat.type == "private" else f"群「{msg.chat.title or ''}」（{msg.chat_id}）"
     logger.info("收到 %s，%s（%s）%s：%s", where, msg.from_user.full_name, msg.from_user.id,

@@ -16,7 +16,8 @@ from .db import db, schema
 from .i18n import t
 
 LINE_CHARS = 300
-BOT_LINE_CHARS = 200
+BOT_LINE_CHARS = 800  # bot 自己的回复截短了，群友追问「你刚才说的」时模型就只记得开头
+BOT_KEEP = 3  # 不管群里多热闹，都带上 bot 自己最近几条回复
 
 schema("""
 CREATE TABLE IF NOT EXISTS recent (
@@ -110,18 +111,24 @@ def _line(e: Entry) -> str:
 
 
 def block(chat_id: int, before_id: int, since: float, skip: set[int] = frozenset()) -> str:
-    """当前提问之前、since 之后的最近几条群聊（不含 skip 里的消息，比如被引用的那条）；没有返回空串。"""
+    """当前提问之前、since 之后的最近几条群聊（不含 skip 里的消息，比如被引用的那条）；没有返回空串。
+    群里热闹时最近 RECENT_CHAT_COUNT 条可能只盖住几分钟，所以 bot 自己最近的 BOT_KEEP 条回复不管多早都带上
+    （仍限 RECENT_CHAT_MINUTES 以内），群友问「你刚才说的」时接得上。"""
     if not config.RECENT_CHAT_COUNT:
         return ""
     since = max(since, time.time() - config.RECENT_CHAT_MINUTES * 60)
-    rows = db().execute(
-        "SELECT msg_id, ts, who, text, reply_to, media_uid, media_what FROM recent "
-        "WHERE chat_id = ? AND ts >= ? AND msg_id < ? ORDER BY msg_id DESC LIMIT ?",
-        (chat_id, since, before_id, config.RECENT_CHAT_COUNT + len(skip))).fetchall()
+    query = ("SELECT msg_id, ts, who, text, reply_to, media_uid, media_what FROM recent "
+             "WHERE chat_id = ? AND ts >= ? AND msg_id < ? {} ORDER BY msg_id DESC LIMIT ?")
+    rows = db().execute(query.format(""), (chat_id, since, before_id, config.RECENT_CHAT_COUNT + len(skip))).fetchall()
+    mine = db().execute(query.format("AND who = ?"),
+                        (chat_id, since, before_id, t("recent_you"), BOT_KEEP + len(skip))).fetchall()
     picked = [Entry(**dict(r)) for r in rows if r["msg_id"] not in skip][:config.RECENT_CHAT_COUNT]
+    seen = {e.msg_id for e in picked}
+    picked += [Entry(**dict(r)) for r in mine if r["msg_id"] not in skip and r["msg_id"] not in seen][:BOT_KEEP]
     if not picked:
         return ""
-    return "[" + t("recent_header") + "\n" + "\n".join(_line(e) for e in reversed(picked)) + "]"
+    picked.sort(key=lambda e: e.msg_id)
+    return "[" + t("recent_header") + "\n" + "\n".join(_line(e) for e in picked) + "]"
 
 
 def forget_chat(chat_id: int) -> int:

@@ -48,6 +48,7 @@ tgrok/
 |   |-- notes.py       条目的增改删校验、字数上限、到期和渲染
 |   `-- consolidate.py 后台整理：读新记录，让模型提出增改删逐条执行
 |-- slang.py           梗词典：按词保存多种带语境的用法、按消息命中注入参考
+|-- autoreply.py       关键词直接回复（/kv）：叫到 bot 的内容正好是关键词就回存好的文字，不调模型、不记忆
 `-- llm/
     |-- __init__.py    按配置装配主模型、备用模型和 Gemini 帮手模型的 adapter
     |-- base.py        RoundResult、BaseAdapter（共用的降级重试循环）、watch_idle 空闲看门狗、错误分类
@@ -164,7 +165,7 @@ Telegram update
 - `media.album_cache`：相册聚合缓存（只在开启视觉时收集）。
 - `media.watch_cache`：配了 `GEMINI_MEDIA_MODEL` 且主模型走工具循环时，bot 被叫到的那条消息和它引用的消息里的视频、语音等按（聊天, 消息 id）登记 file_id 和 bot，最多 300 条；`watch_media` 按 media_id 取出，有预读就等那一份，否则下载（官方 Bot API 上限 20MB）、整段内联发给 Gemini（`llm.gemini.gemini_client`，与 grounding 共用），转述回灌主模型。别的聊天的 media_id 取不到；重启后清空。有文字也有媒体时，文字和媒体说明都交给模型。
 - `viewer._jobs`：媒体预读任务，按 file_unique_id 存最近 500 份，最多同时 4 个（`viewer._slots`，换事件循环时重建）。转述好了就直接写进媒体说明；`viewer._used` 记着哪些转述已经交给过主模型，之后的 `watch_media` 按具体问题重新看。
-- `recent` 表（`MEMORY_DB`）：群消息和 bot 回复，每次写入时删掉超过 `RECENT_CHAT_MINUTES` 的；注入时按 `RECENT_CHAT_MINUTES` 和 `RECENT_CHAT_COUNT` 截取，不含当前提问和被引用的那条。记着发消息的人（bot 的回复记提问者），`/forget`、`/forgetme` 一起删。
+- `recent` 表（`MEMORY_DB`）：群消息和 bot 回复（bot 的回复每条最多 800 字），每次写入时删掉超过 `RECENT_CHAT_MINUTES` 的；注入时按 `RECENT_CHAT_MINUTES` 和 `RECENT_CHAT_COUNT` 截取，另外不管群里多热闹都带上 bot 自己最近 3 条回复，按时间排好；不含当前提问和被引用的那条。记着发消息的人（bot 的回复记提问者），`/forget`、`/forgetme` 一起删。
 - `usage` 表（`MEMORY_DB`）：`chat._call_model`（回复，每轮一行，失败也记）、`tools.research`（每个研究员）、`web._search_gemini_grounded`（搜索）、`viewer._generate`（媒体）、`memory.consolidate`（记忆整理）各记一行，保留 90 天。token 来自各适配器流里的用量（`RoundResult.usage`；OpenAI 兼容接口请求 `stream_options.include_usage`，后端拒绝时去掉并记住）、Gemini 的 `usage_metadata`、omp 的事件流。
 - `logs._current`：当前请求（`handlers.handle_message` 决定要回复时 `logs.begin()`），日志行带 `#编号`；子任务继承它。请求内的模型轮次、工具名和 token 累计在上面，结束时打一行汇总。日志同时写入 `LOG_DIR/bot.log`，每天零点换文件，留 `LOG_KEEP_DAYS` 天；httpx、Google SDK 的逐请求 INFO 压到 WARNING。
 - `memory.store`：`MEMORY_DB` 里的三张表。`messages`（+ `messages_fts`）是原始记录，三个字以上的检索词走 trigram 全文索引，更短的退回 LIKE；`msg_id` 是 Telegram 消息 id，（聊天, msg_id）唯一，同一条消息既旁听到又被引用时只记一次；`notes` 是精选条目，`user_id` 为空是群笔记，否则是这个人在这个聊天的档案，可带到期时间；`progress` 记每个聊天整理到哪条记录。所有读写都很小，直接在事件循环线程里同步执行。
@@ -173,6 +174,8 @@ Telegram update
 - 后台维护：`app.post_init` 调用 `memory.start_maintenance`，先迁移旧的 `MEMORY_FILE`，再每分钟跑一次 `consolidate.tick`：每个聊天最多每 `MEMORY_CONSOLIDATE_INTERVAL` 分钟整理一次，攒够 `MEMORY_CONSOLIDATE_MIN` 条新记录（或最早一条放了一天）才整理；同时清掉过期条目和超过 `MEMORY_ARCHIVE_DAYS` 天的记录。整理先用帮手模型，失败再用主模型、备用模型。`consolidate._running` 防止同一聊天并发整理。
 - 静默旁听：`MEMORY_OBSERVE_CHATS` 里的群，没叫到 bot 的消息只存进原始记录，不逐条请求模型，由后台整理处理。
 - `slang._entries`：梗词典，按「作用域|词」存，每个词最多 3 种用法，新的在前；本群用法排在通用用法前。只把这条消息和被引用内容里出现了的词附上（最多 5 个，单字词只在 12 字以内的短句里算命中）。写入 `SLANG_FILE`，超过 `SLANG_MAX_ENTRIES` 淘汰最久没命中的。
+- `autoreply` 表（`MEMORY_DB`）：关键词 → 回复，关键词按小写、合并空白匹配。`handlers.handle_message` 鉴权之后、拼对话之前查：去掉 @bot 后整句等于关键词就直接发回复并返回，不进对话历史、最近群聊（群友那句照常记）和长期记忆。管理员用 `/kv` 增删查。
+- 找图（`send_image` 的 query）：配了 `GEMINI_MEDIA_MODEL` 时只发 Gemini 确认对题的候选；全部不对题、超时（`CHECK_TIMEOUT`）或回答看不懂就不发，告诉模型没找到。没配 Gemini 没法核对，才用排名第一的。随回复发出的图片消息 id 也记进对话历史，群友回复那张图也能接着聊。
 - 回复格式：系统提示词附 `format_note`（空行分段、只用白名单 HTML 标签、短回复不加标签、长回复细节放进 `<blockquote expandable>`、链接放末尾）。富文本的 html 会把换行压成空格，所以 `render` 把空行分出的段落包成 `<p>`、段内换行变 `<br>`；可折叠引用只能装行内内容，里面的代码块改成行内代码；Telegram 自己的解析器很宽松（未闭合、未知标签都直接吞掉），白名单和转义由 `render` 负责。流式过程中每次编辑都是配平好的富文本，末尾挂光标；正文超过 `rich.RICH_CHARS` 时用 `render.cut` 在段落边界切开另起一条。对话历史留模型原文（带标签），最近群聊和原始记录存纯文本。
 
 ## 配置

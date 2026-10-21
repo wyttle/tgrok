@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from . import config, conversations, memory, recent, render, rich, slang, usage
+from . import autoreply, config, conversations, memory, recent, render, rich, slang, usage
 from .memory import notes, store
 from .i18n import t
 from .prompt import person_label
@@ -165,6 +165,34 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, usage.report()[:4000])
 
 
+_DELETE_WORDS = ("del", "rm", "删", "删除")
+
+
+async def cmd_kv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """关键词直接回复（管理员）：/kv 列出；/kv 词=回复 新增或覆盖（回复可以多行）；
+    回复某条消息发 /kv 词，用那条消息的文字当回复；/kv del 词 删除。"""
+    msg = update.effective_message
+    parts = (msg.text or "").split(maxsplit=1)
+    raw = parts[1].strip() if len(parts) > 1 else ""
+    if not raw:
+        items = autoreply.entries()
+        lines = "\n".join(t("kv_line", trigger=k, reply=" ".join(v.split())[:60]) for k, v in items)
+        await _reply(update, t("kv_list", n=len(items), lines=lines)[:4000] if items else t("kv_empty"))
+        return
+    head, _, rest = raw.partition(" ")
+    if head.lower() in _DELETE_WORDS and rest.strip():
+        removed = autoreply.remove(rest)
+        await _reply(update, t("kv_removed" if removed else "kv_not_found", trigger=rest.strip()))
+        return
+    cut = min((i for i in (raw.find("="), raw.find("＝")) if i >= 0), default=-1)
+    trigger, sep, reply = (raw[:cut], True, raw[cut + 1:]) if cut >= 0 else (raw, False, "")
+    if not sep:
+        replied = msg.reply_to_message
+        reply = (replied.text or replied.caption or "") if replied else ""
+    saved = autoreply.put(trigger, reply)
+    await _reply(update, t("kv_saved", trigger=saved) if saved else t("kv_usage"))
+
+
 @dataclass(frozen=True)
 class Command:
     names: tuple[str, ...]
@@ -186,6 +214,7 @@ COMMANDS = [
     Command(("deluser",), cmd_deluser, _admin, "cmd_deluser", True),
     Command(("listusers",), cmd_listusers, _admin, "cmd_listusers", True),
     Command(("stats",), cmd_stats, _admin, "cmd_stats", True),
+    Command(("kv",), cmd_kv, _admin, "cmd_kv", True),
     Command(("memory",), cmd_memory, _manages_memory, "cmd_memory", True),
     Command(("forget",), cmd_forget, _manages_memory, "cmd_forget", True),
     Command(("slang",), cmd_slang, _manages_memory, "cmd_slang", True),

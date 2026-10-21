@@ -179,7 +179,7 @@ Set `LLM_PROTOCOL` to choose the wire protocol:
 - `openai` (default): OpenAI-compatible `/chat/completions`, using `LLM_BASE_URL`.
 - `responses`: OpenAI Responses API `/responses`, using `LLM_BASE_URL`. Use it for models that only support tool calling there, such as `gpt-6.1-sol` (Chat Completions accepts those models only without tools). The bot's tools keep working; set reasoning effort with `LLM_EXTRA_BODY={"reasoning":{"effort":"low"}}`.
 - `gemini`: native Gemini through the google-genai SDK, using `GEMINI_BASE_URL` (empty means Google's official endpoint). Google Search and URL context run server-side, so the bot's own tool loop is bypassed.
-- `claude`: native Anthropic Messages API, using `LLM_BASE_URL`. Native thinking blocks, signatures, and tool-use semantics are preserved, and the bot's own search tools remain available.
+- `claude`: native Anthropic Messages API, using `LLM_BASE_URL`. Native thinking blocks, signatures, and tool-use semantics are preserved, and the bot's own search tools remain available. When `LLM_EXTRA_BODY` turns thinking on, a reply that starts without thinking is dropped and requested again, up to 4 times (some gateways silently drop thinking now and then, and the model then emits garbage).
 
 The old `GEMINI_NATIVE_SEARCH` and `CLAUDE_NATIVE` switches are no longer read: if they are still in `.env` without `LLM_PROTOCOL`, the bot refuses to start and says which value to use. Running `python configure.py` once rewrites them as `LLM_PROTOCOL`.
 

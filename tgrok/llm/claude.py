@@ -6,10 +6,16 @@ import re
 import anthropic
 
 from .. import config
-from .base import BaseAdapter, RequestOptions, RoundResult, Usage, error_text, tool_args, watch_idle
+from .base import BaseAdapter, RequestOptions, RoundResult, Usage, close_stream, error_text, tool_args, watch_idle
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
+# 开了 thinking 时最多发几次请求：前几次要求流先出思考块，最后一次不再检查、照单全收
+THINKING_ATTEMPTS = 4
+
+
+class ThinkingSkipped(Exception):
+    """要了 thinking，流的第一个内容块却不是思考块。"""
 
 
 class ClaudeAdapter(BaseAdapter):
@@ -53,9 +59,25 @@ class ClaudeAdapter(BaseAdapter):
             return True
         return super()._degrade(e, kind, opts)
 
-    async def _drain(self, stream, on_text) -> RoundResult:
+    def _wants_thinking(self) -> bool:
+        thinking = (self.endpoint.extra_body or {}).get("thinking") if self.extra_body_supported else None
+        return isinstance(thinking, dict) and thinking.get("type") not in (None, "disabled")
+
+    async def run_round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
+        # 有的网关（cpa）不时悄悄丢掉 thinking 参数，模型不思考就直接出字，常把提示词碎片、说话人标签或
+        # 英文推理当正文吐出来。这种流第一个块就认得出，那时还没有字交给 on_text：断开重发。
+        for attempt in range(1, THINKING_ATTEMPTS + 1):
+            stream = await self._create_stream(history, tools)
+            try:
+                return await self._drain(stream, on_text, attempt < THINKING_ATTEMPTS and self._wants_thinking())
+            except ThinkingSkipped:
+                logger.warning("Claude 流没有先思考（第 %d 次），断开重发", attempt)
+            finally:
+                await close_stream(stream)
+
+    async def _drain(self, stream, on_text, require_thinking: bool = False) -> RoundResult:
         usage = Usage()
-        calls, content = await drain_stream(stream, on_text, usage)
+        calls, content = await drain_stream(stream, on_text, usage, require_thinking)
         return RoundResult(calls=calls, content=content, usage=usage)
 
 
@@ -150,9 +172,11 @@ def _take_usage(reported, usage: Usage) -> None:
     usage.output = max(usage.output, getattr(reported, "output_tokens", None) or 0)
 
 
-async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dict[int, dict], str]:
+async def drain_stream(stream, on_text, usage: Usage | None = None,
+                       require_thinking: bool = False) -> tuple[dict[int, dict], str]:
     """消费 Anthropic 原生流：text_delta 交给 on_text，tool_use 块按 index 聚合，
     thinking 块（含签名）原样收集、挂到首个调用的扩展字段上以便续传时回传；token 用量写进 usage。
+    require_thinking 时第一个内容块不是思考块就抛 ThinkingSkipped（此时还没有正文交给 on_text）。
     """
     calls: dict[int, dict] = {}
     content = ""
@@ -168,6 +192,9 @@ async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dic
         elif etype == "content_block_start":
             block = event.content_block
             btype = getattr(block, "type", "")
+            if require_thinking and btype not in ("thinking", "redacted_thinking"):
+                raise ThinkingSkipped(btype)
+            require_thinking = False
             if btype == "tool_use":
                 calls[event.index] = {"id": getattr(block, "id", "") or "",
                                       "name": getattr(block, "name", "") or "",
@@ -184,6 +211,8 @@ async def drain_stream(stream, on_text, usage: Usage | None = None) -> tuple[dic
             dtype = getattr(delta, "type", "")
             if dtype == "text_delta":
                 text = getattr(delta, "text", "") or ""
+                if text and require_thinking:  # 没有块开头就直接来正文，同样是没思考
+                    raise ThinkingSkipped("text")
                 if text:
                     content += text
                     await on_text(text)

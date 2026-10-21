@@ -173,7 +173,7 @@ python bot.py
 - `openai`（默认）：OpenAI 兼容 `/chat/completions`，地址使用 `LLM_BASE_URL`。
 - `responses`：OpenAI Responses API `/responses`，地址使用 `LLM_BASE_URL`。`gpt-6.1-sol` 这类只在 Responses 上支持工具调用的模型要用它（这类模型在 Chat Completions 上只能不带工具）。bot 的工具照常可用；推理强度写在 `LLM_EXTRA_BODY={"reasoning":{"effort":"low"}}`。
 - `gemini`：通过 google-genai SDK 连接 Gemini 原生接口，地址使用 `GEMINI_BASE_URL`，留空连接 Google 官方。Google Search 和 URL context 在服务端执行，因此不走 bot 自带工具循环。
-- `claude`：Anthropic Messages API 原生协议，地址使用 `LLM_BASE_URL`。保留原生 thinking 块、签名与工具语义，bot 自带搜索工具仍可使用。
+- `claude`：Anthropic Messages API 原生协议，地址使用 `LLM_BASE_URL`。保留原生 thinking 块、签名与工具语义，bot 自带搜索工具仍可使用。`LLM_EXTRA_BODY` 里开了 thinking 时，回复没先思考就断开重发（有的中转会不时丢掉 thinking，模型直接输出乱话），最多 4 次。
 
 旧开关 `GEMINI_NATIVE_SEARCH` 和 `CLAUDE_NATIVE` 已不再读取：`.env` 里还有它们而没有 `LLM_PROTOCOL` 时，bot 启动时报错并提示该写成什么。重新运行一次 `python configure.py` 会自动改写成 `LLM_PROTOCOL`。
 

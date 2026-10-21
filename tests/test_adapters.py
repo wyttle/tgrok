@@ -178,6 +178,47 @@ def test_claude_lowers_max_tokens_and_drops_rejected_thinking():
     assert adapter.max_tokens_limit == 128000 and adapter.extra_body_supported is False
 
 
+def _answer(*blocks):
+    events = []
+    for i, (btype, text) in enumerate(blocks):
+        events.append(ns(type="content_block_start", index=i, content_block=ns(type=btype, thinking="", text="")))
+        delta = ns(type="thinking_delta", thinking=text) if btype == "thinking" else ns(type="text_delta", text=text)
+        events.append(ns(type="content_block_delta", index=i, delta=delta))
+    return stream_of(events + [ns(type="message_stop")])
+
+
+def test_claude_reconnects_when_the_gateway_drops_thinking():
+    # 线上：cpa 不时丢掉 thinking 参数，模型不思考就把「[Question] 在吗」、英文推理之类当正文吐出来
+    config.LLM_EXTRA_BODY = {"thinking": {"type": "adaptive"}}
+    bad = lambda: _answer(("text", "哥 (@x, id 1) [Question] 在吗"))  # noqa: E731
+    streams = [bad(), bad(), _answer(("thinking", "想想"), ("text", "在，说事"))]
+    seen, create = _recording(result=None)
+
+    async def serve(**kw):
+        await create(**kw)
+        return streams[len(seen) - 1]
+
+    got = []
+
+    async def sink(text):
+        got.append(text)
+
+    adapter = ClaudeAdapter(client=ns(messages=ns(create=serve)))
+    assert run(adapter.run_round(HIST, None, sink)).content == "在，说事"
+    assert got == ["在，说事"] and len(seen) == 3  # 坏的两次一个字都没发出去
+
+    streams[:] = [bad() for _ in range(claude.THINKING_ATTEMPTS)]
+    seen.clear()
+    assert run(adapter.run_round(HIST, None, _ignore)).content.startswith("哥")  # 次数用完：最后一次照单全收
+    assert len(seen) == claude.THINKING_ATTEMPTS
+
+    config.LLM_EXTRA_BODY = None
+    streams[:] = [bad()]
+    seen.clear()
+    assert run(ClaudeAdapter(client=ns(messages=ns(create=serve))).run_round(HIST, None, _ignore)).content.startswith("哥")
+    assert len(seen) == 1  # 没要 thinking 就不挑
+
+
 def test_gemini_stream_passes_text_and_dedupes_citations():
     a, a2, b = ns(uri="https://example.com/a", title="A"), ns(uri="https://example.com/a", title="A2"), \
         ns(uri="https://example.com/b", title="")

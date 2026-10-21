@@ -142,6 +142,7 @@ Telegram update
 - 工具成功与否由工具自己返回（`Outcome.ok`），进度结果行不靠文本形状判断。`web.py` 搜不到或读不到时抛 `WebError`，`str(e)` 就是给模型看的说明。
 - SDK 内建重试关闭（`max_retries=0`），重试只由 chat 控制。
 - OpenAI 兼容路径回传 Gemini 思考型模型的 `thought_signature`；Claude 原生收集 thinking 和签名，续传时恢复成原生块；Responses 把带 `encrypted_content` 的推理条目挂在首个工具调用上，续传时放回 input。
+- Claude 原生在 `LLM_EXTRA_BODY` 要了 thinking 时，流的第一个内容块不是思考块就断开重发（`claude.THINKING_ATTEMPTS` 次，最后一次不检查）：有的网关（cpa）不时丢掉 thinking，模型不思考就把说话人标签、提示词碎片或英文推理当正文吐出来，这时还没有字交给气泡。
 - `calculate` 只解释白名单 AST 节点，没有名字查找和属性访问；整数位数、幂指数、阶乘和表达式长度都有上限。
 - 网页正文提取运行在独立进程，避免 trafilatura 和 lxml 的 CPU 工作阻塞事件循环。
 - 气泡更新单飞且在后台执行，编辑的网络错误只丢该次显示、不打断生成；上一次更新还在途时进度刷新直接跳过，不让模型轮次和工具等 Telegram（群里被限流时一等就是几十秒）。定稿、取消和报错前先等在途编辑落地。占位消息被限流时等一下重发一次；还是发不出去（例如 bot 被踢出群）才取消本次生成。

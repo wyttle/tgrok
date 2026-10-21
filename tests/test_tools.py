@@ -21,6 +21,15 @@ def test_calculate_is_exact_and_handles_dates():
     assert calc.evaluate("date('2024-02-28') + days(1)").startswith("2024-02-29")
 
 
+def test_calculate_takes_several_expressions_percentages_and_thousands():
+    # 线上：模型一次传了「214.53/1.3628, 214.53 - 214.53/1.3628」，整次 failed，只好拆开重算
+    out = run(tools.REGISTRY["calculate"].run({"expression": "214.53/1.3628, 214.53 - 214.53/1.3628"}, None))
+    assert out.ok and out.content == "214.53/1.3628 = 157.418550044027\n214.53 - 214.53/1.3628 = 57.111449955973"
+    assert calc.evaluate("1+1; 1/0") == "1+1 = 2\n1/0: error: division by zero"  # 一个算不了不连累别的
+    assert calc.evaluate("1,234,567.5 / 2") == "617283.75" and calc.evaluate("max(1,234)") == "234"  # 括号里是参数
+    assert calc.evaluate("200 * 15%") == "30" and calc.evaluate("10 % 3") == "1" and calc.evaluate("(1+2)*3=") == "9"
+
+
 @pytest.mark.parametrize("bad", ["9**9**9", "factorial(5000)", "__import__('os')", "(1).__class__", "'a'*10", "1/0"])
 def test_calculate_rejects_unsafe_or_invalid_expressions(bad):
     with pytest.raises(calc.CalcError):

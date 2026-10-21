@@ -6,6 +6,7 @@
 """
 
 import ast
+import re
 import math
 import operator
 from datetime import date, datetime, timedelta
@@ -160,21 +161,63 @@ def _format(value) -> str:
     return str(value)
 
 
-def evaluate(expression: str) -> str:
-    """计算表达式，返回结果文本；表达式非法时抛 CalcError。"""
-    expr = (expression or "").strip()
-    if not expr:
-        raise CalcError("empty expression")
-    if len(expr) > MAX_EXPRESSION_CHARS:
-        raise CalcError("expression too long")
-    # 模型偶尔用数学书写习惯：^ 表示乘方、×÷ 表示乘除
-    expr = expr.replace("^", "**").replace("×", "*").replace("÷", "/")
+# 千分位逗号：数字后紧跟逗号再紧跟正好三位数字（1,234,567）。只在括号外认，括号里的逗号是函数参数
+_THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# 百分号：紧跟在数字后，且后面不是数字、名字或左括号（那样是取余：10 % 3）
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%(?!\s*[\w(.])")
+MAX_EXPRESSIONS = 20
+
+
+def _outside_parens(expr: str, pattern: re.Pattern, repl: str) -> str:
+    """只替换括号外的部分。"""
+    out, buf, depth = [], [], 0
+    for ch in expr:
+        if ch == "(" and depth == 0:
+            out.append(pattern.sub(repl, "".join(buf)))
+            buf = []
+        buf.append(ch)
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+            if depth == 0:
+                out.append("".join(buf))
+                buf = []
+    tail = "".join(buf)
+    out.append(pattern.sub(repl, tail) if depth == 0 else tail)
+    return "".join(out)
+
+
+def _normalize(expr: str) -> str:
+    # 模型偶尔用数学书写习惯：^ 表示乘方、×÷ 表示乘除、末尾写个等号
+    expr = expr.replace("^", "**").replace("×", "*").replace("÷", "/").rstrip().rstrip("=")
+    expr = _PERCENT_RE.sub(r"(\1/100)", expr)
+    return _outside_parens(expr, _THOUSANDS_RE, "")
+
+
+def _parts(expr: str) -> list[tuple[str, ast.expr]]:
+    """一次给的几个算式（逗号、分号或换行隔开）拆成 (原文, 语法树)；只有一个时原文为空。"""
     try:
-        tree = ast.parse(expr, mode="eval")
+        module = ast.parse(expr, mode="exec")
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         raise CalcError("invalid syntax") from None
+    nodes = []
+    for stmt in module.body:
+        if not isinstance(stmt, ast.Expr):
+            raise CalcError(f"unsupported syntax: {type(stmt).__name__}")
+        nodes += stmt.value.elts if isinstance(stmt.value, ast.Tuple) else [stmt.value]
+    if not nodes:
+        raise CalcError("empty expression")
+    if len(nodes) > MAX_EXPRESSIONS:
+        raise CalcError("too many expressions")
+    if len(nodes) == 1:
+        return [("", nodes[0])]
+    return [(ast.get_source_segment(expr, n) or ast.unparse(n), n) for n in nodes]
+
+
+def _value(node) -> str:
     try:
-        return _format(_eval(tree))
+        return _format(_eval(node))
     except CalcError:
         raise
     except ZeroDivisionError:
@@ -183,3 +226,26 @@ def evaluate(expression: str) -> str:
         raise CalcError("expression nested too deeply") from None
     except (OverflowError, ValueError, TypeError) as e:
         raise CalcError(str(e) or type(e).__name__) from None
+
+
+def evaluate(expression: str) -> str:
+    """计算表达式，返回结果文本；表达式非法时抛 CalcError。
+    一次给了几个算式（逗号、分号或换行隔开）时逐个算，每行「算式 = 结果」，算不了的那行写原因。"""
+    expr = (expression or "").strip()
+    if not expr:
+        raise CalcError("empty expression")
+    if len(expr) > MAX_EXPRESSION_CHARS:
+        raise CalcError("expression too long")
+    parts = _parts(_normalize(expr))
+    if len(parts) == 1:
+        return _value(parts[0][1])
+    lines, ok = [], False
+    for text, node in parts:
+        try:
+            lines.append(f"{text} = {_value(node)}")
+            ok = True
+        except CalcError as e:
+            lines.append(f"{text}: error: {e}")
+    if not ok:
+        raise CalcError("; ".join(lines))
+    return "\n".join(lines)

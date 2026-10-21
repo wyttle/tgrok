@@ -6,11 +6,15 @@
 
 import asyncio
 import contextvars
+import json
+import logging
 import time
 from dataclasses import dataclass, field
 
 from .. import llm
 from ..i18n import t
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -148,6 +152,11 @@ class RoundPlan:
                 outcomes[i] = outcome
 
         await asyncio.gather(*(run_group(name, idxs) for name, idxs in groups.items()))
+        for call, args, outcome in zip(self.calls, self._args, outcomes):
+            if not outcome.ok:
+                logger.warning("工具 %s 失败：%.120s → %.200s", call["function"]["name"],
+                               json.dumps(args, ensure_ascii=False) if args is not None
+                               else call["function"].get("arguments", ""), outcome.content)
         for line in self.lines:
             idxs = [i for i, owner in enumerate(self._line_of) if owner is line]
             tool = REGISTRY.get(self.calls[idxs[0]]["function"]["name"])

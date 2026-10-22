@@ -3,7 +3,7 @@
 import json
 
 import anthropic
-from fakes import HIST, bad_request, chunk_tool, ns, run, stream_of
+from fakes import HIST, bad_request, chunk_tool, ns, openai_adapter, run, stream_of
 from openai import BadRequestError
 
 from tgrok import config, llm, tools
@@ -34,6 +34,19 @@ def test_sdk_retries_are_disabled():
     # SDK 内建重试会按 Retry-After 静默睡 60s+，取消和自有重试全部失效
     assert OpenAIAdapter().client.max_retries == 0
     assert ClaudeAdapter().client.max_retries == 0
+
+
+def test_tool_names_renamed_by_the_gateway_are_mapped_back():
+    # 线上：cpa 把工具改名成 mcp__warrior_normal__crunch_research 发给模型，还原时偶尔只去掉 mcp__…__，
+    # 交回 crunch_research、identify_web_search，整轮工具 failed
+    async def create(messages, has_tools):
+        return stream_of([chunk_tool(0, "crunch_research", {"task": "x"}), chunk_tool(1, "identify_web_search", {"query": "q"}),
+                          chunk_tool(2, "mcp__warrior_normal__imitate_calculate", {}), chunk_tool(3, "made_up_tool", {})])
+
+    offered = [{"type": "function", "function": {"name": n, "description": "", "parameters": {}}}
+               for n in ("research", "web_search", "calculate")]
+    result = run(openai_adapter(create).run_round(HIST, offered, _ignore))
+    assert [result.calls[i]["name"] for i in sorted(result.calls)] == ["research", "web_search", "calculate", "made_up_tool"]
 
 
 def test_openai_stream_keeps_thought_signatures_and_splits_calls_without_index():

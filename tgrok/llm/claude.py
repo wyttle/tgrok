@@ -63,7 +63,7 @@ class ClaudeAdapter(BaseAdapter):
         thinking = (self.endpoint.extra_body or {}).get("thinking") if self.extra_body_supported else None
         return isinstance(thinking, dict) and thinking.get("type") not in (None, "disabled")
 
-    async def run_round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
+    async def _round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
         # 有的网关（cpa）不时悄悄丢掉 thinking 参数，模型不思考就直接出字，常把提示词碎片、说话人标签或
         # 英文推理当正文吐出来。这种流第一个块就认得出，那时还没有字交给 on_text：断开重发。
         for attempt in range(1, THINKING_ATTEMPTS + 1):

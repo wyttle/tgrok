@@ -54,6 +54,11 @@ class BaseAdapter:
 
     async def run_round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
         """跑一轮：tools 是 OpenAI function 格式的工具定义，None 表示这轮不挂工具。"""
+        result = await self._round(history, tools, on_text)
+        restore_tool_names(result.calls, tools)
+        return result
+
+    async def _round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
         stream = await self._create_stream(history, tools)
         try:
             return await self._drain(stream, on_text)
@@ -143,6 +148,22 @@ def sampling_kwargs() -> dict:
     if config.LLM_TOP_P is not None:
         kw["top_p"] = config.LLM_TOP_P
     return kw
+
+
+def restore_tool_names(calls: dict[int, dict], tools: list[dict] | None) -> None:
+    """cpa 转发时把每个工具改名伪装成 MCP 工具（research → mcp__warrior_normal__crunch_research），模型调用后
+    再改回来；偶尔只去掉了 mcp__…__ 那段，交回 crunch_research、identify_web_search。名字不在这轮给的工具里时，
+    去掉 mcp__…__ 和前面那个单词，剩下正好是给过的工具就按它算；历史里也记真名。"""
+    names = {tool["function"]["name"] for tool in tools or ()}
+    for slot in calls.values():
+        name = slot.get("name") or ""
+        if name in names:
+            continue
+        bare = name.rsplit("__", 1)[-1]
+        real = bare if bare in names else bare.split("_", 1)[-1]
+        if real in names:
+            logger.warning("模型调用的工具名 %s 被网关改过，按 %s 执行", name, real)
+            slot["name"] = real
 
 
 def assistant_tool_call_msg(calls: dict[int, dict], content: str) -> dict:

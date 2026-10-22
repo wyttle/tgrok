@@ -20,9 +20,9 @@ from .tools import ProgressLine
 
 logger = logging.getLogger(__name__)
 
-# 还没出正文时多久刷新一次进度（计时）。Telegram 建议同一聊天每秒最多一条，群里每分钟最多约 20 条，
-# 编辑也算在内，所以群里放慢
-TICK_PRIVATE, TICK_GROUP = 2.0, 4.0
+# 还没出正文时多久刷新一次进度（计时）。Telegram 同一聊天每秒最多一条，群里每分钟最多约 20 条（编辑也算），
+# 和正文编辑的间隔（STREAM_EDIT_INTERVAL_*）一样都顶着这个上限
+TICK_PRIVATE, TICK_GROUP = 1.0, 3.0
 TYPING_SECONDS = 4.5  # 「正在输入」状态在客户端显示约 5 秒，到期前续一次
 SHOW_ELAPSED_AFTER = 3  # 等满这么多秒才显示计时，秒回的请求不闪一下数字
 
@@ -134,6 +134,7 @@ class Bubble:
                 self.sent = msgs[-1]
                 return
             except RetryAfter as e:
+                logger.warning("编辑回复被 Telegram 限流，等 %.0f 秒", float(e.retry_after))
                 await asyncio.sleep(float(e.retry_after) + 0.5)
                 if not final:
                     return
@@ -207,6 +208,7 @@ class Bubble:
             else:
                 await self.sent.edit_text(body, reply_markup=self.markup)
         except RetryAfter as e:
+            logger.warning("刷新进度被 Telegram 限流，等 %.0f 秒", float(e.retry_after))
             await asyncio.sleep(float(e.retry_after) + 0.5)
         except TelegramError:
             pass

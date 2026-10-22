@@ -118,7 +118,8 @@ Telegram update
            -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
            -> research：每个研究员交给一个常驻的 omp --mode rpc 进程（只开 web_search 和 read，加载 hook，空的临时目录），
               同一轮的几个 research 合并成一个编号任务只跑一组（每组都要起 omp，同时起几组会把小内存机器挤到交换分区、全部超时）；
-              离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒时用 RPC 的 steer 让研究员停下搜索、用已有资料写报告；
+              离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒时用 RPC 的 abort_and_prompt 打断研究员（连同还在读的网页，已有结果保留），
+              让它用已有资料写报告（steer 要等手上这批工具跑完才送到，一个卡住的网页能拖一分钟）；
               超过 RESEARCH_TIMEOUT 或回复被取消时整组结束，超时日志记已做的步数和用量，启动没完成记成 startup timed out；
               失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
               每个研究员的主→备先后跑）；超时（含启动超时）不换备选；失败原因取 omp 事件流里

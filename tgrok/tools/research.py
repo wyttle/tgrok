@@ -29,12 +29,13 @@ HOOK = Path(__file__).with_name("research_hook.ts")
 REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
-# 离时限还剩这么多秒时插一句话让研究员停下搜索、用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废
+# 离时限还剩这么多秒时打断研究员、让它用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废
 WRAP_UP_BEFORE = 40
 WRAP_UP_MESSAGE = (
     "Time is almost up. Stop searching and reading now and write your final report from what you have already "
     "found, marking anything you could not verify."
 )
+WRAP_UP_ID = "wrap-up"
 
 SYSTEM_PROMPT = (
     "You are a fact-finding researcher. Research the task with web_search and read (read only public web pages). "
@@ -160,6 +161,7 @@ class _Omp:
         self.uses = 0
         self.steps = 0  # 当前任务做了几次搜索/读网页
         self.events: list[str] = []  # 当前任务收到的事件行
+        self.wrapped = False  # 当前任务已被打断、在等收尾那一轮
         self.ready = asyncio.create_task(self._start())
 
     async def _start(self) -> None:
@@ -199,9 +201,10 @@ class _Omp:
 
     async def run(self, task: str, on_step: Step | None, wrap_after: float | None = None) -> tuple[str, dict, str, int]:
         """交一个任务，读事件直到它结束。返回（正文, 用量, 失败原因, 步数）。
-        wrap_after 秒后还没结束就插话让它收尾。中途被掐掉时，已收到的事件和步数留在 self.events / self.steps。"""
+        wrap_after 秒后还没结束就打断它（连同还在读的网页），让它用已有资料写报告。
+        中途被掐掉时，已收到的事件和步数留在 self.events / self.steps。"""
         self.uses += 1
-        self.steps, self.events = 0, []
+        self.steps, self.events, self.wrapped = 0, [], False
         if self.uses > 1:
             await self._send({"id": "fresh", "type": "new_session"})  # 上一个任务的上下文不带过来
         rid = f"task-{self.uses}"
@@ -214,13 +217,15 @@ class _Omp:
                 head = line[:120]
                 if _is_frame(line, "response"):
                     frame = json.loads(line)
-                    # 收尾的插话被拒（比如它正好已经写完）不要紧，只有任务本身被拒才算失败
-                    if frame.get("success") is False and frame.get("id") != "wrap-up":
-                        raise RuntimeError(str(frame.get("error") or "omp rejected the task")[:200])
+                    if frame.get("success") is False:
+                        if frame.get("id") != WRAP_UP_ID:
+                            raise RuntimeError(str(frame.get("error") or "omp rejected the task")[:200])
+                        self.wrapped = False  # 收尾被拒（比如它正好写完了）：照旧等原任务的结果
                     continue
                 if _is_frame(line, "prompt_result"):
                     frame = json.loads(line)
-                    if frame.get("id") != rid:
+                    # 打断收尾后，原任务的结果是 aborted，要等收尾那一轮的结果
+                    if frame.get("id") != (WRAP_UP_ID if self.wrapped else rid):
                         continue
                     if frame.get("status") == "error":
                         error = _error_text(str((frame.get("error") or {}).get("message") or "provider error"))
@@ -245,9 +250,11 @@ class _Omp:
         return text, spent, failure or error, self.steps
 
     async def _wrap_up(self, delay: float) -> None:
+        # steer 要等手上这批工具跑完才送到，一个卡住的网页就能拖一分钟；abort_and_prompt 立刻打断，已有的结果保留
         await asyncio.sleep(delay)
-        logger.info("研究员 %s 跑了 %.0fs、%d 步还没交报告，让它停下搜索直接写", self.model, delay, self.steps)
-        await self._send({"id": "wrap-up", "type": "steer", "message": WRAP_UP_MESSAGE})
+        logger.info("研究员 %s 跑了 %.0fs、%d 步还没交报告，打断它用已有资料写", self.model, delay, self.steps)
+        self.wrapped = True
+        await self._send({"id": WRAP_UP_ID, "type": "abort_and_prompt", "message": WRAP_UP_MESSAGE})
 
     async def close(self) -> None:
         """结束进程（连同它起的子进程），等它真正退出再删工作目录。"""

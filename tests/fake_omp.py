@@ -4,7 +4,8 @@
   fail*    启动时 stderr 报错并以 1 退出（等不到 ready）
   blocked  接口返回网关的 HTML 错误页（stopReason=error，prompt_result 带错误）
   slow     收到任务后一直不结束，每 0.1 秒往 HEARTBEAT 文件追加一个字节（用来确认进程被结束了）
-  dawdle   一直在搜，每 0.1 秒一步，收到 steer（让它收尾）才用已有资料交报告
+  dawdle   一直在搜，每 0.1 秒一步，收到 abort_and_prompt（让它收尾）才用已有资料交报告：
+           先把原任务报成 aborted，再在收尾那一轮交报告（和真的 omp 一样）
 
 每启动一个进程，往 STARTS 文件（有的话）追加一行模型名，用来数冷启动了几次。
 """
@@ -65,12 +66,14 @@ while True:
                 time.sleep(0.1)
                 continue
             emit({"id": steer.get("id"), "type": "response", "command": steer["type"], "success": True})
-            if steer["type"] == "steer":
+            if steer["type"] == "abort_and_prompt":
                 break
+        emit({"type": "message_end", "message": {"role": "assistant", "content": [], "stopReason": "aborted"}})
+        emit({"type": "prompt_result", "id": rid, "status": "aborted"})
         emit({"type": "message_end", "message": {
             "role": "assistant", "content": [{"type": "text", "text": f"搜了 {steps} 次，先交已经查到的"}],
             "stopReason": "stop", "usage": {"input": 7, "output": 3}}})
-        emit({"type": "prompt_result", "id": rid, "status": "completed"})
+        emit({"type": "prompt_result", "id": steer["id"], "status": "completed"})
         continue
     if model == "slow":
         while True:

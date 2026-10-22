@@ -98,28 +98,30 @@ def _pow(a, b):
     return a ** b
 
 
-def _eval(node):
+def _eval(node, env: dict):
     if isinstance(node, ast.Expression):
-        return _eval(node.body)
+        return _eval(node.body, env)
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
             raise CalcError("only numbers are allowed here")
         return node.value
     if isinstance(node, ast.Name):
+        if node.id in env:
+            return env[node.id]
         if node.id in _CONSTANTS:
             return _CONSTANTS[node.id]
         raise CalcError(f"unknown name {node.id!r}")
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARYOPS:
-        return _UNARYOPS[type(node.op)](_operand(_eval(node.operand)))
+        return _UNARYOPS[type(node.op)](_operand(_eval(node.operand, env)))
     if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
-        left, right = _eval(node.left), _eval(node.right)
+        left, right = _eval(node.left, env), _eval(node.right, env)
         if isinstance(node.op, ast.Pow):
             return _check_size(_pow(left, right))
         return _check_size(_BINOPS[type(node.op)](_operand(left), _operand(right)))
     if isinstance(node, ast.Compare) and all(type(op) in _COMPARES for op in node.ops):
-        left = _eval(node.left)
+        left = _eval(node.left, env)
         for op, comparator in zip(node.ops, node.comparators):
-            right = _eval(comparator)
+            right = _eval(comparator, env)
             if not _COMPARES[type(op)](left, right):
                 return False
             left = right
@@ -134,7 +136,7 @@ def _eval(node):
                     and isinstance(arg.value, str)):
                 args.append(arg.value)
             else:
-                args.append(_eval(arg))
+                args.append(_eval(arg, env))
         return _check_size(_FUNCS[name](*args))
     raise CalcError(f"unsupported syntax: {type(node).__name__}")
 
@@ -195,29 +197,33 @@ def _normalize(expr: str) -> str:
     return _outside_parens(expr, _THOUSANDS_RE, "")
 
 
-def _parts(expr: str) -> list[tuple[str, ast.expr]]:
-    """一次给的几个算式（逗号、分号或换行隔开）拆成 (原文, 语法树)；只有一个时原文为空。"""
+def _parts(expr: str) -> list[tuple[str, str | None, ast.expr]]:
+    """一次给的几个算式（逗号、分号或换行隔开）拆成 (原文, 赋值给的变量名, 语法树)。
+    「y = 算式」把结果存进变量 y，后面的算式可以用。"""
     try:
         module = ast.parse(expr, mode="exec")
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         raise CalcError("invalid syntax") from None
-    nodes = []
+    parts = []
     for stmt in module.body:
-        if not isinstance(stmt, ast.Expr):
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)):
+            parts.append((stmt.targets[0].id, stmt.targets[0].id, stmt.value))
+        elif isinstance(stmt, ast.Expr):
+            nodes = stmt.value.elts if isinstance(stmt.value, ast.Tuple) else [stmt.value]
+            parts += [(ast.get_source_segment(expr, n) or ast.unparse(n), None, n) for n in nodes]
+        else:
             raise CalcError(f"unsupported syntax: {type(stmt).__name__}")
-        nodes += stmt.value.elts if isinstance(stmt.value, ast.Tuple) else [stmt.value]
-    if not nodes:
+    if not parts:
         raise CalcError("empty expression")
-    if len(nodes) > MAX_EXPRESSIONS:
+    if len(parts) > MAX_EXPRESSIONS:
         raise CalcError("too many expressions")
-    if len(nodes) == 1:
-        return [("", nodes[0])]
-    return [(ast.get_source_segment(expr, n) or ast.unparse(n), n) for n in nodes]
+    return parts
 
 
-def _value(node) -> str:
+def _compute(node, env: dict):
     try:
-        return _format(_eval(node))
+        return _eval(node, env)
     except CalcError:
         raise
     except ZeroDivisionError:
@@ -230,22 +236,28 @@ def _value(node) -> str:
 
 def evaluate(expression: str) -> str:
     """计算表达式，返回结果文本；表达式非法时抛 CalcError。
-    一次给了几个算式（逗号、分号或换行隔开）时逐个算，每行「算式 = 结果」，算不了的那行写原因。"""
+    一次给了几个算式（逗号、分号或换行隔开）时逐个算，每行「算式 = 结果」，算不了的那行写原因；
+    「名字 = 算式」把结果存进变量，后面的算式可以引用。"""
     expr = (expression or "").strip()
     if not expr:
         raise CalcError("empty expression")
     if len(expr) > MAX_EXPRESSION_CHARS:
         raise CalcError("expression too long")
     parts = _parts(_normalize(expr))
+    env: dict = {}
     if len(parts) == 1:
-        return _value(parts[0][1])
+        return _format(_compute(parts[0][2], env))
     lines, ok = [], False
-    for text, node in parts:
+    for text, var, node in parts:
         try:
-            lines.append(f"{text} = {_value(node)}")
-            ok = True
+            value = _compute(node, env)
         except CalcError as e:
             lines.append(f"{text}: error: {e}")
+            continue
+        if var is not None:
+            env[var] = value
+        lines.append(f"{text} = {_format(value)}")
+        ok = True
     if not ok:
         raise CalcError("; ".join(lines))
     return "\n".join(lines)

@@ -16,7 +16,8 @@ class CalculateTool(Tool):
         "floor ceil factorial gcd lcm, constants pi and e, and dates: date('YYYY-MM-DD'), "
         "today(), days(n), weekday(date). Subtracting two dates gives days; date +/- days(n) "
         "gives a date. Percentages like 15% and thousands separators like 1,234 are understood. "
-        "Several expressions can go in one call, separated by ';' or new lines; each gets its own result."
+        "Several expressions can go in one call, separated by ';' or new lines; each gets its own result, "
+        "and 'name = expression' stores a result for the following expressions."
     )
     parameters = {
         "type": "object",

@@ -1,6 +1,7 @@
 """深入调研：多个常驻 omp 研究员并发，报告一起交回；失败、超时和取消时不留下进程。"""
 
 import asyncio
+import json
 import os
 import shlex
 import sys
@@ -11,6 +12,7 @@ import pytest
 from fakes import run
 
 from tgrok import config, tools
+from tgrok.i18n import t
 from tgrok.tools import research
 
 FAKE_OMP = Path(__file__).with_name("fake_omp.py")
@@ -144,6 +146,25 @@ def test_timed_out_researcher_is_not_rerun_on_backup():
     config.RESEARCH_TIMEOUT = 1
     outcome = _research()
     assert not outcome.ok and "slow: timed out" in outcome.content and "ok-opus" not in outcome.content
+
+
+def test_researcher_near_the_deadline_is_told_to_report_what_it_has():
+    # 线上：研究员要到最后才写报告，查了两分半还没写完就被掐掉，整份作废（日志还记成「0 步」）
+    config.RESEARCH_TIMEOUT = 3
+    report = run(research.run_researcher("dawdle", "x"))
+    assert report.text.startswith("搜了 ") and not report.error and report.secs < 3
+
+
+def test_research_calls_in_one_round_run_once_as_one_task():
+    # 线上：一轮三个 research，同时起六个 omp 把 1G 内存的机器挤爆，四个研究员超时
+    config.RESEARCH_MODELS = ["cpa/ok-opus"]
+    calls = [{"id": f"c{i}", "function": {"name": "research", "arguments": json.dumps({"task": q}, ensure_ascii=False)}}
+             for i, q in enumerate(["下饭是什么梗", "老头杯是什么"])]
+    plan = tools.plan_round(calls, None)
+    first, second = run(plan.execute())
+    assert "问题 1：下饭是什么梗" in first["content"] and "问题 2：老头杯是什么" in first["content"]
+    assert "（第 1 个任务）" in first["content"] and second["content"] == t("research_merged")
+    assert len(plan.lines) == 1 and plan.lines[0].text == t("tool_research_n", n=2)
 
 
 def test_missing_omp_binary_is_a_failure_not_a_crash():

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .. import config, logs, usage
 from ..i18n import t
-from . import Outcome, Tool, failed, show_detail
+from . import Outcome, Tool, _batch_lines, _line, failed, show_detail
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,12 @@ HOOK = Path(__file__).with_name("research_hook.ts")
 REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
+# 离时限还剩这么多秒时插一句话让研究员停下搜索、用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废
+WRAP_UP_BEFORE = 40
+WRAP_UP_MESSAGE = (
+    "Time is almost up. Stop searching and reading now and write your final report from what you have already "
+    "found, marking anything you could not verify."
+)
 
 SYSTEM_PROMPT = (
     "You are a fact-finding researcher. Research the task with web_search and read (read only public web pages). "
@@ -152,7 +158,8 @@ class _Omp:
         self.workdir = tempfile.mkdtemp(prefix="tgrok-research-")
         self.stderr: deque[str] = deque(maxlen=20)
         self.uses = 0
-        self._stderr_task: asyncio.Task | None = None
+        self.steps = 0  # 当前任务做了几次搜索/读网页
+        self.events: list[str] = []  # 当前任务收到的事件行
         self.ready = asyncio.create_task(self._start())
 
     async def _start(self) -> None:
@@ -190,43 +197,57 @@ class _Omp:
         return self.ready.done() and not self.ready.cancelled() and self.ready.exception() is None \
             and self.proc.returncode is None
 
-    async def run(self, task: str, on_step: Step | None) -> tuple[str, dict, str, int]:
-        """交一个任务，读事件直到它结束。返回（正文, 用量, 失败原因, 步数）。"""
+    async def run(self, task: str, on_step: Step | None, wrap_after: float | None = None) -> tuple[str, dict, str, int]:
+        """交一个任务，读事件直到它结束。返回（正文, 用量, 失败原因, 步数）。
+        wrap_after 秒后还没结束就插话让它收尾。中途被掐掉时，已收到的事件和步数留在 self.events / self.steps。"""
         self.uses += 1
+        self.steps, self.events = 0, []
         if self.uses > 1:
             await self._send({"id": "fresh", "type": "new_session"})  # 上一个任务的上下文不带过来
         rid = f"task-{self.uses}"
         await self._send({"id": rid, "type": "prompt", "message": task})
-        lines: list[str] = []
-        steps, error = 0, ""
-        while True:
-            line = await self._line()
-            head = line[:120]
-            if _is_frame(line, "response"):
-                frame = json.loads(line)
-                if frame.get("success") is False:
-                    raise RuntimeError(str(frame.get("error") or "omp rejected the task")[:200])
-                continue
-            if _is_frame(line, "prompt_result"):
-                frame = json.loads(line)
-                if frame.get("id") != rid:
+        wrap = asyncio.create_task(self._wrap_up(wrap_after)) if wrap_after is not None else None
+        error = ""
+        try:
+            while True:
+                line = await self._line()
+                head = line[:120]
+                if _is_frame(line, "response"):
+                    frame = json.loads(line)
+                    # 收尾的插话被拒（比如它正好已经写完）不要紧，只有任务本身被拒才算失败
+                    if frame.get("success") is False and frame.get("id") != "wrap-up":
+                        raise RuntimeError(str(frame.get("error") or "omp rejected the task")[:200])
                     continue
-                if frame.get("status") == "error":
-                    error = _error_text(str((frame.get("error") or {}).get("message") or "provider error"))
-                break
-            lines.append(line)
-            if on_step is None or not any(k in head for k in _PROGRESS_TYPES):
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            doing = _doing(event) if isinstance(event, dict) else None
-            if doing is not None:
-                steps += event.get("type") == "tool_execution_start"
-                on_step(doing, steps)
-        text, spent, failure = parse_events("".join(lines))
-        return text, spent, failure or error, steps
+                if _is_frame(line, "prompt_result"):
+                    frame = json.loads(line)
+                    if frame.get("id") != rid:
+                        continue
+                    if frame.get("status") == "error":
+                        error = _error_text(str((frame.get("error") or {}).get("message") or "provider error"))
+                    break
+                self.events.append(line)
+                if not any(k in head for k in _PROGRESS_TYPES):
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                self.steps += event.get("type") == "tool_execution_start"
+                doing = _doing(event) if on_step is not None else None
+                if doing is not None:
+                    on_step(doing, self.steps)
+        finally:
+            if wrap is not None:
+                wrap.cancel()
+        text, spent, failure = parse_events("".join(self.events))
+        return text, spent, failure or error, self.steps
+
+    async def _wrap_up(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        logger.info("研究员 %s 跑了 %.0fs、%d 步还没交报告，让它停下搜索直接写", self.model, delay, self.steps)
+        await self._send({"id": "wrap-up", "type": "steer", "message": WRAP_UP_MESSAGE})
 
     async def close(self) -> None:
         """结束进程（连同它起的子进程），等它真正退出再删工作目录。"""
@@ -339,11 +360,16 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
     steps, failure, omp, reusable = 0, "", None, False
     try:
         omp = await _acquire(model)
-        async with asyncio.timeout(config.RESEARCH_TIMEOUT):
-            report.text, report.usage, failure, steps = await omp.run(task, on_step)
+        timeout = config.RESEARCH_TIMEOUT
+        async with asyncio.timeout(timeout):
+            report.text, report.usage, failure, steps = await omp.run(
+                task, on_step, timeout - min(WRAP_UP_BEFORE, timeout / 3))
         reusable = True
     except TimeoutError:
-        report.error = "timed out"
+        # omp 为空说明还没启动起来（机器忙的时候冷启动会超过 READY_TIMEOUT）
+        report.error = "timed out" if omp is not None else "startup timed out"
+        if omp is not None:
+            steps, (_, report.usage, _) = omp.steps, parse_events("".join(omp.events))
     except (OSError, RuntimeError) as e:
         report.error = (str(e) or type(e).__name__)[:200]
     finally:
@@ -403,7 +429,7 @@ async def run_with_backup(i: int, model: str, task: str, board: _Board | None = 
     几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
     report = await run_researcher(model, task, board.stepper(i, model, False) if board else None)
     backup = _backup(i)
-    if not report.text and backup and backup != model and report.error != "timed out":
+    if not report.text and backup and backup != model and not report.error.endswith("timed out"):
         logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
         step = board.stepper(i, backup, True) if board else None
         if step is not None:
@@ -458,6 +484,26 @@ class ResearchTool(Tool):
 
     def label(self, args: dict) -> str:
         return t("tool_research", task=str(args.get("task", "")).strip()[:48] or "?")
+
+    def batch_label(self, args_list: list[dict]) -> str | None:
+        return self.label(args_list[0]) if len(args_list) == 1 else t("tool_research_n", n=len(args_list))
+
+    async def run_batch(self, args_list: list[dict], chat_id: int | None) -> list[Outcome]:
+        """同一轮的几个调研合并成一个任务交给研究员：每个调研都要起一组 omp，同时起几组会把小机器的内存挤爆，
+        全部超时（线上一轮三个调研，六个研究员只有两个交回报告）。"""
+        tasks = [str(a.get("task", "")).strip() for a in args_list]
+        real = [task for task in tasks if task]
+        if len(real) < 2:
+            return await super().run_batch(args_list, chat_id)
+        lines = _batch_lines.get()
+        if lines:
+            _line.set(lines[0])
+        merged = await self.run({"task": "\n\n".join(
+            t("research_merged_task", n=i, task=task) for i, task in enumerate(real, 1))}, chat_id)
+        note = Outcome(t("research_merged"), merged.ok, merged.summary)
+        first = tasks.index(real[0])
+        return [merged if i == first else note if task else failed(t("research_failed", reason="empty task"))
+                for i, task in enumerate(tasks)]
 
     async def run(self, args: dict, chat_id: int | None) -> Outcome:
         task = str(args.get("task", "")).strip()

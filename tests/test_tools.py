@@ -28,6 +28,8 @@ def test_calculate_takes_several_expressions_percentages_and_thousands():
     assert calc.evaluate("1+1; 1/0") == "1+1 = 2\n1/0: error: division by zero"  # 一个算不了不连累别的
     assert calc.evaluate("1,234,567.5 / 2") == "617283.75" and calc.evaluate("max(1,234)") == "234"  # 括号里是参数
     assert calc.evaluate("200 * 15%") == "30" and calc.evaluate("10 % 3") == "1" and calc.evaluate("(1+2)*3=") == "9"
+    # 线上：模型写「y = …; b = …」先存中间结果，整次 unsupported syntax: Assign
+    assert calc.evaluate("a = 2^10; b = a - 24; b / 1000") == "a = 1024\nb = 1000\nb / 1000 = 1"
 
 
 @pytest.mark.parametrize("bad", ["9**9**9", "factorial(5000)", "__import__('os')", "(1).__class__", "'a'*10", "1/0"])

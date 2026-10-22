@@ -117,8 +117,11 @@ Telegram update
         -> 有工具调用：Bubble.take_draft 丢掉这轮草稿，tools.plan_round 排出进度行并并发执行
            -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
            -> research：每个研究员交给一个常驻的 omp --mode rpc 进程（只开 web_search 和 read，加载 hook，空的临时目录），
-              超过 RESEARCH_TIMEOUT 或回复被取消时整组结束；失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
-              每个研究员的主→备先后跑）；超时不换备选；失败原因取 omp 事件流里
+              同一轮的几个 research 合并成一个编号任务只跑一组（每组都要起 omp，同时起几组会把小内存机器挤到交换分区、全部超时）；
+              离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒时用 RPC 的 steer 让研究员停下搜索、用已有资料写报告；
+              超过 RESEARCH_TIMEOUT 或回复被取消时整组结束，超时日志记已做的步数和用量，启动没完成记成 startup timed out；
+              失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
+              每个研究员的主→备先后跑）；超时（含启动超时）不换备选；失败原因取 omp 事件流里
               接口报的错误（网关 HTML 错误页只取标题）；omp 的输出边跑边逐行读：每次开始搜索或读网页，
               研究员那一行的进度明细（ProgressLine.detail，经 tools.show_detail）就更新成「在做什么、第几步」；
               报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。什么时候查、用 research 还是 web_search

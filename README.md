@@ -277,6 +277,8 @@ Setup:
 3. Set `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygpt/gpt-6.1-sol` ("provider/model", see `omp models`).
    For backup endpoints, add another set of providers and list them in `RESEARCH_FALLBACK_MODELS` by position: a
    researcher that fails is rerun once on its backup.
+   If one endpoint blocks the server directly (e.g. a Cloudflare 403), set `PI_PROXY_<PROVIDER>=socks5://user:pass@host:port`
+   in `.env` (e.g. `PI_PROXY_GROK`); only that provider's requests go through the proxy.
 
 Safety: researchers only get omp's `web_search` and `read` tools, and a hook (`tgrok/tools/research_hook.ts`) blocks
 `read` on anything but public http(s) pages, so prompt injection can't make them read local files, omp's own

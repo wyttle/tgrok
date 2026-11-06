@@ -263,6 +263,8 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
 
 3. 设置 `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygpt/gpt-6.1-sol`（「接口名/模型名」，可用 `omp models` 查看）。
    想要备用接口就再配一组 provider，写进 `RESEARCH_FALLBACK_MODELS`，按位置对应：某个研究员失败时换成对应的备选再跑一次。
+   某个渠道直连被拦（比如 Cloudflare 403）时，在 `.env` 里写 `PI_PROXY_<接口名大写>=socks5://用户:密码@主机:端口`
+   （如 `PI_PROXY_GROK`），只有那个接口的请求走代理。
 
 安全：研究员只开放 omp 的 `web_search` 和 `read`，并由 hook（`tgrok/tools/research_hook.ts`）把 `read` 限制在公网 http(s) 网页，
 群友用提示词注入也读不到本地文件、omp 自己的凭据和内网地址。研究员在空的临时目录里运行，超时或回复被取消时会被结束。

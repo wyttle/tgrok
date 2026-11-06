@@ -250,7 +250,7 @@ STRINGS = {
         "research_failed": "（深入调研失败：{reason}。改用 web_search 和 open_url 自己查，或说明没查到。）",
         "research_system_prompt": (
             "查资料用 research 还是 web_search：\n"
-            "- research 把一个任务同时交给两个独立的研究员（不同的模型），各自搜索、读原文，交回查证过的事实和来源。"
+            "- research 把一个任务同时交给几个独立的研究员（不同的模型），各自搜索、读原文，交回查证过的事实和来源。"
             "下面这些一律先用它，哪怕你觉得自己知道：梗、名言、图片、谣言的出处；某句话、截图、传闻是真是假；"
             "不认识或拿不准的梗和圈子黑话；为什么涨跌、怎么回事、局势如何；严肃的事（钱、健康和用药、法律、政治、安全、"
             "群友要据此做决定的事，看着像常识也要查，这些会更新、因人因地而异）；需要准确数字、日期、出处的事实。\n"
@@ -679,7 +679,7 @@ STRINGS = {
         "research_failed": "(research failed: {reason}. Look it up yourself with web_search and open_url, or say you couldn't find it.)",
         "research_system_prompt": (
             "Looking things up, research or web_search:\n"
-            "- research hands one task to two independent researchers (different models) that search, read the actual "
+            "- research hands one task to several independent researchers (different models) that search, read the actual "
             "pages, and return verified facts with sources. Use it first, even if you think you know, for: where a meme, "
             "quote, image, or rumor comes from; whether a claim, quote, screenshot, or rumor is true; memes or jargon you "
             "don't know well; why or how something happened and where a situation stands; anything serious (money, "

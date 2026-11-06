@@ -240,8 +240,8 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
 
 1. 运行 bot 的地方要装 omp。Docker 镜像会自动安装（版本由构建参数 `OMP_VERSION` 固定，`--build-arg OMP_VERSION=` 可跳过）。
 2. 给 omp 配好模型的接口和 key。Docker 部署时 `./omp` 挂载为 omp 的配置目录，新建 `./omp/agent/models.yml`。
-   每个模型用它自己的原生协议：Claude 用 `anthropic-messages`，Gemini 用 `google-generative-ai`（地址写到 `/v1beta`），
-   不要让 Gemini 走 Claude 格式的转换。例如：
+   每个模型用它自己的原生协议：Claude 用 `anthropic-messages`，GPT 用 `openai-responses`（地址写到 `/v1`），
+   Gemini 用 `google-generative-ai`（地址写到 `/v1beta`），不要让它们走 Claude 格式的转换。例如：
 
    ```yaml
    providers:
@@ -252,15 +252,16 @@ bot 会给模型挂载 `web_search` 工具：模型自主判断何时需要搜�
        auth: apiKey
        models:
          - id: claude-opus-5-5
-     mygemini:
-       baseUrl: https://your-gemini-relay.example.com/v1beta
-       apiKey: GEMINI_API_KEY
-       api: google-generative-ai
+     mygpt:
+       baseUrl: https://your-openai-relay.example.com/v1
+       apiKey: LLM_FALLBACK_API_KEY
+       api: openai-responses
        models:
-         - id: gemini-3.8-flash-high
+         - id: gpt-6.1-sol
+           reasoning: true
    ```
 
-3. 设置 `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygemini/gemini-3.8-flash-high`（「接口名/模型名」，可用 `omp models` 查看）。
+3. 设置 `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygpt/gpt-6.1-sol`（「接口名/模型名」，可用 `omp models` 查看）。
    想要备用接口就再配一组 provider，写进 `RESEARCH_FALLBACK_MODELS`，按位置对应：某个研究员失败时换成对应的备选再跑一次。
 
 安全：研究员只开放 omp 的 `web_search` 和 `read`，并由 hook（`tgrok/tools/research_hook.ts`）把 `read` 限制在公网 http(s) 网页，

@@ -252,9 +252,9 @@ Setup:
 1. omp must be installed where the bot runs. The Docker image installs it (pinned by the `OMP_VERSION` build arg;
    `--build-arg OMP_VERSION=` skips it).
 2. Give omp the models' endpoint and key. With Docker, `./omp` is mounted as omp's config directory; create
-   `./omp/agent/models.yml`. Use each model's native protocol: `anthropic-messages` for Claude and
-   `google-generative-ai` for Gemini (base URL ending in `/v1beta`), rather than routing Gemini through a Claude-format
-   translation. For example:
+   `./omp/agent/models.yml`. Use each model's native protocol: `anthropic-messages` for Claude, `openai-responses` for
+   GPT (base URL ending in `/v1`), and `google-generative-ai` for Gemini (base URL ending in `/v1beta`), rather than
+   routing them through a Claude-format translation. For example:
 
    ```yaml
    providers:
@@ -265,15 +265,16 @@ Setup:
        auth: apiKey
        models:
          - id: claude-opus-5-5
-     mygemini:
-       baseUrl: https://your-gemini-relay.example.com/v1beta
-       apiKey: GEMINI_API_KEY
-       api: google-generative-ai
+     mygpt:
+       baseUrl: https://your-openai-relay.example.com/v1
+       apiKey: LLM_FALLBACK_API_KEY
+       api: openai-responses
        models:
-         - id: gemini-3.8-flash-high
+         - id: gpt-6.1-sol
+           reasoning: true
    ```
 
-3. Set `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygemini/gemini-3.8-flash-high` ("provider/model", see `omp models`).
+3. Set `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygpt/gpt-6.1-sol` ("provider/model", see `omp models`).
    For backup endpoints, add another set of providers and list them in `RESEARCH_FALLBACK_MODELS` by position: a
    researcher that fails is rerun once on its backup.
 

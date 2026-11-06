@@ -85,7 +85,9 @@ def _log_startup() -> None:
         logger.info("深入调研已开启：研究员 %s（omp，单个最多 %d 秒%s）%s",
                     ",".join(config.RESEARCH_MODELS), config.RESEARCH_TIMEOUT,
                     "，每个模型常驻一个进程" if config.RESEARCH_WARM else "",
-                    f"，失败时改用 {','.join(config.RESEARCH_FALLBACK_MODELS)}" if config.RESEARCH_FALLBACK_MODELS else "")
+                    "，失败时改用 " + "，".join(f"{m} → {b}" for m in config.RESEARCH_MODELS
+                                             if (b := research._backup(config.RESEARCH_MODELS.index(m))))
+                    if config.RESEARCH_FALLBACK_MODELS else "")
         omp = shlex.split(config.OMP_BIN, posix=os.name != "nt")[:1]
         if not omp or shutil.which(omp[0]) is None:
             logger.warning("找不到 omp 可执行文件（OMP_BIN=%s），深入调研会一直失败", config.OMP_BIN)

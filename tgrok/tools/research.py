@@ -394,11 +394,11 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
 
 
 def _backup(i: int) -> str | None:
-    """第 i 个研究员的备选模型：RESEARCH_FALLBACK_MODELS 按位置对应，只写一个就所有人共用。"""
+    """第 i 个研究员的备选模型：RESEARCH_FALLBACK_MODELS 按位置对应，只写一个就所有人共用；空着的位置没有备选。"""
     backups = config.RESEARCH_FALLBACK_MODELS
     if not backups:
         return None
-    return backups[i] if i < len(backups) else backups[-1]
+    return (backups[i] if i < len(backups) else backups[-1]) or None
 
 
 class _Board:

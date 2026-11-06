@@ -132,6 +132,15 @@ def test_backup_failing_too_reports_both_errors():
     assert outcome.ok and "fail: boom: no credentials; fail-backup:" in outcome.content
 
 
+def test_empty_backup_position_means_no_backup():
+    # Claude 失败时拿 GPT 顶替，两份报告就都是 GPT 的，失去了两个模型互相核对的意义：A 位置空着，不备选
+    config.RESEARCH_MODELS = ["fail", "blocked"]
+    config.RESEARCH_FALLBACK_MODELS = ["", "cpa/ok-opus"]
+    outcome = _research()
+    assert outcome.ok and outcome.summary == "1 份报告，1 个失败"
+    assert "研究员 A（fail）没有交回报告" in outcome.content and "研究员 B（ok-opus" in outcome.content
+
+
 def test_gateway_error_page_is_reported_by_its_title_and_backup_runs():
     config.RESEARCH_MODELS = ["blocked"]
     config.RESEARCH_FALLBACK_MODELS = ["fail-backup"]

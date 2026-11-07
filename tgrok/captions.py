@@ -3,7 +3,7 @@
 主模型用 view_image 按编号看原图。
 
 图片只登记在内存里（按聊天和消息 id，最多 REFS_KEEP 张），快读结果也只在内存里：最近群聊本来就只留
-RECENT_CHAT_MINUTES 分钟，重启后丢了无所谓。
+存着的那些条（最近 RECENT_CHAT_KEEP 条或 RECENT_CHAT_MINUTES 分钟），重启后丢了无所谓。
 """
 
 import asyncio

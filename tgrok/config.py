@@ -175,9 +175,11 @@ def fallback_endpoint() -> LLMEndpoint | None:
 GEMINI_HELPER_MODEL = _str("GEMINI_HELPER_MODEL") or GEMINI_MEDIA_MODEL
 # 媒体预读：群里一出现视频、语音等，就先让 GEMINI_MEDIA_MODEL 在后台完整转述，有人问到时直接用
 MEDIA_PREFETCH = _bool("MEDIA_PREFETCH", True)
-# 最近群聊：bot 收到的群消息存进数据库（只留 RECENT_CHAT_MINUTES 分钟以内的），提问时把这段时间内最近几条附上作背景。0 = 关闭
+# 最近群聊：bot 收到的群消息存进数据库，每个群留最近 RECENT_CHAT_KEEP 条和最近 RECENT_CHAT_MINUTES 分钟的
+# （哪边多按哪边），提问时附上其中最新的 RECENT_CHAT_COUNT 条作背景。RECENT_CHAT_COUNT=0 关闭
 RECENT_CHAT_COUNT = _int("RECENT_CHAT_COUNT", 15)
 RECENT_CHAT_MINUTES = _int("RECENT_CHAT_MINUTES", 60)
+RECENT_CHAT_KEEP = _int("RECENT_CHAT_KEEP", 50)
 
 
 def helper_endpoint() -> LLMEndpoint | None:

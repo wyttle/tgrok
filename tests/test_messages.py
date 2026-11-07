@@ -1,6 +1,6 @@
 """群消息怎么变成发给模型的对话：说话人、贴纸和图片、相册、追问缓存、时间。"""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fakes import BOT_USER, CTX, NOW, capture_replies, group, mention, ns, run, update_of, user
 from telegram import Message, MessageEntity, MessageOriginUser, PhotoSize, Sticker, Update
@@ -182,6 +182,21 @@ def test_bot_keeps_seeing_its_own_recent_replies_in_a_busy_group(monkeypatch):
     assert "关键数字是 42" in content  # bot 的回答没被挤掉，也没截掉结尾
     assert "闲聊84" in content and "闲聊83" not in content  # 别人的消息照旧只带最近 3 条
     assert content.index("关键数字") < content.index("闲聊84")  # 按时间先后排
+
+
+def test_recent_chat_keeps_the_last_50_or_the_last_hour_whichever_is_more():
+    # 原来超过一小时的随写随删：群里冷清时隔一会儿再问「刚才说的」，bot 什么都没有
+    config.RECENT_CHAT_COUNT, config.RECENT_CHAT_KEEP = 100, 5
+    chat, li = group(), user(6, "小李")
+    old, now = datetime.now() - timedelta(hours=3), datetime.now()
+    for i in range(1, 9):  # 三小时前的 8 条：只留最新 5 条
+        recent.add(Message(i, old, chat, from_user=li, text=f"早先{i}"), 42)
+    lines = recent.block(chat.id, 100, since=0)
+    assert "早先4" in lines and "早先3" not in lines
+    for i in range(10, 18):  # 刚才的 8 条：一小时内的全留，比 5 条多
+        recent.add(Message(i, now, chat, from_user=li, text=f"刚才{i}"), 42)
+    lines = recent.block(chat.id, 100, since=0)
+    assert "刚才10" in lines and "刚才17" in lines and "早先" not in lines
 
 
 def test_forwarded_message_is_credited_to_its_original_author(monkeypatch):

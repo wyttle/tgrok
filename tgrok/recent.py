@@ -1,7 +1,7 @@
 """每个群最近的聊天：群友常常就刚才聊的内容直接 @bot，提问时附上这段背景。
 
 bot 收到的群消息都记（关闭隐私模式后是全部群消息，否则只有叫到 bot 的），也记 bot 自己的回复。
-存在数据库里，重启后接着用；超过 RECENT_CHAT_MINUTES 的随写随删。
+存在数据库里，重启后接着用；每个群留最近 RECENT_CHAT_KEEP 条和最近 RECENT_CHAT_MINUTES 分钟的，哪边多按哪边，其余随写随删。
 每行都写明谁说的、回复的是谁，模型才不会把话安错人。语音、视频等媒体在渲染时取预读好的转述。
 """
 
@@ -58,7 +58,11 @@ def _save(chat_id: int, user_id: int | None, e: Entry) -> None:
     conn.execute("INSERT OR REPLACE INTO recent(chat_id, msg_id, ts, user_id, who, text, reply_to, media_uid, media_what) "
                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  (chat_id, e.msg_id, e.ts, user_id, e.who, e.text, e.reply_to, e.media_uid, e.media_what))
-    conn.execute("DELETE FROM recent WHERE ts < ?", (time.time() - config.RECENT_CHAT_MINUTES * 60,))
+    # 留下最近 RECENT_CHAT_KEEP 条和最近 RECENT_CHAT_MINUTES 分钟的，哪边多按哪边：群里冷清时一小时前的
+    # 话也还在，热闹时一小时内的都在
+    conn.execute("DELETE FROM recent WHERE chat_id = ? AND ts < ? AND msg_id NOT IN "
+                 "(SELECT msg_id FROM recent WHERE chat_id = ? ORDER BY msg_id DESC LIMIT ?)",
+                 (chat_id, time.time() - config.RECENT_CHAT_MINUTES * 60, chat_id, config.RECENT_CHAT_KEEP))
 
 
 def _reply_label(m: Message, bot_id: int) -> str:
@@ -119,11 +123,11 @@ def _line(e: Entry) -> str:
 
 def block(chat_id: int, before_id: int, since: float, skip: set[int] = frozenset()) -> str:
     """当前提问之前、since 之后的最近几条群聊（不含 skip 里的消息，比如被引用的那条）；没有返回空串。
-    群里热闹时最近 RECENT_CHAT_COUNT 条可能只盖住几分钟，所以 bot 自己最近的 BOT_KEEP 条回复不管多早都带上
-    （仍限 RECENT_CHAT_MINUTES 以内），群友问「你刚才说的」时接得上。"""
+    存着的就是能用的（最近 RECENT_CHAT_KEEP 条和最近 RECENT_CHAT_MINUTES 分钟的，哪边多按哪边），从里面取最新的
+    RECENT_CHAT_COUNT 条。群里热闹时这几条可能只盖住几分钟，所以 bot 自己最近的 BOT_KEEP 条回复不管多早都带上，
+    群友问「你刚才说的」时接得上。"""
     if not config.RECENT_CHAT_COUNT:
         return ""
-    since = max(since, time.time() - config.RECENT_CHAT_MINUTES * 60)
     query = ("SELECT msg_id, ts, who, text, reply_to, media_uid, media_what FROM recent "
              "WHERE chat_id = ? AND ts >= ? AND msg_id < ? {} ORDER BY msg_id DESC LIMIT ?")
     rows = db().execute(query.format(""), (chat_id, since, before_id, config.RECENT_CHAT_COUNT + len(skip))).fetchall()

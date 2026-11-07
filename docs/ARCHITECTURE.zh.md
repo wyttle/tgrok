@@ -22,7 +22,7 @@ tgrok/
 |-- prompt.py          系统提示词，以及每条 user 消息的拼装（说话人、引用/转发的真正作者、记忆、梗、最近群聊、时间、图片）
 |-- media.py           图片、贴纸、相册和视频语音：data URL、媒体说明（转述、media_id 或看不到）、相册缓存、媒体登记和预读
 |-- viewer.py          让 GEMINI_MEDIA_MODEL 看/听媒体：watch_media 和后台预读共用，按 file_unique_id 缓存转述
-|-- recent.py          每个群最近的聊天（存数据库，只留 RECENT_CHAT_MINUTES 分钟内的），提问时附上，每行写明谁说的、回复谁
+|-- recent.py          每个群最近的聊天（存数据库，留最近 50 条和最近 60 分钟的，哪边多按哪边），提问时附上，每行写明谁说的、回复谁
 |-- conversations.py   追问用的对话历史（内存层带图原样，数据库层纯文本、跨重启）和历史截断
 |-- chat.py            一次回复的流程：模型轮次循环、重试、备用模型切换、工具轮、取消按钮
 |-- bubble.py          一条回复在 Telegram 上的显示：占位、流式编辑、分段、进度、取消、报错、定稿
@@ -176,7 +176,7 @@ Telegram update
 - `media.watch_cache`：配了 `GEMINI_MEDIA_MODEL` 且主模型走工具循环时，bot 被叫到的那条消息和它引用的消息里的视频、语音等按（聊天, 消息 id）登记 file_id 和 bot，最多 300 条；`watch_media` 按 media_id 取出，有预读就等那一份，否则下载（官方 Bot API 上限 20MB）、整段内联发给 Gemini（`llm.gemini.gemini_client`，与 grounding 共用），转述回灌主模型。别的聊天的 media_id 取不到；重启后清空。有文字也有媒体时，文字和媒体说明都交给模型。
 - `viewer._jobs`：媒体预读任务，按 file_unique_id 存最近 500 份，最多同时 4 个（`viewer._slots`，换事件循环时重建）。转述好了就直接写进媒体说明；`viewer._used` 记着哪些转述已经交给过主模型，之后的 `watch_media` 按具体问题重新看。
 - `captions._refs` / `captions._jobs`：开了视觉时，群里每张照片和图片文件（贴纸除外）按（聊天, 消息 id）登记 file_id 和 bot，最多 500 张；配了 `IMAGE_CAPTION_MODEL` 就同时在后台让这个便宜的看图模型一两句话说清是什么（按 file_unique_id，同时最多 4 张，30 秒超时，记进 `usage` 的 caption）。最近群聊里图片写成「[图片 #消息id：描述]」（还没好就只有编号）。主模型用 `view_image` 按编号取原图：工具结果只能是文字，图片放在 `Outcome.images` 里，`RoundPlan.execute` 在这轮 tool 消息后面加一条带图的 user 消息。都只在内存里，重启后清空。
-- `recent` 表（`MEMORY_DB`）：群消息和 bot 回复（bot 的回复每条最多 800 字），每次写入时删掉超过 `RECENT_CHAT_MINUTES` 的；注入时按 `RECENT_CHAT_MINUTES` 和 `RECENT_CHAT_COUNT` 截取，另外不管群里多热闹都带上 bot 自己最近 3 条回复，按时间排好；不含当前提问和被引用的那条。记着发消息的人（bot 的回复记提问者），`/forget`、`/forgetme` 一起删。
+- `recent` 表（`MEMORY_DB`）：群消息和 bot 回复（bot 的回复每条最多 800 字），每次写入时删掉这个群里既不在最近 `RECENT_CHAT_KEEP` 条、又超过 `RECENT_CHAT_MINUTES` 分钟的；注入时从存着的里取最新的 `RECENT_CHAT_COUNT` 条，另外不管群里多热闹都带上 bot 自己最近 3 条回复，按时间排好；不含当前提问和被引用的那条。记着发消息的人（bot 的回复记提问者），`/forget`、`/forgetme` 一起删。
 - `usage` 表（`MEMORY_DB`）：`chat._call_model`（回复，每轮一行，失败也记）、`tools.research`（每个研究员）、`web._search_gemini_grounded`（搜索）、`viewer._generate`（媒体）、`memory.consolidate`（记忆整理）各记一行，保留 90 天。token 来自各适配器流里的用量（`RoundResult.usage`；OpenAI 兼容接口请求 `stream_options.include_usage`，后端拒绝时去掉并记住）、Gemini 的 `usage_metadata`、omp 的事件流。
 - `logs._current`：当前请求（`handlers.handle_message` 决定要回复时 `logs.begin()`），日志行带 `#编号`；子任务继承它。请求内的模型轮次、工具名和 token 累计在上面，结束时打一行汇总。日志同时写入 `LOG_DIR/bot.log`，每天零点换文件，留 `LOG_KEEP_DAYS` 天；httpx、Google SDK 的逐请求 INFO 压到 WARNING。
 - `memory.store`：`MEMORY_DB` 里的三张表。`messages`（+ `messages_fts`）是原始记录，三个字以上的检索词走 trigram 全文索引，更短的退回 LIKE；`msg_id` 是 Telegram 消息 id，（聊天, msg_id）唯一，同一条消息既旁听到又被引用时只记一次；`notes` 是精选条目，`user_id` 为空是群笔记，否则是这个人在这个聊天的档案，可带到期时间；`progress` 记每个聊天整理到哪条记录。所有读写都很小，直接在事件循环线程里同步执行。

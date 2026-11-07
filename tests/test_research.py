@@ -145,7 +145,7 @@ def test_timed_out_researcher_hands_in_what_it_found():
     # 线上：GPT 搜了 26 步、读了一堆网页，150 秒到点没写完报告，24 万 token 的资料全扔了
     config.RESEARCH_TIMEOUT = 1
     report = run(research.run_researcher("trickle", "x"))  # 收尾时报告写到一半
-    assert report.partial == "draft" and not report.error.endswith("x")
+    assert report.partial == "draft" and report.error == "timed out"
     assert report.text.startswith("查到的一条事实。") and report.text.endswith(t("research_cut_off"))
     assert "工具轮的过渡话" not in report.text
 

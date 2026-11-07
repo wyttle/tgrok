@@ -3,6 +3,7 @@
 import json
 
 import anthropic
+import pytest
 from fakes import HIST, bad_request, chunk_tool, ns, openai_adapter, run, stream_of
 from openai import BadRequestError
 
@@ -222,7 +223,9 @@ def test_claude_reconnects_when_the_gateway_drops_thinking():
 
     streams[:] = [bad() for _ in range(claude.THINKING_ATTEMPTS)]
     seen.clear()
-    assert run(adapter.run_round(HIST, None, _ignore)).content.startswith("哥")  # 次数用完：最后一次照单全收
+    # 线上：前三次都没思考，第四次照单全收，把「fantasy: yaechin says …」这样的推理过程发进了群里
+    with pytest.raises(claude.ThinkingMissing):
+        run(adapter.run_round(HIST, None, _ignore))  # 次数用完也不收没思考的回答：报错，chat 换备用模型
     assert len(seen) == claude.THINKING_ATTEMPTS
 
     config.LLM_EXTRA_BODY = None

@@ -149,7 +149,7 @@ Telegram update
 - 工具成功与否由工具自己返回（`Outcome.ok`），进度结果行不靠文本形状判断。`web.py` 搜不到或读不到时抛 `WebError`，`str(e)` 就是给模型看的说明。
 - SDK 内建重试关闭（`max_retries=0`），重试只由 chat 控制。
 - OpenAI 兼容路径回传 Gemini 思考型模型的 `thought_signature`；Claude 原生收集 thinking 和签名，续传时恢复成原生块；Responses 把带 `encrypted_content` 的推理条目挂在首个工具调用上，续传时放回 input。
-- Claude 原生在 `LLM_EXTRA_BODY` 要了 thinking 时，流的第一个内容块不是思考块就断开重发（`claude.THINKING_ATTEMPTS` 次，最后一次不检查）：有的网关（cpa）不时丢掉 thinking，模型不思考就把说话人标签、提示词碎片或英文推理当正文吐出来，这时还没有字交给气泡。
+- Claude 原生在 `LLM_EXTRA_BODY` 要了 thinking 时，流的第一个内容块不是思考块就断开重发，每次都检查，最多 `claude.THINKING_ATTEMPTS` 次；全都没思考就抛 `ThinkingMissing`，`chat._call_model` 照「还没输出就出错」处理、换备用模型来答：有的网关（cpa）不时丢掉 thinking，模型不思考就把说话人标签、提示词碎片或英文推理当正文吐出来，这时还没有字交给气泡。
 - `BaseAdapter.run_round` 每轮把工具名对回这轮给出的工具：cpa 会把工具改名伪装成 MCP 工具（`research` → `mcp__warrior_normal__crunch_research`），还原时偶尔只去掉 `mcp__…__` 那段，交回 `crunch_research`。名字对不上时去掉 `mcp__…__` 和前面那个单词再对（`llm.base.restore_tool_names`），对上了就按真名执行、记进历史。
 - `calculate` 只解释白名单 AST 节点，没有属性访问；名字只能是常量 pi、e 和本次调用里「名字 = 算式」赋过值的变量（值只是数字或日期）；整数位数、幂指数、阶乘和表达式长度都有上限。一次可以给几个算式（逗号、分号或换行隔开，最多 20 个），逐个算、每行「算式 = 结果」，算不了的那行写原因；数字后的 `%` 当百分比（后面跟数字时仍是取余），括号外的千分位逗号（`1,234`）去掉，末尾的 `=` 忽略。
 - 工具调用失败（参数解析不了、没有这个工具、工具自己返回失败）都打一行 WARNING：工具名、参数和返回给模型的原因。

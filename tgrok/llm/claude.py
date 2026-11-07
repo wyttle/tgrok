@@ -10,12 +10,17 @@ from .base import BaseAdapter, RequestOptions, RoundResult, Usage, close_stream,
 
 logger = logging.getLogger(__name__)
 _DATA_URL_RE = re.compile(r"^data:([^;]+);base64,(.*)$", re.S)
-# 开了 thinking 时最多发几次请求：前几次要求流先出思考块，最后一次不再检查、照单全收
-THINKING_ATTEMPTS = 4
+# 开了 thinking 时最多发几次请求，每次都要求流先出思考块。全都没思考就报错：chat 会换备用模型来答，
+# 不把没思考的回答发出去（线上照单全收的那一次常常把推理过程、提示词碎片当正文发了出去）
+THINKING_ATTEMPTS = 6
 
 
 class ThinkingSkipped(Exception):
     """要了 thinking，流的第一个内容块却不是思考块。"""
+
+
+class ThinkingMissing(RuntimeError):
+    """连续 THINKING_ATTEMPTS 次都没思考。"""
 
 
 class ClaudeAdapter(BaseAdapter):
@@ -66,14 +71,16 @@ class ClaudeAdapter(BaseAdapter):
     async def _round(self, history: list[dict], tools: list[dict] | None, on_text) -> RoundResult:
         # 有的网关（cpa）不时悄悄丢掉 thinking 参数，模型不思考就直接出字，常把提示词碎片、说话人标签或
         # 英文推理当正文吐出来。这种流第一个块就认得出，那时还没有字交给 on_text：断开重发。
+        require = self._wants_thinking()
         for attempt in range(1, THINKING_ATTEMPTS + 1):
             stream = await self._create_stream(history, tools)
             try:
-                return await self._drain(stream, on_text, attempt < THINKING_ATTEMPTS and self._wants_thinking())
+                return await self._drain(stream, on_text, require)
             except ThinkingSkipped:
                 logger.warning("Claude 流没有先思考（第 %d 次），断开重发", attempt)
             finally:
                 await close_stream(stream)
+        raise ThinkingMissing(f"Claude 连续 {THINKING_ATTEMPTS} 次没有先思考")
 
     async def _drain(self, stream, on_text, require_thinking: bool = False) -> RoundResult:
         usage = Usage()

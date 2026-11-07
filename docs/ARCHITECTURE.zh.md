@@ -121,6 +121,8 @@ Telegram update
               离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒时用 RPC 的 abort_and_prompt 打断研究员（连同还在读的网页，已有结果保留），
               让它用已有资料写报告（steer 要等手上这批工具跑完才送到，一个卡住的网页能拖一分钟）；
               超过 RESEARCH_TIMEOUT 或回复被取消时整组结束，超时日志记已做的步数和用量，启动没完成记成 startup timed out；
+              研究员没交报告（到点、出错）时不白跑：写了一半就交那一半，一个字没写就把它搜到的结果和读过的网页原文
+              （research.collected_material）交给主模型，都注明不完整；不超时的失败照旧先试备选，备选交了完整报告才换掉；
               失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
               每个研究员的主→备先后跑）；超时（含启动超时）不换备选；失败原因取 omp 事件流里
               接口报的错误（网关 HTML 错误页只取标题）；omp 的输出边跑边逐行读：每次开始搜索或读网页，

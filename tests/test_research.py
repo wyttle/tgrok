@@ -141,6 +141,23 @@ def test_empty_backup_position_means_no_backup():
     assert "研究员 A（fail）没有交回报告" in outcome.content and "研究员 B（ok-opus" in outcome.content
 
 
+def test_timed_out_researcher_hands_in_what_it_found():
+    # 线上：GPT 搜了 26 步、读了一堆网页，150 秒到点没写完报告，24 万 token 的资料全扔了
+    config.RESEARCH_TIMEOUT = 1
+    report = run(research.run_researcher("trickle", "x"))  # 收尾时报告写到一半
+    assert report.partial == "draft" and not report.error.endswith("x")
+    assert report.text.startswith("查到的一条事实。") and report.text.endswith(t("research_cut_off"))
+    assert "工具轮的过渡话" not in report.text
+
+    report = run(research.run_researcher("hoard", "哈基米"))  # 一个字没写，只搜了、读了
+    assert report.partial == "material" and report.text.startswith(t("research_raw_material"))
+    assert "搜「哈基米」的结果：\n[1] 哈基米的出处" in report.text and "读过的网页 https://example.com/a：\n正文" in report.text
+
+    config.RESEARCH_MODELS = ["hoard"]
+    outcome = _research()
+    assert outcome.ok and outcome.summary == "1 份报告"  # 主模型拿到资料，不是「调研失败」
+
+
 def test_gateway_error_page_is_reported_by_its_title_and_backup_runs():
     config.RESEARCH_MODELS = ["blocked"]
     config.RESEARCH_FALLBACK_MODELS = ["fail-backup"]

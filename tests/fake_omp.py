@@ -6,6 +6,8 @@
   slow     收到任务后一直不结束，每 0.1 秒往 HEARTBEAT 文件追加一个字节（用来确认进程被结束了）
   dawdle   一直在搜，每 0.1 秒一步，收到 abort_and_prompt（让它收尾）才用已有资料交报告：
            先把原任务报成 aborted，再在收尾那一轮交报告（和真的 omp 一样）
+  trickle  收到 abort_and_prompt 后开始一点点流式写报告（message_update 的 text_delta），永远写不完
+  hoard    搜一次、读一个网页（都带结果），之后不再说话，直到被结束
 
 每启动一个进程，往 STARTS 文件（有的话）追加一行模型名，用来数冷启动了几次。
 """
@@ -75,6 +77,26 @@ while True:
             "stopReason": "stop", "usage": {"input": 7, "output": 3}}})
         emit({"type": "prompt_result", "id": steer["id"], "status": "completed"})
         continue
+    if model == "trickle":
+        while (cmd := commands.get())["type"] != "abort_and_prompt":
+            pass
+        emit({"id": cmd.get("id"), "type": "response", "command": cmd["type"], "success": True})
+        emit({"type": "message_update", "messageId": "m0", "message": {"role": "assistant"},
+              "assistantMessageEvent": {"type": "text_delta", "delta": "工具轮的过渡话"}})
+        while True:
+            emit({"type": "message_update", "messageId": "m1", "message": {"role": "assistant"},
+                  "assistantMessageEvent": {"type": "text_delta", "delta": "查到的一条事实。" * 10}})
+            time.sleep(0.05)
+    if model == "hoard":
+        emit({"type": "tool_execution_start", "toolCallId": "c1", "toolName": "web_search", "args": {"query": task}})
+        emit({"type": "tool_execution_start", "toolCallId": "c2", "toolName": "read",
+              "args": {"path": "https://example.com/a"}})
+        emit({"type": "tool_execution_end", "toolCallId": "c2", "toolName": "read",
+              "result": {"content": [{"type": "text", "text": "正文" * 50}]}})
+        emit({"type": "tool_execution_end", "toolCallId": "c1", "toolName": "web_search",
+              "result": {"content": [{"type": "text", "text": "[1] 哈基米的出处\n    https://example.com/a"}]}})
+        while True:
+            time.sleep(0.1)
     if model == "slow":
         while True:
             with open(os.environ["HEARTBEAT"], "a") as f:

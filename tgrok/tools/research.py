@@ -29,8 +29,10 @@ HOOK = Path(__file__).with_name("research_hook.ts")
 REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
-# 离时限还剩这么多秒时打断研究员、让它用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废
-WRAP_UP_BEFORE = 40
+# 离时限还剩这么多秒时打断研究员、让它用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废。
+# 慢的模型（GPT 读了二十多个网页之后）光写报告就要四五十秒，留少了照样写不完
+WRAP_UP_BEFORE = 60
+MIN_PARTIAL_CHARS = 200  # 到点时已写出这么多字的报告就交上去（注明没写完）
 WRAP_UP_MESSAGE = (
     "Time is almost up. Stop searching and reading now and write your final report from what you have already "
     "found, marking anything you could not verify."
@@ -55,6 +57,7 @@ class Report:
     error: str = ""
     secs: float = 0.0
     usage: dict = field(default_factory=dict)  # omp 报的累计用量：input、output、cacheRead、cacheWrite 等
+    partial: str = ""  # 没交完整报告时 text 是什么："draft"（写了一半的报告）、"material"（查到的原始资料）
 
     @property
     def tokens_in(self) -> int:
@@ -110,6 +113,49 @@ def parse_events(stdout: str) -> tuple[str, dict, str]:
     return text.strip(), usage, failure
 
 
+def collected_material(lines: list[str], limit: int) -> str:
+    """研究员没交报告时，把它已经查到的东西整理出来：每次搜索的结果、每个读过的网页的正文（各截一段），
+    按先后顺序，总长不超过 limit。一步都没做完时返回空串。"""
+    starts: dict[str, dict] = {}
+    pending: dict[str, list[dict]] = {}  # 没有 toolCallId 时按工具名先进先出配对
+    blocks: list[str] = []
+    for line in lines:
+        if '"tool_execution_' not in line[:120]:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        name, call_id = event.get("toolName"), event.get("toolCallId")
+        if event.get("type") == "tool_execution_start":
+            args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            if call_id:
+                starts[call_id] = args
+            else:
+                pending.setdefault(name, []).append(args)
+            continue
+        if event.get("type") != "tool_execution_end":
+            continue
+        args = starts.pop(call_id, None) if call_id else None
+        if args is None:
+            args = (pending.get(name) or [{}]).pop(0) if pending.get(name) else {}
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        text = "".join(c.get("text", "") for c in result.get("content") or [] if isinstance(c, dict)).strip()
+        if not text or event.get("isError"):
+            continue
+        if name == "web_search":
+            blocks.append(t("research_material_search", q=str(args.get("query", "")).strip()) + "\n" + text[:1500])
+        elif name == "read":
+            blocks.append(t("research_material_read", url=str(args.get("path", "")).strip()) + "\n" + text[:2500])
+    out, used = [], 0
+    for block in blocks:
+        if used + len(block) > limit:
+            break
+        out.append(block)
+        used += len(block) + 2
+    return "\n\n".join(out)
+
+
 def _kill(proc: asyncio.subprocess.Process) -> None:
     """结束 omp 及它起的子进程（POSIX 下整组结束）。"""
     if proc.returncode is not None:
@@ -160,8 +206,10 @@ class _Omp:
         self.stderr: deque[str] = deque(maxlen=20)
         self.uses = 0
         self.steps = 0  # 当前任务做了几次搜索/读网页
-        self.events: list[str] = []  # 当前任务收到的事件行
+        self.events: list[str] = []  # 当前任务收到的事件行（流式增量不存，parse_events 只看 message_end）
         self.wrapped = False  # 当前任务已被打断、在等收尾那一轮
+        self.draft = ""  # 正在流式写出的那条回答（到点被掐时把写出的部分交上去）
+        self._draft_id = None
         self.ready = asyncio.create_task(self._start())
 
     async def _start(self) -> None:
@@ -204,7 +252,7 @@ class _Omp:
         wrap_after 秒后还没结束就打断它（连同还在读的网页），让它用已有资料写报告。
         中途被掐掉时，已收到的事件和步数留在 self.events / self.steps。"""
         self.uses += 1
-        self.steps, self.events, self.wrapped = 0, [], False
+        self.steps, self.events, self.wrapped, self.draft, self._draft_id = 0, [], False, "", None
         if self.uses > 1:
             await self._send({"id": "fresh", "type": "new_session"})  # 上一个任务的上下文不带过来
         rid = f"task-{self.uses}"
@@ -230,6 +278,9 @@ class _Omp:
                     if frame.get("status") == "error":
                         error = _error_text(str((frame.get("error") or {}).get("message") or "provider error"))
                     break
+                if '"message_update"' in head:
+                    self._take_delta(line)
+                    continue
                 self.events.append(line)
                 if not any(k in head for k in _PROGRESS_TYPES):
                     continue
@@ -255,6 +306,18 @@ class _Omp:
         logger.info("研究员 %s 跑了 %.0fs、%d 步还没交报告，打断它用已有资料写", self.model, delay, self.steps)
         self.wrapped = True
         await self._send({"id": WRAP_UP_ID, "type": "abort_and_prompt", "message": WRAP_UP_MESSAGE})
+
+    def _take_delta(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        delta = event.get("assistantMessageEvent") or {}
+        if delta.get("type") != "text_delta" or (event.get("message") or {}).get("role") != "assistant":
+            return
+        if event.get("messageId") != self._draft_id:  # 新的一条回答：之前那条（工具轮的过渡话）不要了
+            self._draft_id, self.draft = event.get("messageId"), ""
+        self.draft += str(delta.get("delta") or "")
 
     async def close(self) -> None:
         """结束进程（连同它起的子进程），等它真正退出再删工作目录。"""
@@ -370,7 +433,7 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
         timeout = config.RESEARCH_TIMEOUT
         async with asyncio.timeout(timeout):
             report.text, report.usage, failure, steps = await omp.run(
-                task, on_step, timeout - min(WRAP_UP_BEFORE, timeout / 3))
+                task, on_step, timeout - min(WRAP_UP_BEFORE, timeout * 0.4))
         reusable = True
     except TimeoutError:
         # omp 为空说明还没启动起来（机器忙的时候冷启动会超过 READY_TIMEOUT）
@@ -386,11 +449,27 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
     report.secs = time.monotonic() - t0
     if not report.text and not report.error:
         report.error = failure or "no answer"
-    logger.info("研究员 %s %s：%.0fs，%d 步，%d 字，token 输入 %s / 输出 %s", model,
-                "完成" if report.text else f"失败（{report.error}）", report.secs, steps, len(report.text),
-                logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))
-    usage.record("research", model, report.tokens_in, report.usage.get("output", 0), report.secs, ok=bool(report.text))
+    if not report.text and omp is not None:
+        _salvage(report, omp)
+    outcome = "完成" if report.text and not report.partial else \
+        f"没交完整报告（{report.error}），交回{'写了一半的报告' if report.partial == 'draft' else '查到的原始资料'}" \
+        if report.text else f"失败（{report.error}）"
+    logger.info("研究员 %s %s：%.0fs，%d 步，%d 字，token 输入 %s / 输出 %s", model, outcome, report.secs, steps,
+                len(report.text), logs.tokens(report.tokens_in), logs.tokens(report.usage.get("output", 0)))
+    usage.record("research", model, report.tokens_in, report.usage.get("output", 0), report.secs,
+                 ok=bool(report.text) and not report.partial)
     return report
+
+
+def _salvage(report: Report, omp: _Omp) -> None:
+    """研究员没交报告（到点被掐、进程出错、只停在工具轮）：它查过的东西不能白扔。
+    写了一半报告就交那一半；一个字没写就把搜到的结果和读过的网页原文交上去，都注明不完整。"""
+    if len(omp.draft.strip()) >= MIN_PARTIAL_CHARS:
+        report.text, report.partial = omp.draft.strip() + "\n\n" + t("research_cut_off"), "draft"
+        return
+    material = collected_material(omp.events, REPORT_CHARS)
+    if material:
+        report.text, report.partial = t("research_raw_material") + "\n\n" + material, "material"
 
 
 def _backup(i: int) -> str | None:
@@ -436,19 +515,20 @@ async def run_with_backup(i: int, model: str, task: str, board: _Board | None = 
     几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
     report = await run_researcher(model, task, board.stepper(i, model, False) if board else None)
     backup = _backup(i)
-    if not report.text and backup and backup != model and not report.error.endswith("timed out"):
+    if (not report.text or report.partial) and backup and backup != model and not report.error.endswith("timed out"):
         logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
         step = board.stepper(i, backup, True) if board else None
         if step is not None:
             step(t("research_doing_start"), 0)
         second = await run_researcher(backup, task, step)
-        if not second.text:
-            second.error = f"{model}: {report.error}; {backup}: {second.error}"
-        report = second
+        if second.text and not second.partial or not report.text:
+            if not second.text:
+                second.error = f"{model}: {report.error}; {backup}: {second.error}"
+            report = second  # 备选交了完整报告（或两个都什么也没有）；否则留着第一个查到的资料
     if board is not None:
         reason = t("research_reason_timeout") if report.error.endswith("timed out") else report.error.rsplit(": ", 1)[-1][:40]
-        board.set(i, t("research_row_done" if report.text else "research_row_failed", label=_label(i),
-                       model=_name(report.model), reason=reason))
+        key = "research_row_partial" if report.partial else "research_row_done" if report.text else "research_row_failed"
+        board.set(i, t(key, label=_label(i), model=_name(report.model), reason=reason))
     return report
 
 

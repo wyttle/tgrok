@@ -7,7 +7,7 @@ from telegram import Message, Update
 from telegram.constants import MessageEntityType
 from telegram.ext import ContextTypes, filters
 
-from . import autoreply, config, conversations, logs, media, memory, prompt, recent, render, rich, viewer
+from . import autoreply, captions, config, conversations, logs, media, memory, prompt, recent, render, rich, viewer
 from .chat import stream_reply
 from .i18n import t
 from .tg_auth import is_authorized
@@ -185,8 +185,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if msg is None or msg.from_user is None:
         return
     bot = context.bot
-    # 所有收到的群消息都先记进最近群聊，媒体先在后台预读（别的 bot、频道和匿名管理员发的也算群聊内容）
+    # 所有收到的群消息都先记进最近群聊，媒体先在后台预读、图片先快读（别的 bot、频道和匿名管理员发的也算群聊内容）
     recent.add(msg, bot.id)
+    captions.observe(bot, msg)
     job = media.prefetch(bot, msg)
     if msg.from_user.is_bot:
         return

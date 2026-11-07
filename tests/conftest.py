@@ -35,7 +35,7 @@ os.environ.update({
 })
 os.environ.pop("SYSTEM_PROMPT", None)
 
-from tgrok import autoreply, chat, config, conversations, llm, logs, media, recent, slang, tg_auth, viewer  # noqa: E402
+from tgrok import autoreply, captions, chat, config, conversations, llm, logs, media, recent, slang, tg_auth, viewer  # noqa: E402
 from tgrok.db import db  # noqa: E402
 from tgrok.memory import consolidate  # noqa: E402
 
@@ -55,6 +55,7 @@ def _clear_state() -> None:
     media.watch_cache.clear()
     recent.clear()
     viewer.clear()
+    captions.clear()
     chat.active_generations.clear()
 
 

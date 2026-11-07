@@ -186,6 +186,28 @@ def helper_endpoint() -> LLMEndpoint | None:
     return LLMEndpoint("gemini", GEMINI_HELPER_MODEL, GEMINI_BASE_URL, GEMINI_API_KEY, None)
 
 
+# ---- 群图快读 ----
+# 群里每张图片（照片、图片文件）一出现就让一个便宜的看图模型在后台用一两句话说清是什么，写进最近群聊；
+# 有人问到时主模型用 view_image 看原图。留空不快读（view_image 照样能用，只是最近群聊里只写「图片」）。
+# 协议、地址、key 留空沿用备用模型的（再没有就沿用主模型的）
+IMAGE_CAPTION_MODEL = _str("IMAGE_CAPTION_MODEL")
+IMAGE_CAPTION_PROTOCOL = _protocol("IMAGE_CAPTION_PROTOCOL", "")
+IMAGE_CAPTION_BASE_URL = _url("IMAGE_CAPTION_BASE_URL")
+IMAGE_CAPTION_API_KEY = _str("IMAGE_CAPTION_API_KEY")
+
+
+IMAGE_CAPTION_EXTRA_BODY = _opt_json_obj("IMAGE_CAPTION_EXTRA_BODY")  # 如 {"reasoning":{"effort":"low"}}
+
+
+def caption_endpoint() -> LLMEndpoint | None:
+    if not IMAGE_CAPTION_MODEL:
+        return None
+    base = IMAGE_CAPTION_BASE_URL or LLM_FALLBACK_BASE_URL or LLM_BASE_URL
+    key = IMAGE_CAPTION_API_KEY or LLM_FALLBACK_API_KEY or LLM_API_KEY
+    protocol = IMAGE_CAPTION_PROTOCOL or LLM_FALLBACK_PROTOCOL or LLM_PROTOCOL
+    return _endpoint(protocol, IMAGE_CAPTION_MODEL, base, key, IMAGE_CAPTION_EXTRA_BODY, base, key)
+
+
 # ---- 工具与联网 ----
 SEARCH_MAX_ROUNDS = _int("SEARCH_MAX_ROUNDS", 3)  # 单次回答最多几轮工具调用（所有工具共用）
 # 搜索源：tavily / serper / searxng / duckduckgo，逗号分隔可配多个，并发聚合

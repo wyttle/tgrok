@@ -101,6 +101,7 @@ python bot.py
 | `ENABLE_VISION` | 图片理解（需模型支持视觉输入） | `false` |
 | `GEMINI_MEDIA_MODEL` | 看视频、听语音用的 Gemini 模型；没开视觉时图片也交给它看。走 `GEMINI_BASE_URL` / `GEMINI_API_KEY` | （空） |
 | `MEDIA_PREFETCH` | 视频语音一出现就让 Gemini 在后台转述，问到时直接带上 | `true` |
+| `IMAGE_CAPTION_MODEL` | 群图快读：群里每张图一出现就让这个便宜的看图模型一两句话说清是什么，写进最近群聊；有人问到时主模型用 `view_image` 看原图。协议、地址、key 留空沿用备用模型的（`IMAGE_CAPTION_PROTOCOL` / `_BASE_URL` / `_API_KEY` / `_EXTRA_BODY` 可单独设）。留空不快读（图片照样有编号，能用 `view_image` 看） | （空） |
 | `GEMINI_HELPER_MODEL` | 记忆整理用的 Gemini 模型；留空沿用 `GEMINI_MEDIA_MODEL` | （空） |
 | `RECENT_CHAT_COUNT` | 提问时附上的最近群聊条数；`0` 关闭 | `15` |
 | `RECENT_CHAT_MINUTES` | 最近群聊只取这么多分钟以内的 | `60` |

@@ -140,16 +140,20 @@ def image_entry(m: Message) -> dict | None:
     """从单条消息提取图片引用（压缩照片取最大尺寸；图片文件校验大小；
     静态贴纸本身就是 webp 图片，动态/视频贴纸取它的缩略图）。"""
     if m.photo:
-        return {"file_id": m.photo[-1].file_id, "mime": "image/jpeg", "message_id": m.message_id}
+        return {"file_id": m.photo[-1].file_id, "uid": m.photo[-1].file_unique_id, "mime": "image/jpeg",
+                "message_id": m.message_id}
     if is_image_document(m):
         if m.document.file_size and m.document.file_size > config.MAX_IMAGE_BYTES:
             return None
-        return {"file_id": m.document.file_id, "mime": m.document.mime_type, "message_id": m.message_id}
+        return {"file_id": m.document.file_id, "uid": m.document.file_unique_id, "mime": m.document.mime_type,
+                "message_id": m.message_id}
     if m.sticker:
         if not (m.sticker.is_animated or m.sticker.is_video):
-            return {"file_id": m.sticker.file_id, "mime": "image/webp", "message_id": m.message_id}
+            return {"file_id": m.sticker.file_id, "uid": m.sticker.file_unique_id, "mime": "image/webp",
+                    "message_id": m.message_id}
         if m.sticker.thumbnail:
-            return {"file_id": m.sticker.thumbnail.file_id, "mime": "image/webp", "message_id": m.message_id}
+            return {"file_id": m.sticker.thumbnail.file_id, "uid": m.sticker.thumbnail.file_unique_id,
+                    "mime": "image/webp", "message_id": m.message_id}
     return None
 
 

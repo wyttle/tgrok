@@ -11,13 +11,14 @@ from datetime import datetime
 
 from telegram import Message
 
-from . import config, media, prompt, viewer
+from . import captions, config, media, prompt, viewer
 from .db import db, schema
 from .i18n import t
 
 LINE_CHARS = 600
 BOT_LINE_CHARS = 800  # bot 自己的回复截短了，群友追问「你刚才说的」时模型就只记得开头
 BOT_KEEP = 3  # 不管群里多热闹，都带上 bot 自己最近几条回复
+IMAGE_KIND = "image"  # media_what 填这个的是图片（照片、图片文件）：渲染时写编号和快读描述，不是 viewer 的转述
 
 schema("""
 CREATE TABLE IF NOT EXISTS recent (
@@ -74,20 +75,22 @@ def add(m: Message, bot_id: int) -> None:
     if not config.RECENT_CHAT_COUNT or m.chat.type == "private":
         return
     entry = media.media_entry(m)
+    photo = captions.photo_entry(m) if config.ENABLE_VISION and not entry else None
     text = m.text or m.caption or ""
     if not entry and m.sticker:
         text = " ".join(p for p in (t("observed_sticker", emoji=f" {m.sticker.emoji}" if m.sticker.emoji else ""),
                                     text) if p)
-    elif not entry and media.image_entry(m):
+    elif not entry and not photo and media.image_entry(m):
         text = " ".join(p for p in (t("observed_image"), text) if p)
     who = prompt.sender_label(m)
     origin = getattr(m, "forward_origin", None)
     if origin is not None:
         text = t("recent_forward", origin=prompt.origin_label(origin)) + text
     author = m.from_user.id if m.from_user is not None and m.sender_chat is None else None
+    uid, what = (entry["uid"], media.describe(entry)) if entry else (photo["uid"], IMAGE_KIND) if photo else (None, "")
     _save(m.chat_id, author, Entry(
         m.message_id, m.date.timestamp() if m.date else time.time(), who, _clip(text, LINE_CHARS),
-        _reply_label(m, bot_id), entry["uid"] if entry else None, media.describe(entry) if entry else ""))
+        _reply_label(m, bot_id), uid, what))
 
 
 def add_bot(chat_id: int, msg_ids: list[int], text: str, asker: str, asker_id: int) -> None:
@@ -100,7 +103,11 @@ def add_bot(chat_id: int, msg_ids: list[int], text: str, asker: str, asker_id: i
 def _line(e: Entry) -> str:
     when = datetime.fromtimestamp(e.ts, config.BOT_TZ).strftime("%H:%M")
     body = e.text
-    if e.media_uid:
+    if e.media_what == IMAGE_KIND:
+        seen = captions.ready(e.media_uid)
+        tag = t("recent_image", id=e.msg_id, text=seen) if seen else t("recent_image_unread", id=e.msg_id)
+        body = " ".join(p for p in (tag, body) if p)
+    elif e.media_uid:
         heard = viewer.ready(e.media_uid)
         tag = t("recent_media_heard", what=e.media_what, text=_clip(heard, LINE_CHARS)) if heard \
             else t("observed_media", what=e.media_what)

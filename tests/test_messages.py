@@ -16,7 +16,8 @@ def test_current_time_is_appended_to_user_message():
 
 def test_album_reply_expands_to_whole_group():
     def photo(mid, group_id=None):
-        return ns(message_id=mid, chat_id=-100, media_group_id=group_id, photo=[ns(file_id=f"photo{mid}")],
+        return ns(message_id=mid, chat_id=-100, media_group_id=group_id,
+                  photo=[ns(file_id=f"photo{mid}", file_unique_id=f"u{mid}")],
                   document=None)
 
     for mid in (12, 11, 12):

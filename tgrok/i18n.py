@@ -182,6 +182,24 @@ STRINGS = {
         "calc_error": "（计算失败：{error}。检查表达式写法后重试，或说明这一步没算出来。）",
         "tool_unknown": "（没有名为 {name} 的工具）",
         "tool_watch": "查看媒体: {q}",
+        "tool_view_image": "看图: #{id}",
+        "view_image_prompt": (
+            "最近群聊里的图片写成「[图片 #编号：一句描述]」。描述是另一个小模型扫一眼写的，只够知道大概是什么。"
+            "有人在聊这张图、问到它，或者你的回答要靠图里的细节（字、数字、人、是不是 P 的）时，先用 view_image 看原图，"
+            "不要只凭那句描述回答，也不要说自己看不到图。"
+        ),
+        "view_image_unknown": "（没有这个编号的图片，或者它太早了已经取不到；只能看最近群聊里写了 #编号 的图）",
+        "view_image_failed": "（下载图片失败：{error}）",
+        "view_image_too_many": "（一轮最多看 {n} 张图，其余的下一轮再看）",
+        "view_image_attached": "（图片 #{id} 附在下一条消息里）",
+        "tool_images_follow": "（这是刚才 view_image 取来的图片，按调用顺序排列）",
+        "res_image_seen": "已取来",
+        "recent_image": "[图片 #{id}：{text}]",
+        "recent_image_unread": "[图片 #{id}]",
+        "caption_prompt": (
+            "群聊里有人发了这张图。用中文一两句话说清楚图里是什么：有字就写出要点（截图、表格、聊天记录、新闻、梗图上的字），"
+            "是梗图就说出是什么梗。不评论，不猜发图人的意图。"
+        ),
         "tool_send_image": "找图: {what}",
         "send_image_prompt": (
             "需要给人看图时就发图：对方要图、问某样东西长什么样，或者一张照片、地图、图表、表情包比文字说得更清楚时，"
@@ -378,7 +396,7 @@ STRINGS = {
         "stats_empty": "【{name}】没有模型调用",
         "stats_note": "token 以各接口报的为准，没报用量的接口记 0；调研是 omp 研究员的合计。",
         "usage_features": {"reply": "回复", "research": "调研", "search": "搜索", "media": "看视频/听语音",
-                           "memory": "记忆整理"},
+                           "memory": "记忆整理", "caption": "群图快读"},
         "cmd_memory": "查看本聊天的记忆",
         "cmd_forget": "清空本聊天的记忆；/forget 编号 删掉指定条目",
         "cmd_forgetme": "删掉 bot 记的关于你的一切",
@@ -604,6 +622,28 @@ STRINGS = {
         "calc_error": "(calculation failed: {error}. Fix the expression and retry, or say this step could not be computed.)",
         "tool_unknown": "(there is no tool named {name})",
         "tool_watch": "Viewing media: {q}",
+        "tool_view_image": "Viewing image #{id}",
+        "view_image_prompt": (
+            "In the recent chat, images appear as \"[image #<id>: one-line description]\". A small helper model wrote "
+            "that description at a glance; it only tells you roughly what the image is. When people are talking about "
+            "the image or asking about it, or your answer depends on what's in it (text, numbers, people, whether it's "
+            "edited), look at the original with view_image first instead of going by the description, and don't say "
+            "you can't see images."
+        ),
+        "view_image_unknown": "(no image with that number, or it's too old to fetch; only images shown with #<id> in the recent chat)",
+        "view_image_failed": "(failed to download the image: {error})",
+        "view_image_too_many": "(at most {n} images per round; look at the rest next round)",
+        "view_image_attached": "(image #{id} is attached in the next message)",
+        "tool_images_follow": "(These are the images you just fetched with view_image, in call order.)",
+        "res_image_seen": "fetched",
+        "recent_image": "[image #{id}: {text}]",
+        "recent_image_unread": "[image #{id}]",
+        "caption_prompt": (
+            "Someone posted this image in a group chat. In one or two sentences, say what it is: if it has text "
+            "(screenshot, table, chat log, news, meme caption), give the gist; if it's a meme, name the meme. "
+            "No commentary, no guessing why they posted it. Answer in the language of the text in the image, or "
+            "Chinese if there is none."
+        ),
         "tool_send_image": "Finding image: {what}",
         "send_image_prompt": (
             "Send a picture when showing helps: someone asks for one or what something looks like, or a photo, map, "
@@ -831,7 +871,7 @@ STRINGS = {
         "stats_note": "Token counts are as reported by each API (0 where none is reported); research is the omp "
                       "researchers' total.",
         "usage_features": {"reply": "Replies", "research": "Research", "search": "Search", "media": "Media",
-                           "memory": "Memory upkeep"},
+                           "memory": "Memory upkeep", "caption": "Image captions"},
         "cmd_memory": "Show this chat's memory",
         "cmd_forget": "Clear this chat's memory; /forget <number> deletes one entry",
         "cmd_forgetme": "Delete everything the bot remembers about you",

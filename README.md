@@ -104,6 +104,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `ENABLE_VISION` | image understanding (vision-capable models) | `false` |
 | `GEMINI_MEDIA_MODEL` | Gemini model that watches videos and listens to voice messages; also views images when vision is off. Uses `GEMINI_BASE_URL` / `GEMINI_API_KEY` | (empty) |
 | `MEDIA_PREFETCH` | transcribe videos and voice messages in the background as soon as they appear | `true` |
+| `IMAGE_CAPTION_MODEL` | cheap vision model that describes every group image in a sentence or two as it appears, so the recent chat says what each image is; the reply model opens the original with `view_image` when someone asks about it. Protocol, URL and key default to the fallback model's (`IMAGE_CAPTION_PROTOCOL` / `_BASE_URL` / `_API_KEY` / `_EXTRA_BODY` override them). Empty = no quick read (images still get a number for `view_image`) | (empty) |
 | `GEMINI_HELPER_MODEL` | Gemini model for memory consolidation; empty = reuse `GEMINI_MEDIA_MODEL` | (empty) |
 | `RECENT_CHAT_COUNT` | recent group messages attached to a question; `0` = off | `15` |
 | `RECENT_CHAT_MINUTES` | only recent messages from this many minutes back | `60` |

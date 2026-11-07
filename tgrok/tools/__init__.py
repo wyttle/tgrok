@@ -22,6 +22,8 @@ class Outcome:
     content: str  # 回灌给模型的文本
     ok: bool
     summary: str  # 进度里工具行下面的结果行：几条结果、多少字、= 结果、失败
+    # 要交给模型看的图片（data URL）。工具结果只能是文字，图片跟在这轮工具结果后面作为一条 user 消息发给模型
+    images: list[str] = field(default_factory=list)
 
 
 def failed(content: str) -> Outcome:
@@ -101,10 +103,11 @@ def _registry() -> dict[str, Tool]:
     from .remember_slang import RememberSlangTool
     from .research import ResearchTool
     from .send_image import SendImageTool
+    from .view_image import ViewImageTool
     from .watch import WatchMediaTool
     from .web import OpenUrlTool, WebSearchTool
-    tools = [CalculateTool(), RememberSlangTool(), RememberTool(), RecallTool(), WatchMediaTool(), WebSearchTool(),
-             OpenUrlTool(), SendImageTool(), ResearchTool()]
+    tools = [CalculateTool(), RememberSlangTool(), RememberTool(), RecallTool(), ViewImageTool(), WatchMediaTool(),
+             WebSearchTool(), OpenUrlTool(), SendImageTool(), ResearchTool()]
     return {tool.name: tool for tool in tools}
 
 
@@ -133,7 +136,7 @@ class RoundPlan:
     _args: list[dict | None] = field(default_factory=list)
 
     async def execute(self) -> list[dict]:
-        """并发执行全部调用，按原顺序返回 tool 消息。"""
+        """并发执行全部调用，按原顺序返回 tool 消息；有工具取来了图片时，末尾再加一条带图的 user 消息。"""
         outcomes: list[Outcome | None] = [None] * len(self.calls)
         groups: dict[str, list[int]] = {}
         for i, call in enumerate(self.calls):
@@ -162,8 +165,13 @@ class RoundPlan:
             tool = REGISTRY.get(self.calls[idxs[0]]["function"]["name"])
             mine = [outcomes[i] for i in idxs]
             line.result = tool.batch_summary(mine) if tool and len(idxs) > 1 else mine[0].summary
-        return [{"role": "tool", "tool_call_id": call["id"], "name": call["function"]["name"],
-                 "content": outcome.content} for call, outcome in zip(self.calls, outcomes)]
+        results = [{"role": "tool", "tool_call_id": call["id"], "name": call["function"]["name"],
+                    "content": outcome.content} for call, outcome in zip(self.calls, outcomes)]
+        images = [url for outcome in outcomes for url in outcome.images]
+        if images:
+            results.append({"role": "user", "content": [{"type": "text", "text": t("tool_images_follow")}]
+                            + [{"type": "image_url", "image_url": {"url": url}} for url in images]})
+        return results
 
 
 def plan_round(calls: list[dict], chat_id: int | None) -> RoundPlan:

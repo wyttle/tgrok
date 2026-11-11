@@ -121,7 +121,8 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `JINA_API_KEY` | optional Jina API key for higher rate limits | (empty) |
 | `RESEARCH_MODELS` | omp model names (comma-separated) for the `research` tool; each becomes one researcher; empty = off | (empty) |
 | `RESEARCH_FALLBACK_MODELS` | backup omp model per researcher (by position; one value = shared); a failed researcher is rerun once on it, unless it ran out of time | (empty) |
-| `RESEARCH_TIMEOUT` | seconds each researcher may run; searching ends 90 s before that (after 60 s by default) and the rest is for writing the report | `150` |
+| `RESEARCH_TIMEOUT` | seconds each researcher may run; searching ends 60 s before that and the rest is for writing the report | `150` |
+| `RESEARCH_SLOW_MODELS` | researcher models that write slowly (a few dozen tokens per second): they stop searching 30 s earlier and keep the report under 400 words; the others are not affected | (empty) |
 | `RESEARCH_THINKING` | researcher thinking level (`omp --thinking`) | `low` |
 | `RESEARCH_CONCURRENCY` | research tasks running at the same time | `2` |
 | `RESEARCH_WARM` | keep one omp process per research model running (about 200 MB each) so a task starts at once instead of after a 10–15 s cold start | `true` |
@@ -246,7 +247,7 @@ For questions that need real checking (memes and niche jargon, disputed claims, 
 model can call a `research` tool. The task goes to every model in `RESEARCH_MODELS` at once; each runs as a headless
 [omp](https://omp.sh) process that may only search and read public web pages, reads the actual pages, and returns key
 facts with the sources it read. All reports go back to the reply model, which compares them and decides what to
-trust. One call takes about 30 s to 1.5 min; the reply model keeps using `web_search` for quick lookups.
+trust. One call takes about 30 s to 2 min; the reply model keeps using `web_search` for quick lookups.
 
 Setup:
 

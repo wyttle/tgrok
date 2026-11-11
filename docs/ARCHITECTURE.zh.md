@@ -118,9 +118,10 @@ Telegram update
            -> calculate、remember_slang、memory、recall、watch_media、web_search（grounding 模式同轮合并）、open_url、send_image
            -> research：每个研究员交给一个常驻的 omp --mode rpc 进程（只开 web_search 和 read，加载 hook，空的临时目录），
               同一轮的几个 research 合并成一个编号任务只跑一组（每组都要起 omp，同时起几组会把小内存机器挤到交换分区、全部超时）；
-              查资料查到离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒为止（默认即前 60 秒，系统提示词里也告诉研究员），
+              查资料查到离 RESEARCH_TIMEOUT 还剩 research.WRAP_UP_BEFORE 秒为止（系统提示词里也告诉研究员有多少秒），
               到点用 RPC 的 abort_and_prompt 打断研究员（连同还在读的网页，已有结果保留），让它用已有资料写报告
-              （steer 要等手上这批工具跑完才送到，一个卡住的网页能拖一分钟）；剩下的时间都留给写报告，
+              （steer 要等手上这批工具跑完才送到，一个卡住的网页能拖一分钟）；剩下的时间都留给写报告；
+              RESEARCH_SLOW_MODELS 里写得慢的模型单独对待：多留半分钟写报告（research.SLOW_WRAP_UP_BEFORE），
               报告限四百词以内、不要表格和引言（GPT 每秒只出五十来个 token，不限长度一份要写 40 到 60 多秒）；
               超过 RESEARCH_TIMEOUT 或回复被取消时整组结束，超时日志记已做的步数和用量，启动没完成记成 startup timed out；
               研究员没交报告（到点、出错）时不白跑：写了一半就交那一半，一个字没写就把它搜到的结果和读过的网页原文

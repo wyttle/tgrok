@@ -246,7 +246,7 @@ For questions that need real checking (memes and niche jargon, disputed claims, 
 model can call a `research` tool. The task goes to every model in `RESEARCH_MODELS` at once; each runs as a headless
 [omp](https://omp.sh) process that may only search and read public web pages, reads the actual pages, and returns key
 facts with the sources it read. All reports go back to the reply model, which compares them and decides what to
-trust. One call takes about 30 s to 2 min; the reply model keeps using `web_search` for quick lookups.
+trust. One call takes about 30 s to 1.5 min; the reply model keeps using `web_search` for quick lookups.
 
 Setup:
 

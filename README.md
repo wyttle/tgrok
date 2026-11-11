@@ -121,7 +121,7 @@ Add the bot to a group, then reply to any message with `@your_bot_username is th
 | `JINA_API_KEY` | optional Jina API key for higher rate limits | (empty) |
 | `RESEARCH_MODELS` | omp model names (comma-separated) for the `research` tool; each becomes one researcher; empty = off | (empty) |
 | `RESEARCH_FALLBACK_MODELS` | backup omp model per researcher (by position; one value = shared); a failed researcher is rerun once on it, unless it ran out of time | (empty) |
-| `RESEARCH_TIMEOUT` | seconds each researcher may run | `150` |
+| `RESEARCH_TIMEOUT` | seconds each researcher may run; searching ends 90 s before that (after 60 s by default) and the rest is for writing the report | `150` |
 | `RESEARCH_THINKING` | researcher thinking level (`omp --thinking`) | `low` |
 | `RESEARCH_CONCURRENCY` | research tasks running at the same time | `2` |
 | `RESEARCH_WARM` | keep one omp process per research model running (about 200 MB each) so a task starts at once instead of after a 10–15 s cold start | `true` |

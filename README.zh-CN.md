@@ -118,7 +118,7 @@ python bot.py
 | `JINA_API_KEY` | 可选 Jina API key，用于提高速率限制 | （空） |
 | `RESEARCH_MODELS` | `research` 工具用的 omp 模型名（逗号分隔），每个模型一个研究员；留空关闭 | （空） |
 | `RESEARCH_FALLBACK_MODELS` | 每个研究员的备选 omp 模型（按位置对应，只写一个则共用）；研究员失败时换它再跑一次，时间用完的除外 | （空） |
-| `RESEARCH_TIMEOUT` | 单个研究员最多跑多少秒 | `150` |
+| `RESEARCH_TIMEOUT` | 单个研究员最多跑多少秒；查资料查到还剩 90 秒为止（默认即前 60 秒），剩下的时间留给写报告 | `150` |
 | `RESEARCH_THINKING` | 研究员的思考强度（`omp --thinking`） | `low` |
 | `RESEARCH_CONCURRENCY` | 同时最多几个调研任务 | `2` |
 | `RESEARCH_WARM` | 每个研究员模型常驻一个 omp 进程（每个约 200MB 内存），接到任务立刻开工，省掉每次 10 到 15 秒的冷启动 | `true` |

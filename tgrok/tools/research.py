@@ -29,25 +29,37 @@ HOOK = Path(__file__).with_name("research_hook.ts")
 REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
-# 离时限还剩这么多秒时打断研究员、让它用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废。
-# 慢的模型（GPT 读了二十多个网页之后）光写报告就要四五十秒，留少了照样写不完
-WRAP_UP_BEFORE = 60
+# 查资料最多查到离时限还剩这么多秒，到点就打断研究员、让它用已有资料写报告：报告要到最后才写，到点直接掐掉就整份作废。
+# 线上 GPT 从不自己停手，每次都查到被打断为止，而它写报告每秒只出五十来个 token，一份要写 40 到 60 多秒：
+# 原先只留 60 秒，它回回拖到 130 到 150 秒，六次里有一次写不完。查资料的时间砍到一分钟，剩下的都留给写报告
+WRAP_UP_BEFORE = 90
 MIN_PARTIAL_CHARS = 200  # 到点时已写出这么多字的报告就交上去（注明没写完）
 WRAP_UP_MESSAGE = (
-    "Time is almost up. Stop searching and reading now and write your final report from what you have already "
-    "found, marking anything you could not verify."
+    "Time is up. Stop searching and reading now and write your final report from what you have already found, "
+    "as short as your instructions say, marking anything you could not verify."
 )
 WRAP_UP_ID = "wrap-up"
 
+# 报告要短：它是给主模型看的，主模型自己再写回复。不限长度时 GPT 一份写五千到一万多字（带表格、带引言），
+# 同一个任务实测写 46 秒；限到四百词写 13 秒。也告诉它只有多少秒可查，免得查到被打断为止
 SYSTEM_PROMPT = (
     "You are a fact-finding researcher. Research the task with web_search and read (read only public web pages). "
     "Verify key facts by reading the actual pages, not just search snippets: primary sources, official sites, "
     "reputable media and encyclopedias, and for internet slang or niche community jargon the explainer pages and "
     "community posts (Moegirl, Baidu Baike, Zhihu, Bilibili, gaming and fan sites). If results are thin or "
-    "conflicting, search again with different wording or in another language. Report in the language of the task: "
-    "concise factual bullet points with dates where relevant; say plainly what you could not verify and where "
-    "sources disagree. Then list the URLs you actually read. No opinions, no filler."
+    "conflicting, search again with different wording or in another language. You have about {secs} seconds "
+    "before you are stopped: issue several searches and reads together in each round, and start the report as "
+    "soon as the key facts are confirmed instead of chasing every detail. Report in the language of the task. "
+    "The report goes to another model that writes the actual answer, so keep it under 400 words (about 800 "
+    "Chinese characters): factual bullet points with dates where relevant, no introduction, no tables, no closing "
+    "summary; say plainly what you could not verify and where sources disagree. End with the URLs that back "
+    "those facts, at most 8. No opinions, no filler."
 )
+
+
+def _search_seconds() -> float:
+    """研究员查资料最多查多少秒：到点打断它，剩下的时间留给写报告。"""
+    return config.RESEARCH_TIMEOUT - min(WRAP_UP_BEFORE, config.RESEARCH_TIMEOUT * 0.6)
 
 
 @dataclass
@@ -70,7 +82,8 @@ def _command(model: str) -> list[str]:
         *shlex.split(config.OMP_BIN, posix=os.name != "nt"),
         "--mode", "rpc", "--no-ui", "--no-session", "--no-title", "--no-skills", "--no-rules", "--no-extensions",
         "--no-lsp", "--tools", "web_search,read", "--hook", str(HOOK), "--model", model,
-        "--thinking", config.RESEARCH_THINKING, "--system-prompt", SYSTEM_PROMPT,
+        "--thinking", config.RESEARCH_THINKING,
+        "--system-prompt", SYSTEM_PROMPT.format(secs=round(_search_seconds())),
     ]
 
 
@@ -430,10 +443,8 @@ async def run_researcher(model: str, task: str, on_step: Step | None = None) -> 
     steps, failure, omp, reusable = 0, "", None, False
     try:
         omp = await _acquire(model)
-        timeout = config.RESEARCH_TIMEOUT
-        async with asyncio.timeout(timeout):
-            report.text, report.usage, failure, steps = await omp.run(
-                task, on_step, timeout - min(WRAP_UP_BEFORE, timeout * 0.4))
+        async with asyncio.timeout(config.RESEARCH_TIMEOUT):
+            report.text, report.usage, failure, steps = await omp.run(task, on_step, _search_seconds())
         reusable = True
     except TimeoutError:
         # omp 为空说明还没启动起来（机器忙的时候冷启动会超过 READY_TIMEOUT）

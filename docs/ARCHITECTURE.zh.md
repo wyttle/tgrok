@@ -127,7 +127,10 @@ Telegram update
               研究员没交报告（到点、出错）时不白跑：写了一半就交那一半，一个字没写就把它搜到的结果和读过的网页原文
               （research.collected_material）交给主模型，都注明不完整；不超时的失败照旧先试备选，备选交了完整报告才换掉；
               失败的研究员按 RESEARCH_FALLBACK_MODELS 换备选再跑一次（研究员之间同时跑，
-              每个研究员的主→备先后跑）；超时（含启动超时）不换备选；失败原因取 omp 事件流里
+              每个研究员的主→备先后跑）；超时（含启动超时）不换备选；omp 自己的请求重试用 --config research_omp.yml 关掉
+              （默认重试 10 次，接口挂掉时一步没做也拖满 RESEARCH_TIMEOUT），接口一报错就算失败；调研在跑时气泡上多一个
+              「别查了，直接答」按钮（tools.StopSwitch，chat.on_button 的 s: 回调）：点了以后研究员进程立刻结束、不换备选，
+              已交的报告、写了一半的报告或查到的原始资料照样交回，并告诉主模型马上作答、别再调 research；失败原因取 omp 事件流里
               接口报的错误（网关 HTML 错误页只取标题）；omp 的输出边跑边逐行读：每次开始搜索或读网页，
               研究员那一行的进度明细（ProgressLine.detail，经 tools.show_detail）就更新成「在做什么、第几步」；
               报告标上研究员和模型名交给主模型判断，全部失败时提示它自己查。什么时候查、用 research 还是 web_search
@@ -171,7 +174,7 @@ Telegram update
 - `web._grounding_cooldown_until`：grounding 配额超限后的冷却截止时间。
 - `tools.research._slots`：限制同时进行的调研任务数（`RESEARCH_CONCURRENCY`）的信号量，换事件循环时重建。
 - `tools.research._idle`：常驻的 omp（`--mode rpc`），每个研究员模型最多一个空闲的。`app.post_init` 调 `warm_up` 先启动好；任务来了取走（还在启动就等它），用 `new_session` 开新会话接任务，读事件到 `prompt_result`；用完放回，接满 `RECYCLE_AFTER` 次换新进程。超时、出错或回复被取消时整组进程杀掉，再补一个新的预热。`RESEARCH_WARM=false` 时每个任务现启动、用完就关。`app.post_shutdown` 关掉全部。
-- `chat.active_generations`：正在生成的任务，供取消按钮定位。
+- `chat.active_generations`：正在生成的任务和它的叫停开关，供气泡上的按钮（取消、别查了直接答）定位。
 - `tools.send_image.outbox`：contextvar，`chat.stream_reply` 为每次回复放一个空列表，send_image 把图片攒进去；回复成功定稿后才发，被取消或失败时不发。发出去的图在返回的回复文本末尾记一句，追问时模型知道自己发过什么。
 - `tg_auth.allowed_users`：运行时白名单，写入 `WHITELIST_FILE`。
 - `conversations._cache`、`_sizes`、`_owners`、`_total`：追问用的对话历史（带图片原样）、字符量计数和提问者。同时写进 `MEMORY_DB` 的 `conversations` 表：去掉系统提示词、图片换成「[图片]」，保留 `CONVERSATION_KEEP_DAYS` 天；内存里没有时从表里取，系统提示词换成当前的。`/forget` 和 `/forgetme` 一起删。

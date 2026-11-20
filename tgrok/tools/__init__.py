@@ -1,5 +1,33 @@
 """bot 自带的工具。
 
+class StopSwitch:
+    """一次回复里的「别查了，直接答」开关：能被叫停的工具（research）在跑时气泡上多一个按钮，
+    点了以后工具带着已经查到的东西马上返回，模型接着作答（取消按钮是整条回复都不要了）。"""
+    def __init__(self):
+        self.pressed = asyncio.Event()
+        self.armed = 0  # 正在跑的、能被叫停的工具数
+
+    def arm(self) -> None:
+        self.armed += 1
+
+    def disarm(self) -> None:
+        self.armed -= 1
+        if not self.armed:
+            self.pressed.clear()  # 这次叫停只管当时在跑的工具，同一条回复里以后再调研不受影响
+
+    def press(self) -> bool:
+        """叫停正在跑的工具；没有能叫停的工具在跑时返回 False。"""
+        if not self.armed:
+            return False
+        self.pressed.set()
+        return True
+
+
+# 当前这条回复的开关，chat.stream_reply 设置；不在回复里（如测试直接调工具）时为 None
+stop_switch: contextvars.ContextVar[StopSwitch | None] = contextvars.ContextVar("tool_stop_switch", default=None)
+
+
+
 每个工具的定义（给模型的 schema）、执行、进度显示文案和系统提示词说明都写在它自己的模块里，
 在这里的 REGISTRY 登记一次。chat 和 prompt 只通过本模块的函数和工具打交道，加一个工具不用改别处。
 """

@@ -1,0 +1,5 @@
+# 研究员 omp 的设置（omp --config，盖在 ~/.omp/agent/config.yml 上面，只管研究员这些进程）。
+# 接口报错就直接算这个研究员失败，不让 omp 自己重试：它默认最多重试 10 次、间隔一次比一次长，
+# 接口挂掉时研究员一步没做也会拖满 RESEARCH_TIMEOUT，整次调研跟着等。失败了由 bot 换备选模型（RESEARCH_FALLBACK_MODELS）
+retry:
+  enabled: false

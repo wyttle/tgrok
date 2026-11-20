@@ -10,7 +10,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler
 
 from . import config, logs, memory
-from .chat import on_cancel_button
+from .chat import on_button
 from .commands import COMMANDS
 from .handlers import MESSAGE_FILTER, handle_message
 from .i18n import t
@@ -50,7 +50,7 @@ def build_application() -> Application:
     app.add_error_handler(on_error)
     for command in COMMANDS:
         app.add_handler(CommandHandler(list(command.names), command))
-    app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^c:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^[cs]:\d+$"))
     app.add_handler(MessageHandler(MESSAGE_FILTER, handle_message))
     return app
 

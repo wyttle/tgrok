@@ -224,6 +224,27 @@ def test_cancelled_reply_kills_researchers(fake_omp):
     assert _stays_still(fake_omp)
 
 
+def test_stop_button_ends_research_at_once_without_backup(fake_omp):
+    config.RESEARCH_MODELS = ["slow"]
+    config.RESEARCH_FALLBACK_MODELS = ["cpa/ok-opus"]
+    switch = tools.StopSwitch()
+
+    async def scenario():
+        tools.stop_switch.set(switch)
+        task = asyncio.create_task(tools.REGISTRY["research"].run({"task": "x"}, None))
+        assert not switch.press()  # 调研还没开始跑，没有可叫停的
+        while not fake_omp.exists():
+            await asyncio.sleep(0.05)
+        assert switch.press()
+        return await asyncio.wait_for(task, 10)
+
+    outcome = run(scenario())
+    assert "slow）没有交回报告：stopped" in outcome.content and outcome.content.endswith(t("research_stopped_note"))
+    assert "ok-opus" not in outcome.content  # 叫停了就不再换备选重跑
+    assert _stays_still(fake_omp)
+    assert not switch.armed and not switch.pressed.is_set()  # 同一条回复里之后再调研不受这次叫停影响
+
+
 def test_parse_events_takes_last_answer_and_sums_usage():
     lines = [
         '{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "先搜一下"}], '

@@ -21,11 +21,12 @@ from pathlib import Path
 
 from .. import config, logs, usage
 from ..i18n import t
-from . import Outcome, Tool, _batch_lines, _line, failed, show_detail
+from . import Outcome, Tool, _batch_lines, _line, failed, show_detail, stop_switch
 
 logger = logging.getLogger(__name__)
 
 HOOK = Path(__file__).with_name("research_hook.ts")
+OMP_CONFIG = Path(__file__).with_name("research_omp.yml")  # 研究员 omp 的设置：接口报错不自己重试
 REPORT_CHARS = 12000  # 单份报告回灌给主模型的字数上限
 READY_TIMEOUT = 90  # omp 冷启动（加载模型目录、建会话）最多等多久
 RECYCLE_AFTER = 20  # 一个常驻 omp 接过这么多个任务就换新进程，免得内存越用越多
@@ -91,7 +92,7 @@ def _command(model: str) -> list[str]:
     return [
         *shlex.split(config.OMP_BIN, posix=os.name != "nt"),
         "--mode", "rpc", "--no-ui", "--no-session", "--no-title", "--no-skills", "--no-rules", "--no-extensions",
-        "--no-lsp", "--tools", "web_search,read", "--hook", str(HOOK), "--model", model,
+        "--no-lsp", "--tools", "web_search,read", "--hook", str(HOOK), "--config", str(OMP_CONFIG), "--model", model,
         "--thinking", config.RESEARCH_THINKING,
         "--system-prompt", SYSTEM_PROMPT.format(secs=round(_search_seconds(model)), report=report),
     ]
@@ -445,17 +446,46 @@ async def _release(omp: _Omp, reusable: bool) -> None:
     warm_up()  # 补一个新的，下一个任务不用等冷启动
 
 
-async def run_researcher(model: str, task: str, on_step: Step | None = None) -> Report:
+class _Stopped(Exception):
+    """提问的人点了「别查了，直接答」。"""
+
+
+async def _unless_stopped(coro, stop: asyncio.Event | None):
+    """等 coro 的结果；stop 先被 set 就取消它、抛 _Stopped。"""
+    if stop is None:
+        return await coro
+    job, pressed = asyncio.ensure_future(coro), asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({job, pressed}, return_when=asyncio.FIRST_COMPLETED)
+        if job.done():
+            return job.result()
+        raise _Stopped
+    finally:
+        job.cancel()
+        pressed.cancel()
+        await asyncio.wait({job, pressed})  # 等它真正停下，调用方才能放心结束进程
+
+
+async def run_researcher(model: str, task: str, on_step: Step | None = None,
+                         stop: asyncio.Event | None = None) -> Report:
     """跑一个研究员。永不抛异常（取消除外）：失败时 Report.error 说明原因。
-    omp 边跑边一行一个事件地输出；每开始一次搜索或读网页，on_step 收到（在做什么, 第几步）。"""
+    omp 边跑边一行一个事件地输出；每开始一次搜索或读网页，on_step 收到（在做什么, 第几步）。
+    stop 被 set 时立刻结束（error 为 stopped），已经写出的报告或查到的资料照样交回。"""
     t0 = time.monotonic()
     report = Report(model)
     steps, failure, omp, reusable = 0, "", None, False
     try:
-        omp = await _acquire(model)
+        omp = await _unless_stopped(_acquire(model), stop)
         async with asyncio.timeout(config.RESEARCH_TIMEOUT):
-            report.text, report.usage, failure, steps = await omp.run(task, on_step, _search_seconds(model))
+            report.text, report.usage, failure, steps = await _unless_stopped(
+                omp.run(task, on_step, _search_seconds(model)), stop)
         reusable = True
+    except _Stopped:
+        report.error = "stopped"
+        if omp is not None:
+            steps, (_, report.usage, _) = omp.steps, parse_events("".join(omp.events))
+        else:
+            warm_up()  # 还在启动的那个进程已经丢掉了，补一个
     except TimeoutError:
         # omp 为空说明还没启动起来（机器忙的时候冷启动会超过 READY_TIMEOUT）
         report.error = "timed out" if omp is not None else "startup timed out"
@@ -531,23 +561,26 @@ def _name(model: str) -> str:
     return model.rsplit("/", 1)[-1]
 
 
-async def run_with_backup(i: int, model: str, task: str, board: _Board | None = None) -> Report:
-    """跑第 i 个研究员；失败（超时除外：时间已经花完了，再跑备选就是让群友再等一整轮）就用它的备选模型再跑一次。
-    几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
-    report = await run_researcher(model, task, board.stepper(i, model, False) if board else None)
+async def run_with_backup(i: int, model: str, task: str, board: _Board | None = None,
+                          stop: asyncio.Event | None = None) -> Report:
+    """跑第 i 个研究员；失败（超时除外：时间已经花完了，再跑备选就是让群友再等一整轮；被叫停的也除外）
+    就用它的备选模型再跑一次。几个研究员各自的主→备是先后进行的，研究员之间同时进行。"""
+    report = await run_researcher(model, task, board.stepper(i, model, False) if board else None, stop)
     backup = _backup(i)
-    if (not report.text or report.partial) and backup and backup != model and not report.error.endswith("timed out"):
+    if (not report.text or report.partial) and backup and backup != model \
+            and not report.error.endswith("timed out") and report.error != "stopped":
         logger.info("研究员 %s 失败（%s），改用备选 %s", model, report.error, backup)
         step = board.stepper(i, backup, True) if board else None
         if step is not None:
             step(t("research_doing_start"), 0)
-        second = await run_researcher(backup, task, step)
+        second = await run_researcher(backup, task, step, stop)
         if second.text and not second.partial or not report.text:
             if not second.text:
                 second.error = f"{model}: {report.error}; {backup}: {second.error}"
             report = second  # 备选交了完整报告（或两个都什么也没有）；否则留着第一个查到的资料
     if board is not None:
-        reason = t("research_reason_timeout") if report.error.endswith("timed out") else report.error.rsplit(": ", 1)[-1][:40]
+        reason = t("research_reason_timeout") if report.error.endswith("timed out") else \
+            t("research_reason_stopped") if report.error == "stopped" else report.error.rsplit(": ", 1)[-1][:40]
         key = "research_row_partial" if report.partial else "research_row_done" if report.text else "research_row_failed"
         board.set(i, t(key, label=_label(i), model=_name(report.model), reason=reason))
     return report
@@ -617,10 +650,18 @@ class ResearchTool(Tool):
         task = str(args.get("task", "")).strip()
         if not task:
             return failed(t("research_failed", reason="empty task"))
-        async with _slot():
-            board = _Board(config.RESEARCH_MODELS)
-            reports = await asyncio.gather(*(run_with_backup(i, m, task, board)
-                                             for i, m in enumerate(config.RESEARCH_MODELS)))
+        switch = stop_switch.get()
+        stop = switch.pressed if switch is not None else None
+        if switch is not None:
+            switch.arm()
+        try:
+            async with _slot():
+                board = _Board(config.RESEARCH_MODELS)
+                reports = await asyncio.gather(*(run_with_backup(i, m, task, board, stop)
+                                                 for i, m in enumerate(config.RESEARCH_MODELS)))
+        finally:
+            if switch is not None:
+                switch.disarm()
         blocks = []
         for i, r in enumerate(reports):
             label, model = _label(i), _name(r.model)
@@ -629,9 +670,13 @@ class ResearchTool(Tool):
                               + r.text[:REPORT_CHARS])
             else:
                 blocks.append(t("research_member_failed", label=label, model=model, reason=r.error))
+        stopped = any(r.error == "stopped" for r in reports)
+        if stopped:
+            blocks.append(t("research_stopped_note"))  # 提问的人要的是马上回答，别让模型再去查
         done = sum(1 for r in reports if r.text)
-        if not done:
+        if not done and not stopped:
             return failed(t("research_failed", reason="; ".join(f"{r.model}: {r.error}" for r in reports)))
         fails = len(reports) - done
-        summary = t("res_reports", n=done) + (t("res_fail_suffix", n=fails) if fails else "")
-        return Outcome("\n\n".join(blocks), True, summary)
+        summary = (t("res_reports", n=done) if done else t("res_failed")) + \
+            (t("res_fail_suffix", n=fails) if done and fails else "") + (t("res_stopped_suffix") if stopped else "")
+        return Outcome("\n\n".join(blocks), bool(done), summary)

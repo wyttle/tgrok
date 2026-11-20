@@ -41,9 +41,9 @@ async def _quiet(coro) -> None:
 
 
 class Bubble:
-    def __init__(self, msg: Message, markup: InlineKeyboardMarkup, abort: Callable[[], None]):
+    def __init__(self, msg: Message, markup: Callable[[], InlineKeyboardMarkup], abort: Callable[[], None]):
         self.msg = msg
-        self.markup = markup  # 生成过程中挂在气泡上的取消按钮
+        self._markup = markup  # 生成过程中挂在气泡上的按钮；每次更新现取，调研在跑时多一个叫停的按钮
         self._abort = abort  # 占位消息都发不出去时放弃整次生成
         self.sent: Message | None = None  # 当前正在编辑的那条消息
         self.finalized = ""  # 已定稿的分段消息承载的文本
@@ -97,7 +97,7 @@ class Bubble:
     async def _send_placeholder(self, text: str) -> None:
         for attempt in range(2):
             try:
-                self.sent = await self.msg.reply_text(text, reply_markup=self.markup)
+                self.sent = await self.msg.reply_text(text, reply_markup=self._markup())
                 return
             except RetryAfter as e:
                 # 群里被限流：等一下再发，不能因此放弃整条回复（模型这时已经在生成了）
@@ -121,7 +121,7 @@ class Bubble:
         plain = render.to_plain(text) + cursor
         if not final:
             plain = plain[-rich.PLAIN_CHARS:]  # 过程中的纯文本回退只改这一条，不拆出新消息
-        kb = None if final else self.markup
+        kb = None if final else self._markup()
         for attempt in range(2):
             editing = self.sent is not None
             try:
@@ -204,9 +204,9 @@ class Bubble:
         self._last_render = time.monotonic()
         try:
             if self.sent is None:
-                self.sent = await self.msg.reply_text(body, reply_markup=self.markup)
+                self.sent = await self.msg.reply_text(body, reply_markup=self._markup())
             else:
-                await self.sent.edit_text(body, reply_markup=self.markup)
+                await self.sent.edit_text(body, reply_markup=self._markup())
         except RetryAfter as e:
             logger.warning("刷新进度被 Telegram 限流，等 %.0f 秒", float(e.retry_after))
             await asyncio.sleep(float(e.retry_after) + 0.5)

@@ -73,7 +73,7 @@ async def _cancel(parts, canceller_id):
         answers.append(text)
 
     q = ns(data=f"c:{gen_id}", from_user=ns(id=canceller_id), answer=answer)
-    await chat.on_cancel_button(ns(callback_query=q), None)
+    await chat.on_button(ns(callback_query=q), None)
     if answers != [t("cancel_done")]:
         chat.active_generations[gen_id][0].cancel()
     result = await task

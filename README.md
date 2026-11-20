@@ -247,7 +247,9 @@ For questions that need real checking (memes and niche jargon, disputed claims, 
 model can call a `research` tool. The task goes to every model in `RESEARCH_MODELS` at once; each runs as a headless
 [omp](https://omp.sh) process that may only search and read public web pages, reads the actual pages, and returns key
 facts with the sources it read. All reports go back to the reply model, which compares them and decides what to
-trust. One call takes about 30 s to 2 min; the reply model keeps using `web_search` for quick lookups.
+trust. One call takes about 30 s to 2 min; the reply model keeps using `web_search` for quick lookups. While
+research runs, the progress bubble has a "Stop research, answer now" button (asker or admin): the researchers are
+stopped at once and the model answers from what they have found so far.
 
 Setup:
 
@@ -278,7 +280,9 @@ Setup:
 
 3. Set `RESEARCH_MODELS=myclaude/claude-opus-5-5,mygpt/gpt-6.1-sol` ("provider/model", see `omp models`).
    For backup endpoints, add another set of providers and list them in `RESEARCH_FALLBACK_MODELS` by position: a
-   researcher that fails is rerun once on its backup.
+   researcher that fails is rerun once on its backup. A researcher whose endpoint returns an error fails right
+   away: omp's own request retries are turned off (`tgrok/tools/research_omp.yml`), otherwise a dead endpoint
+   holds the whole call until `RESEARCH_TIMEOUT`.
    If one endpoint blocks the server directly (e.g. a Cloudflare 403), set `PI_PROXY_<PROVIDER>=socks5://user:pass@host:port`
    in `.env` (e.g. `PI_PROXY_GROK`); only that provider's requests go through the proxy.
 

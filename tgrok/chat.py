@@ -23,8 +23,8 @@ from .tg_auth import is_admin
 logger = logging.getLogger(__name__)
 
 _gen_count = count(1)
-# 正在生成的回复：gen_id → (任务, 提问者 id)，供取消按钮定位
-active_generations: dict[int, tuple[asyncio.Task, int]] = {}
+# 正在生成的回复：gen_id → (任务, 提问者 id, 叫停调研的开关)，供气泡上的按钮定位
+active_generations: dict[int, tuple[asyncio.Task, int, tools.StopSwitch]] = {}
 
 
 def _stage_line(round_idx: int) -> str:
@@ -33,8 +33,12 @@ def _stage_line(round_idx: int) -> str:
     return stages[min(round_idx, len(stages) - 1)]
 
 
-def _cancel_markup(gen_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(t("btn_cancel"), callback_data=f"c:{gen_id}")]])
+def _markup(gen_id: int, switch: tools.StopSwitch) -> InlineKeyboardMarkup:
+    """气泡上的按钮：取消；调研在跑时多一个「别查了，直接答」。"""
+    row = [InlineKeyboardButton(t("btn_cancel"), callback_data=f"c:{gen_id}")]
+    if switch.armed:
+        row.insert(0, InlineKeyboardButton(t("btn_stop_research"), callback_data=f"s:{gen_id}"))
+    return InlineKeyboardMarkup([row])
 
 
 def _without_vendor_extras(history: list[dict]) -> list[dict]:
@@ -222,14 +226,16 @@ async def stream_reply(msg: Message, history: list[dict], keep: Keep | None = No
     gen_id = next(_gen_count)
     task = asyncio.current_task()
     requester = msg.from_user.id if msg.from_user else 0
+    switch = tools.StopSwitch()
     if task is not None:
-        active_generations[gen_id] = (task, requester)
-    bubble = Bubble(msg, _cancel_markup(gen_id), abort=task.cancel if task is not None else (lambda: None))
+        active_generations[gen_id] = (task, requester, switch)
+    bubble = Bubble(msg, lambda: _markup(gen_id, switch), abort=task.cancel if task is not None else (lambda: None))
     bubble.open(_stage_line(0))
     models = _Models()
     images: list[send_image.Image] = []
     findings: list[dict] = []
     token = send_image.outbox.set(images)  # send_image 工具把要发的图攒到这里，正文定稿后再发
+    switch_token = tools.stop_switch.set(switch)
     try:
         try:
             draft = await _generate(history, bubble, msg.chat_id, models, findings)
@@ -266,6 +272,7 @@ async def stream_reply(msg: Message, history: list[dict], keep: Keep | None = No
         return ids, answer
     finally:
         send_image.outbox.reset(token)
+        tools.stop_switch.reset(switch_token)
         active_generations.pop(gen_id, None)
 
 
@@ -278,8 +285,9 @@ async def _answer_callback(q, text: str | None = None) -> None:
             raise
 
 
-async def on_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """取消按钮回调：找到对应生成任务并 cancel。仅提问者本人或管理员可取消。"""
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """气泡上按钮的回调，仅提问者本人或管理员可用。c:取消整条回复（cancel 生成任务）；
+    s:叫停正在跑的调研，模型用已经查到的资料接着作答。"""
     q = update.callback_query
     if q is None or not q.data:
         return
@@ -292,10 +300,16 @@ async def on_cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if entry is None:
         await _answer_callback(q, t("cancel_gone"))
         return
-    task, owner = entry
+    task, owner, switch = entry
     user = q.from_user
     if user is None or (user.id != owner and not is_admin(user.id)):
         await _answer_callback(q, t("cancel_denied"))
+        return
+    if q.data.startswith("s:"):
+        stopped = switch.press()
+        if stopped:
+            logger.info("用户叫停了调研")
+        await _answer_callback(q, t("stop_done" if stopped else "stop_gone"))
         return
     task.cancel()
     await _answer_callback(q, t("cancel_done"))
